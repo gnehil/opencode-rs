@@ -11,6 +11,7 @@
 //! like "give me the diagnostics for this file".
 
 pub mod client;
+pub mod diagnostics;
 pub mod framing;
 pub mod registry;
 

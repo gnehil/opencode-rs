@@ -127,7 +127,7 @@ impl Tool for LspTool {
 
             let output = match params.operation.as_str() {
                 "diagnostics" => {
-                    get_diagnostics(&file_path, &ctx.working_dir, params.severity.as_deref())?
+                    diagnostics(&file_path, &ctx.working_dir, params.severity.as_deref()).await?
                 }
                 "goToDefinition" | "findReferences" | "hover" => {
                     let line = params.line.unwrap_or(1);
@@ -175,14 +175,82 @@ impl Tool for LspTool {
     }
 }
 
-fn get_diagnostics(file_path: &PathBuf, working_dir: &PathBuf, severity: Option<&str>) -> Result<String> {
+async fn diagnostics(
+    file_path: &PathBuf,
+    working_dir: &PathBuf,
+    severity: Option<&str>,
+) -> Result<String> {
+    // Try the real LSP server first. If it works, prefer its output —
+    // it's semantically accurate (rust-analyzer / pyright / etc do
+    // real analysis, not just compiler shell-outs) and uniformly
+    // structured per language.
+    if let Some(text) = try_lsp_diagnostics(file_path, working_dir, severity).await {
+        return Ok(text);
+    }
+
+    // Fallback: legacy shell-out paths. Used when the LSP server
+    // isn't on PATH or fails to start. These are documented in the
+    // file-level comments as "best effort, may be wrong".
     let ext = file_path.extension().and_then(|e| e.to_str());
-    
     match ext {
         Some("rs") => get_rust_diagnostics(file_path, working_dir, severity),
         Some("ts") | Some("tsx") | Some("js") | Some("jsx") => get_js_diagnostics(file_path, working_dir, severity),
         Some("py") => get_python_diagnostics(file_path, working_dir, severity),
-        _ => Ok(format!("No LSP diagnostics available for {} - unsupported file type", file_path.display())),
+        _ => Ok(format!("No diagnostics available for {} - no LSP server registered and no shell-out fallback for this file type", file_path.display())),
+    }
+}
+
+/// Attempt the LSP path. Returns Some(formatted output) on success,
+/// None if the language isn't registered or the server failed to
+/// start (so the caller can fall back). Errors that originate inside
+/// a running LSP server (e.g. the server reports diagnostics but the
+/// response shape is bad) bubble up as Some(formatted error).
+async fn try_lsp_diagnostics(
+    file_path: &PathBuf,
+    working_dir: &PathBuf,
+    severity: Option<&str>,
+) -> Option<String> {
+    use crate::lsp::{diagnostics::fetch, registry};
+    if registry::for_path(file_path).is_none() {
+        return None;
+    }
+    match fetch(file_path, working_dir).await {
+        Ok(diags) => {
+            let filtered: Vec<_> = diags
+                .into_iter()
+                .filter(|d| match severity {
+                    Some("error") => d.severity == Some(1),
+                    Some("warning") => d.severity == Some(2),
+                    _ => true,
+                })
+                .collect();
+            if filtered.is_empty() {
+                Some(format!("No diagnostics for {}", file_path.display()))
+            } else {
+                Some(
+                    filtered
+                        .iter()
+                        .map(|d| d.format_line(file_path))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            }
+        }
+        Err(e) => {
+            // Server failed to spawn (binary missing) → fall through
+            // to shell-out. Any other failure (server crashed mid-
+            // diagnostics, ran out of memory, etc.) we report.
+            let msg = e.to_string();
+            if msg.contains("No such file") || msg.contains("not found") {
+                None
+            } else {
+                Some(format!(
+                    "LSP diagnostics failed for {}: {}",
+                    file_path.display(),
+                    e
+                ))
+            }
+        }
     }
 }
 
