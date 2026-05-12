@@ -63,7 +63,7 @@ impl McpAuthStore {
 
     pub async fn save(&self) -> anyhow::Result<()> {
         let entries = self.entries.read().await;
-        let content = serde_json::to_string(&entries)?;
+        let content = serde_json::to_string(&*entries)?;
         std::fs::write(&self.filepath, content)?;
         Ok(())
     }
@@ -176,11 +176,11 @@ fn html_error(error: &str) -> String {
 <head>
   <title>OpenCode - Authorization Failed</title>
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #1a1a2e; color: #eee; }
-    .container { text-align: center; padding: 2rem; }
-    h1 { color: #f87171; margin-bottom: 1rem; }
-    p { color: #aaa; }
-    .error { color: #fca5a5; font-family: monospace; margin-top: 1rem; padding: 1rem; background: rgba(248,113,113,0.1); border-radius: 0.5rem; }
+    body {{ font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #1a1a2e; color: #eee; }}
+    .container {{ text-align: center; padding: 2rem; }}
+    h1 {{ color: #f87171; margin-bottom: 1rem; }}
+    p {{ color: #aaa; }}
+    .error {{ color: #fca5a5; font-family: monospace; margin-top: 1rem; padding: 1rem; background: rgba(248,113,113,0.1); border-radius: 0.5rem; }}
   </style>
 </head>
 <body>
@@ -230,7 +230,7 @@ impl OAuthCallbackServer {
         let port = self.port;
 
         let app = Router::new()
-            .route(OAUTH_CALLBACK_PATH, get(|query: Query<CallbackQuery>| {
+            .route(OAUTH_CALLBACK_PATH, get(move |query: Query<CallbackQuery>| {
                 let pending = pending.clone();
                 async move {
                     handle_callback(query, pending).await
@@ -327,7 +327,7 @@ async fn handle_callback(
         }
     }
 
-    (StatusCode::OK, Html(HTML_SUCCESS))
+    (StatusCode::OK, Html(HTML_SUCCESS.to_string()))
 }
 
 pub fn generate_state() -> String {
@@ -446,7 +446,7 @@ impl McpOAuthProvider {
     }
 
     pub async fn complete_auth(&self, code: &str, token_endpoint: &str) -> anyhow::Result<OAuthTokens> {
-        let verifier = self.code_verifier()
+        let verifier = self.code_verifier().await
             .ok_or_else(|| anyhow::anyhow!("No code verifier found"))?;
 
         let redirect_uri = self.redirect_url();

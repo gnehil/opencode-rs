@@ -10,7 +10,7 @@ use crate::acp::session::ACPSessionManager;
 use crate::acp::types::*;
 use crate::session::SessionStore;
 use crate::provider::{Provider, ProviderID};
-use crate::provider::anthropic::AnthropicProvider;
+use crate::provider::AnthropicProvider;
 use crate::bus::EventBus;
 
 pub struct ACPServer {
@@ -44,17 +44,16 @@ impl ACPServer {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let stdin = stdin();
         let mut stdout = stdout();
 
         let (request_tx, mut request_rx) = mpsc::channel::<String>(64);
 
-        tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || {
             let stdin = stdin();
             for line in stdin.lock().lines() {
                 match line {
                     Ok(l) if !l.trim().is_empty() => {
-                        if request_tx.send(l).await.is_err() {
+                        if request_tx.blocking_send(l).is_err() {
                             break;
                         }
                     }

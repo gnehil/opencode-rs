@@ -43,7 +43,7 @@ impl WorktreeService {
         };
 
         let output = std::process::Command::new("git")
-            .args(["worktree", "add", "-b", &branch, worktree_path.to_string_lossy().to_string()])
+            .args(["worktree", "add", "-b", &branch, worktree_path.to_string_lossy().as_ref()])
             .current_dir(project_path)
             .output();
 
@@ -85,7 +85,7 @@ impl WorktreeService {
 
         if let Some(wt) = worktree {
             let output = std::process::Command::new("git")
-                .args(["worktree", "remove", "--force", wt.directory.to_string_lossy().to_string()])
+                .args(["worktree", "remove", "--force", wt.directory.to_string_lossy().as_ref()])
                 .current_dir(project_path)
                 .output();
 

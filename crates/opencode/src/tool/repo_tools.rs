@@ -50,15 +50,16 @@ impl Tool for RepoCloneTool {
 
             let target_path = params.path.unwrap_or_else(|| {
                 let repo_name = params.url.split('/').last().unwrap_or("repo");
-                format!("{}/{}", ctx.working_dir, repo_name.replace(".git", ""))
+                format!("{}/{}", ctx.working_dir.display(), repo_name.replace(".git", ""))
             });
 
+            let depth_str = params.depth.map(|d| d.to_string());
             let mut args = vec!["clone", &params.url, &target_path];
             if let Some(branch) = &params.branch {
                 args.extend(["--branch", branch]);
             }
-            if let Some(depth) = params.depth {
-                args.extend(["--depth", &depth.to_string()]);
+            if let Some(d) = depth_str.as_deref() {
+                args.extend(["--depth", d]);
             }
 
             let output = std::process::Command::new("git")

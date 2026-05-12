@@ -26,14 +26,15 @@ impl FileWatcher {
     pub fn new(path: &PathBuf) -> anyhow::Result<Self> {
         let (events_tx, events_rx) = mpsc::channel::<FileEvent>(256);
 
-        let event_handler = |event: Event| {
-            let tx = events_tx.clone();
-            if let Some(file_event) = Self::convert_event(event) {
-                let _ = tx.blocking_send(file_event);
+        let event_handler = move |res: notify::Result<Event>| {
+            if let Ok(event) = res {
+                if let Some(file_event) = Self::convert_event(event) {
+                    let _ = events_tx.blocking_send(file_event);
+                }
             }
         };
 
-        let watcher = RecommendedWatcher::new(event_handler, notify::Config::default())?;
+        let mut watcher = RecommendedWatcher::new(event_handler, notify::Config::default())?;
         watcher.watch(path, RecursiveMode::Recursive)?;
 
         Ok(Self { watcher, events_rx })

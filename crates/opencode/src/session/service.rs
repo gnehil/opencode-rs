@@ -229,6 +229,59 @@ impl SessionStore {
         Ok(parts_by_message)
     }
 
+    pub async fn save_message(&self, session_id: &SessionID, message: &Message) -> Result<()> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let id = match message {
+            Message::User(u) => u.id.to_string(),
+            Message::Assistant(a) => a.id.to_string(),
+        };
+        let data = serde_json::to_string(message)?;
+
+        sqlx::query(
+            "INSERT OR REPLACE INTO message (id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(&id)
+        .bind(session_id.to_string())
+        .bind(now)
+        .bind(now)
+        .bind(data)
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn save_text_part(
+        &self,
+        session_id: &SessionID,
+        message_id: &crate::id::MessageID,
+        text: &str,
+    ) -> Result<()> {
+        let part_id = crate::id::PartID::new();
+        let now = chrono::Utc::now().timestamp_millis();
+        let part = serde_json::json!({
+            "id": part_id.to_string(),
+            "messageID": message_id.to_string(),
+            "sessionID": session_id.to_string(),
+            "type": "text",
+            "text": text,
+        });
+
+        sqlx::query(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(part_id.to_string())
+        .bind(message_id.to_string())
+        .bind(session_id.to_string())
+        .bind(now)
+        .bind(now)
+        .bind(part.to_string())
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(())
+    }
+
     pub async fn get_messages_with_parts(&self, session_id: &SessionID) -> Result<Vec<WithParts>> {
         let messages = self.get_messages(session_id).await?;
         let parts_by_message = self.get_parts_by_session(session_id).await?;

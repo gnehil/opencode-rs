@@ -97,8 +97,9 @@ impl Tool for CodeSearchTool {
                 }
             }
 
-            if let Some(fp) = &params.file_pattern {
-                args.push(&format!("--include={}", fp));
+            let include_arg = params.file_pattern.as_ref().map(|fp| format!("--include={}", fp));
+            if let Some(ia) = include_arg.as_deref() {
+                args.push(ia);
             }
 
             let output = std::process::Command::new("grep")

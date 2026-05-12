@@ -592,7 +592,7 @@ pub enum ResourceData {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ToolKind {
     #[serde(rename = "execute")]
     Execute,

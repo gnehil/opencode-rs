@@ -5,7 +5,7 @@ use lazy_static::lazy_static;
 use super::id::ModelID;
 use super::model::ModelInfo;
 use super::request::CompletionRequest;
-use super::response::{CompletionResponse, StreamEvent, TokenUsage, ToolCall};
+use super::response::{CompletionResponse, TokenUsage};
 use super::trait_::{EventStream, Provider, ProviderError, ProviderResult};
 
 const API_URL: &str = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation";
@@ -70,6 +70,7 @@ impl AlibabaProvider {
     }
 }
 
+#[async_trait]
 impl Provider for AlibabaProvider {
     fn name(&self) -> &str { "alibaba" }
     fn default_model(&self) -> Option<&ModelInfo> { MODELS.first() }
@@ -77,14 +78,17 @@ impl Provider for AlibabaProvider {
 
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let model = request.model.to_string();
-        let messages: Vec<serde_json::Value> = request.messages.iter().map(|msg| match msg {
-            crate::message::Message::User(u) => serde_json::json!({
-                "role": "user", "content": u.summary.as_ref().and_then(|s| s.body.clone()).unwrap_or_default()
-            }),
-            crate::message::Message::Assistant(_) => serde_json::json!({ "role": "assistant", "content": "" }),
-        }).collect();
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(|msg| serde_json::json!({"role": msg.role, "content": msg.content}))
+            .collect();
 
-        let body = serde_json::json!({ "model": model, "input": { "messages": messages }, "parameters": { "max_tokens": request.max_tokens.unwrap_or(4096) } });
+        let body = serde_json::json!({
+            "model": model,
+            "input": { "messages": messages },
+            "parameters": { "max_tokens": request.max_tokens.unwrap_or(4096) }
+        });
 
         let response = self.client
             .post(API_URL)
@@ -92,18 +96,26 @@ impl Provider for AlibabaProvider {
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
-            .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .await?;
 
-        let data: serde_json::Value = response.json().await.map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(ProviderError::api(status.as_u16(), text));
+        }
+
+        let data: serde_json::Value = response.json().await?;
 
         Ok(CompletionResponse {
             content: data["output"]["text"].as_str().unwrap_or("").to_string(),
             tool_calls: vec![],
             usage: TokenUsage { input: 0, output: 0, cache_read: None, cache_write: None },
-            stop_reason: "stop".to_string(),
+            stop_reason: Some("stop".to_string()),
+            model,
         })
     }
 
-    async fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> { Err(ProviderError::StreamNotSupported) }
+    fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> {
+        Err(ProviderError::stream("streaming not implemented for alibaba"))
+    }
 }

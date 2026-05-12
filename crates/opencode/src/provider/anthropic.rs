@@ -168,15 +168,9 @@ impl AnthropicProvider {
         let messages: Vec<AnthropicMessage> = request
             .messages
             .iter()
-            .map(|msg| {
-                let (role, text) = match msg {
-                    crate::message::Message::User(_) => ("user".to_string(), String::new()),
-                    crate::message::Message::Assistant(_) => ("assistant".to_string(), String::new()),
-                };
-                AnthropicMessage {
-                    role,
-                    content: vec![AnthropicContent::Text { text }],
-                }
+            .map(|msg| AnthropicMessage {
+                role: msg.role.clone(),
+                content: vec![AnthropicContent::Text { text: msg.content.clone() }],
             })
             .collect();
 

@@ -170,6 +170,25 @@ pub enum Event {
 }
 
 impl Event {
+    pub fn session_id(&self) -> String {
+        match self {
+            Event::SessionCreate(e) => e.session_id.clone(),
+            Event::SessionUpdate(e) => e.session_id.clone(),
+            Event::SessionDelete(e) => e.session_id.clone(),
+            Event::MessageCreate(e) => e.session_id.clone(),
+            Event::MessageStream(e) => e.session_id.clone(),
+            Event::ToolStart(e) => e.session_id.clone(),
+            Event::ToolComplete(e) => e.session_id.clone(),
+            Event::ToolError(e) => e.session_id.clone(),
+            Event::McpConnected(_) => String::new(),
+            Event::McpDisconnected(_) => String::new(),
+            Event::McpToolsChanged(_) => String::new(),
+            Event::PermissionAsked(e) => e.session_id.clone(),
+            Event::MessagePartUpdated(e) => e.session_id.clone(),
+            Event::MessagePartDelta(e) => e.session_id.clone(),
+        }
+    }
+
     pub fn id(&self) -> EventId {
         match self {
             Event::SessionCreate(e) => e.session_id.clone(),

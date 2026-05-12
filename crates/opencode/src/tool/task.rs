@@ -166,12 +166,12 @@ impl Tool for TaskTool {
             let provider: Arc<dyn Provider> = Arc::new(AnthropicProvider::from_env()
                 .map_err(|e| anyhow::anyhow!("Failed to initialize Anthropic provider: {}", e))?);
 
-            let data_dir = std::path::PathBuf::from(
-                std::env::var("OPENCODE_DATA_DIR")
-                    .unwrap_or_else(|_| dirs::data_local_dir()
-                        .map(|p| p.join("opencode"))
-                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")))
-            );
+            let data_dir = std::env::var("OPENCODE_DATA_DIR")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| dirs::data_local_dir()
+                    .map(|p| p.join("opencode"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")));
 
             let store = Arc::new(SessionStore::new(data_dir).await?);
 

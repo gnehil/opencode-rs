@@ -38,18 +38,7 @@ impl AzureProvider {
     }
 
     fn build_messages(&self, request: &CompletionRequest) -> Vec<AzureMessage> {
-        request.messages.iter().map(|msg| {
-            match msg {
-                crate::message::Message::User(u) => AzureMessage {
-                    role: "user".to_string(),
-                    content: u.id.to_string(),
-                },
-                crate::message::Message::Assistant(a) => AzureMessage {
-                    role: "assistant".to_string(),
-                    content: a.id.to_string(),
-                },
-            }
-        }).collect()
+        request.messages.iter().map(|msg| AzureMessage { role: msg.role.clone(), content: msg.content.clone() }).collect()
     }
 
     fn build_request(&self, request: &CompletionRequest, stream: bool) -> AzureRequest {

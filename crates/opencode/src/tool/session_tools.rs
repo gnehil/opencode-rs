@@ -4,7 +4,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 use super::context::ToolContext;
-use itertools::Itertools;
+use super::result::ToolResult;
 use super::r#trait::Tool;
 use crate::session::SessionStore;
 
@@ -58,12 +58,12 @@ impl Tool for SessionListTool {
             let params: SessionListParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid session list parameters: {}", e))?;
 
-            let data_dir = std::path::PathBuf::from(
-                std::env::var("OPENCODE_DATA_DIR")
-                    .unwrap_or_else(|_| dirs::data_local_dir()
-                        .map(|p| p.join("opencode"))
-                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")))
-            );
+            let data_dir = std::env::var("OPENCODE_DATA_DIR")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| dirs::data_local_dir()
+                    .map(|p| p.join("opencode"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")));
 
             let store = Arc::new(SessionStore::new(data_dir).await?);
             let sessions = store.list(None).await?;
@@ -121,12 +121,12 @@ impl Tool for SessionInfoTool {
             let params: SessionInfoParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid session info parameters: {}", e))?;
 
-            let data_dir = std::path::PathBuf::from(
-                std::env::var("OPENCODE_DATA_DIR")
-                    .unwrap_or_else(|_| dirs::data_local_dir()
-                        .map(|p| p.join("opencode"))
-                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")))
-            );
+            let data_dir = std::env::var("OPENCODE_DATA_DIR")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| dirs::data_local_dir()
+                    .map(|p| p.join("opencode"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")));
 
             let store = Arc::new(SessionStore::new(data_dir).await?);
             let session_id = crate::id::SessionID::parse(&params.session_id)
@@ -207,12 +207,12 @@ impl Tool for SessionReadTool {
             let params: SessionReadParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid session read parameters: {}", e))?;
 
-            let data_dir = std::path::PathBuf::from(
-                std::env::var("OPENCODE_DATA_DIR")
-                    .unwrap_or_else(|_| dirs::data_local_dir()
-                        .map(|p| p.join("opencode"))
-                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")))
-            );
+            let data_dir = std::env::var("OPENCODE_DATA_DIR")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| dirs::data_local_dir()
+                    .map(|p| p.join("opencode"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")));
 
             let store = Arc::new(SessionStore::new(data_dir).await?);
             let session_id = crate::id::SessionID::parse(&params.session_id)
@@ -234,6 +234,7 @@ impl Tool for SessionReadTool {
                             crate::message::Part::Text(t) => Some(t.text.clone()),
                             _ => None,
                         })
+                        .collect::<Vec<_>>()
                         .join("\n");
                     format!("[{}] {}", role, content)
                 })
@@ -303,12 +304,12 @@ impl Tool for SessionSearchTool {
             let params: SessionSearchParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid session search parameters: {}", e))?;
 
-            let data_dir = std::path::PathBuf::from(
-                std::env::var("OPENCODE_DATA_DIR")
-                    .unwrap_or_else(|_| dirs::data_local_dir()
-                        .map(|p| p.join("opencode"))
-                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")))
-            );
+            let data_dir = std::env::var("OPENCODE_DATA_DIR")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| dirs::data_local_dir()
+                    .map(|p| p.join("opencode"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")));
 
             let store = Arc::new(SessionStore::new(data_dir).await?);
             let sessions = store.list(None).await?;

@@ -20,7 +20,7 @@ impl ProtectedFiles {
     }
 
     fn default_protected_patterns() -> Vec<String> {
-        vec![
+        [
             ".env",
             ".env.local",
             ".env.*",
@@ -48,13 +48,16 @@ impl ProtectedFiles {
             "gnupg",
             ".gnupg",
         ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
     }
 
-    pub fn add_protected(&self, path: PathBuf) {
+    pub async fn add_protected(&self, path: PathBuf) {
         self.protected.write().await.insert(path);
     }
 
-    pub fn remove_protected(&self, path: &PathBuf) {
+    pub async fn remove_protected(&self, path: &PathBuf) {
         self.protected.write().await.remove(path);
     }
 
@@ -62,7 +65,7 @@ impl ProtectedFiles {
         self.patterns.push(pattern);
     }
 
-    pub fn is_protected(&self, path: &PathBuf) -> bool {
+    pub async fn is_protected(&self, path: &PathBuf) -> bool {
         let protected = self.protected.read().await;
         if protected.contains(path) {
             return true;
@@ -82,15 +85,15 @@ impl ProtectedFiles {
         false
     }
 
-    pub fn check_write_allowed(&self, path: &PathBuf) -> anyhow::Result<()> {
-        if self.is_protected(path) {
+    pub async fn check_write_allowed(&self, path: &PathBuf) -> anyhow::Result<()> {
+        if self.is_protected(path).await {
             anyhow::bail!("File {:?} is protected and cannot be modified", path);
         }
         Ok(())
     }
 
-    pub fn check_read_allowed(&self, path: &PathBuf) -> anyhow::Result<()> {
-        let protected = self.protected.read().await;
+    pub async fn check_read_allowed(&self, _path: &PathBuf) -> anyhow::Result<()> {
+        let _protected = self.protected.read().await;
         Ok(())
     }
 }

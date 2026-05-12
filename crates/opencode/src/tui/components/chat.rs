@@ -81,10 +81,10 @@ impl Chat {
                 if i == 0 {
                     Line::from(vec![
                         Span::styled("You: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                        Span::raw(line),
+                        Span::raw(line.to_string()),
                     ])
                 } else {
-                    Line::from(Span::raw(line))
+                    Line::from(Span::raw(line.to_string()))
                 }
             })
             .collect();
@@ -110,7 +110,7 @@ impl Chat {
             match part {
                 Part::Text(text_part) => {
                     for line in text_part.text.lines() {
-                        lines.push(Line::from(Span::raw(line)));
+                        lines.push(Line::from(Span::raw(line.to_string())));
                     }
                 }
                 Part::Reasoning(reasoning_part) => {
@@ -118,7 +118,7 @@ impl Chat {
                         Span::styled("[Thinking]", Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC)),
                     ]));
                     for line in reasoning_part.text.lines() {
-                        lines.push(Line::from(Span::styled(line, Style::default().fg(Color::DarkGray))));
+                        lines.push(Line::from(Span::styled(line.to_string(), Style::default().fg(Color::DarkGray))));
                     }
                 }
                 Part::Tool(tool_part) => {

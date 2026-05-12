@@ -56,6 +56,7 @@ impl GitLabProvider {
     }
 }
 
+#[async_trait]
 impl Provider for GitLabProvider {
     fn name(&self) -> &str { "gitlab" }
     fn default_model(&self) -> Option<&ModelInfo> { MODELS.first() }
@@ -64,12 +65,7 @@ impl Provider for GitLabProvider {
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let url = format!("{}/api/v4/chat/completions", self.base_url);
         let model = request.model.to_string();
-        let messages: Vec<serde_json::Value> = request.messages.iter().map(|msg| match msg {
-            crate::message::Message::User(u) => serde_json::json!({
-                "role": "user", "content": u.summary.as_ref().and_then(|s| s.body.clone()).unwrap_or_default()
-            }),
-            crate::message::Message::Assistant(_) => serde_json::json!({ "role": "assistant", "content": "" }),
-        }).collect();
+        let messages: Vec<serde_json::Value> = request.messages.iter().map(|msg| serde_json::json!({"role": msg.role, "content": msg.content})).collect();
 
         let body = serde_json::json!({ "model": model, "messages": messages, "max_tokens": request.max_tokens.unwrap_or(4096) });
 
@@ -80,17 +76,18 @@ impl Provider for GitLabProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
-        let data: serde_json::Value = response.json().await.map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        let data: serde_json::Value = response.json().await.map_err(|e| ProviderError::api(0, e.to_string()))?;
 
         Ok(CompletionResponse {
             content: data["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string(),
             tool_calls: vec![],
             usage: TokenUsage { input: 0, output: 0, cache_read: None, cache_write: None },
-            stop_reason: "stop".to_string(),
+            stop_reason: Some("stop".to_string()),
+            model: model.clone(),
         })
     }
 
-    async fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> { Err(ProviderError::StreamNotSupported) }
+    fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> { Err(ProviderError::stream("streaming not implemented")) }
 }

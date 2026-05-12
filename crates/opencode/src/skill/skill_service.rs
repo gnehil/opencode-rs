@@ -78,13 +78,13 @@ impl SkillService {
     fn get_global_skill_dirs(&self) -> Vec<PathBuf> {
         let mut dirs = Vec::new();
 
-        if let Some(home) = dirs::BaseDirs::new() {
-            let claude_skills = home.home_dir().join(".claude").join("skills");
+        if let Some(home) = dirs::home_dir() {
+            let claude_skills = home.join(".claude").join("skills");
             if claude_skills.exists() {
                 dirs.push(claude_skills);
             }
 
-            let agents_skills = home.home_dir().join(".agents").join("skills");
+            let agents_skills = home.join(".agents").join("skills");
             if agents_skills.exists() {
                 dirs.push(agents_skills);
             }
@@ -112,7 +112,7 @@ impl SkillService {
         for entry in walker {
             let path = entry.path();
             if path.file_name().map(|n| n == SKILL_FILE_NAME).unwrap_or(false) {
-                if let Some(skill) = self.parse_skill_file(path) {
+                if let Some(skill) = self.parse_skill_file(&path.to_path_buf()) {
                     skills.insert(skill.name.clone(), skill);
                 }
             }
@@ -180,7 +180,7 @@ impl SkillService {
                     "<skill>\n<name>{}</name>\n<description>{}</description>\n<location>{}</location>\n</skill>\n",
                     skill.name,
                     skill.description.as_deref().unwrap_or(""),
-                    skill.location
+                    skill.location.display()
                 ));
             }
             output.push_str("</available_skills>");

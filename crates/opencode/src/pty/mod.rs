@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, RwLock};
 use serde::{Deserialize, Serialize};
-use portable_pty::{PtyPair, PtySize as PortablePtySize, CommandBuilder, PtySystem};
+use portable_pty::{PtyPair, PtySize as PortablePtySize, CommandBuilder, PtySystem, Child};
 use anyhow::Result;
 
 const BUFFER_LIMIT: usize = 1024 * 1024 * 2;
@@ -62,6 +62,8 @@ pub struct PtySession {
     pub buffer_cursor: usize,
     pub cursor: Arc<RwLock<usize>>,
     pub pair: Arc<std::sync::Mutex<Option<PtyPair>>>,
+    pub child: Arc<std::sync::Mutex<Option<Box<dyn Child + Send + Sync>>>>,
+    pub writer: Arc<std::sync::Mutex<Option<Box<dyn std::io::Write + Send>>>>,
     output_tx: mpsc::Sender<Vec<u8>>,
     killed: Arc<AtomicBool>,
     exited: Arc<AtomicBool>,
@@ -106,7 +108,7 @@ impl PtyService {
         let title = input.title.clone()
             .unwrap_or_else(|| format!("Terminal {}", &id.0[id.0.len().saturating_sub(4)..]));
 
-        let pty_system: PtySystem = portable_pty::native_pty_system();
+        let pty_system: Box<dyn PtySystem + Send> = portable_pty::native_pty_system();
         let pair = pty_system.openpty(PortablePtySize {
             rows: 24,
             cols: 80,
@@ -117,20 +119,21 @@ impl PtyService {
         let mut cmd = CommandBuilder::new(&command);
         cmd.args(&args);
         cmd.cwd(&cwd);
-        
+
         cmd.env("TERM", "xterm-256color");
         cmd.env("OPENCODE_TERMINAL", "1");
-        
+
         if let Some(custom_env) = &input.env {
             for (key, value) in custom_env {
                 cmd.env(key, value);
             }
         }
 
-        let mut child = pair.slave.spawn_command(cmd)?;
-        let pid = child.pid();
-        
-        let reader = pair.master.take_reader()?;
+        let child = pair.slave.spawn_command(cmd)?;
+        let pid = child.process_id().unwrap_or(0);
+
+        let reader = pair.master.try_clone_reader()?;
+        let writer = pair.master.take_writer()?;
         let (output_tx, _output_rx) = mpsc::channel::<Vec<u8>>(256);
 
         let info = PtyInfo {
@@ -140,7 +143,7 @@ impl PtyService {
             args,
             cwd,
             status: PtyStatus::Running,
-            pid: pid as u32,
+            pid,
             exit_code: None,
         };
 
@@ -150,6 +153,10 @@ impl PtyService {
         let buffer = Arc::new(RwLock::new(Vec::new()));
         let cursor = Arc::new(RwLock::new(0usize));
         let pair_arc = Arc::new(std::sync::Mutex::new(Some(pair)));
+        let child_arc: Arc<std::sync::Mutex<Option<Box<dyn Child + Send + Sync>>>> =
+            Arc::new(std::sync::Mutex::new(Some(child)));
+        let writer_arc: Arc<std::sync::Mutex<Option<Box<dyn std::io::Write + Send>>>> =
+            Arc::new(std::sync::Mutex::new(Some(writer)));
         let killed = Arc::new(AtomicBool::new(false));
         let exited = Arc::new(AtomicBool::new(false));
 
@@ -161,6 +168,8 @@ impl PtyService {
                 buffer_cursor: 0,
                 cursor: cursor.clone(),
                 pair: pair_arc.clone(),
+                child: child_arc.clone(),
+                writer: writer_arc.clone(),
                 output_tx: output_tx.clone(),
                 killed: killed.clone(),
                 exited: exited.clone(),
@@ -188,17 +197,17 @@ impl PtyService {
                         let cursor_clone = cursor_clone.clone();
                         let buffer_clone = buffer_clone.clone();
                         let output_tx_clone = output_tx_clone.clone();
-                        
+
                         tokio::runtime::Handle::current().block_on(async {
                             *cursor_clone.write().await += n;
                             buffer_clone.write().await.extend_from_slice(&data);
-                            
+
                             if buffer_clone.read().await.len() > BUFFER_LIMIT {
                                 let mut buffer = buffer_clone.write().await;
                                 let excess = buffer.len() - BUFFER_LIMIT;
                                 *buffer = buffer[excess..].to_vec();
                             }
-                            
+
                             let _ = output_tx_clone.send(data).await;
                         });
                     }
@@ -209,28 +218,34 @@ impl PtyService {
 
         let exited_wait = exited.clone();
         let killed_wait = killed.clone();
+        let child_wait = child_arc.clone();
+        let sessions_for_wait = sessions_clone.clone();
+        let session_id_for_wait = session_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            let result = child.wait();
+            let status = {
+                let mut guard = child_wait.lock().unwrap();
+                match guard.as_mut() {
+                    Some(c) => c.wait(),
+                    None => return,
+                }
+            };
             if killed_wait.load(Ordering::SeqCst) {
                 return;
             }
-            match result {
-                Ok(status) => {
-                    let exit_code = status.exit_code();
-                    exited_wait.store(true, Ordering::SeqCst);
-                    tokio::runtime::Handle::current().block_on(async {
-                        let mut sessions = sessions_clone.write().await;
-                        if let Some(session) = sessions.get_mut(&session_id) {
-                            if !session.killed.load(Ordering::SeqCst) {
-                                session.info.status = PtyStatus::Exited;
-                                session.info.exit_code = Some(exit_code);
-                            }
+            if let Ok(status) = status {
+                let exit_code = status.exit_code();
+                exited_wait.store(true, Ordering::SeqCst);
+                tokio::runtime::Handle::current().block_on(async {
+                    let mut sessions = sessions_for_wait.write().await;
+                    if let Some(session) = sessions.get_mut(&session_id_for_wait) {
+                        if !session.killed.load(Ordering::SeqCst) {
+                            session.info.status = PtyStatus::Exited;
+                            session.info.exit_code = Some(exit_code as i32);
                         }
-                        event_bus_clone.publish(crate::bus::Event::session_update(&session_id));
-                    });
-                }
-                Err(_) => {}
+                    }
+                    event_bus_clone.publish(crate::bus::Event::session_update(&session_id_for_wait));
+                });
             }
         });
 
@@ -266,10 +281,8 @@ impl PtyService {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.remove(&id.0) {
             session.killed.store(true, Ordering::SeqCst);
-            if let Some(pair) = session.pair.lock().unwrap().as_mut() {
-                if let Some(mut child) = pair.slave.child() {
-                    let _ = child.kill();
-                }
+            if let Some(c) = session.child.lock().unwrap().as_mut() {
+                let _ = c.kill();
             }
             self.event_bus.publish(crate::bus::Event::session_delete(&id.0));
         }
@@ -301,21 +314,22 @@ impl PtyService {
                 return Err(anyhow::anyhow!("Session has exited"));
             }
             let data_clone = data.to_vec();
-            let pair_arc = session.pair.clone();
+            let writer_arc = session.writer.clone();
             let killed_check = session.killed.clone();
-            
-            tokio::task::spawn_blocking(move || {
+
+            let join: Result<Result<()>, _> = tokio::task::spawn_blocking(move || -> Result<()> {
                 use std::io::Write;
                 if killed_check.load(Ordering::SeqCst) {
                     return Ok(());
                 }
-                if let Some(pair) = pair_arc.lock().unwrap().as_mut() {
-                    let mut writer = pair.master.take_writer()?;
+                if let Some(writer) = writer_arc.lock().unwrap().as_mut() {
                     writer.write_all(&data_clone)?;
                     writer.flush()?;
                 }
                 Ok(())
-            }).await?;
+            })
+            .await;
+            join??;
         }
         Ok(())
     }
@@ -326,7 +340,7 @@ impl PtyService {
             let start = session.buffer_cursor;
             let end = *session.cursor.read().await;
             let from = cursor.unwrap_or(0);
-            
+
             let offset = from.saturating_sub(start);
             let buffer = session.buffer.read().await;
             let data = if offset < buffer.len() {
@@ -341,11 +355,6 @@ impl PtyService {
         }
     }
 
-    pub async fn subscribe(&self, id: &PtyID) -> Option<mpsc::Receiver<Vec<u8>>> {
-        let sessions = self.sessions.read().await;
-        sessions.get(&id.0).map(|s| s.output_tx.subscribe())
-    }
-
     pub async fn kill(&self, id: &PtyID) -> Result<()> {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(&id.0) {
@@ -353,10 +362,8 @@ impl PtyService {
                 return Ok(());
             }
             session.killed.store(true, Ordering::SeqCst);
-            if let Some(pair) = session.pair.lock().unwrap().as_mut() {
-                if let Some(mut child) = pair.slave.child() {
-                    let _ = child.kill();
-                }
+            if let Some(c) = session.child.lock().unwrap().as_mut() {
+                let _ = c.kill();
             }
             session.info.status = PtyStatus::Exited;
         }

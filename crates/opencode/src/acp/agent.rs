@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{broadcast, mpsc, RwLock};
 
 use anyhow::Result;
 use serde_json::Value;
@@ -10,7 +11,7 @@ use crate::acp::types::*;
 use crate::bus::{EventBus, Event};
 use crate::session::SessionStore;
 use crate::provider::{Provider, ProviderID};
-use crate::permission::{PermissionRequest, PermissionReply};
+use crate::permission::{PermissionRequest, Reply as PermissionReply};
 
 pub struct ACPAgent {
     session_manager: Arc<ACPSessionManager>,
@@ -732,7 +733,10 @@ impl ACPAgent {
         let request: PromptRequest = serde_json::from_value(params)?;
 
         let session = self.session_manager.get(&request.session_id).await?;
-        let model = session.model.clone().unwrap_or_else(|| self.get_default_model()?);
+        let model = match session.model.clone() {
+            Some(m) => m,
+            None => self.get_default_model()?,
+        };
 
         let prompt_text = self.extract_prompt_text(&request.prompt);
 
@@ -896,14 +900,15 @@ impl ACPAgent {
                         kind: to_tool_kind(&tool_name),
                         status: ToolCallStatus::Pending,
                         locations: vec![],
-                        raw_input: serde_json::to_value(&tool_part.state.input)?,
+                        raw_input: tool_state_input(&tool_part.state),
                     };
 
                     let notification_tx = self.notification_tx.clone();
                     self.send_session_update(acp_session_id.clone(), update, &notification_tx).await?;
                 }
                 crate::message::Part::Text(text_part) => {
-                    if let Some(text) = &text_part.text {
+                    let text = &text_part.text;
+                    {
                         let update_type = match &msg.info {
                             crate::message::Message::User(_) => SessionUpdateType::UserMessageChunk {
                                 message_id: match &msg.info {
@@ -917,9 +922,12 @@ impl ACPAgent {
                                     crate::message::Message::Assistant(a) => a.id.to_string(),
                                     _ => "".to_string(),
                                 },
-                                content: ContentBlock::Text { text: text.clone(), annotations: None },
+                                content: TextContent {
+                                    type_: "text".to_string(),
+                                    text: text.clone(),
+                                    annotations: None,
+                                },
                             },
-                            _ => continue,
                         };
 
                         let notification_tx = self.notification_tx.clone();
@@ -1001,6 +1009,17 @@ struct TodoEntry {
     status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     priority: Option<String>,
+}
+
+fn tool_state_input(state: &crate::message::ToolState) -> Value {
+    use crate::message::ToolState;
+    let map = match state {
+        ToolState::Pending(p) => &p.input,
+        ToolState::Running(r) => &r.input,
+        ToolState::Completed(c) => &c.input,
+        ToolState::Error(e) => &e.input,
+    };
+    serde_json::to_value(map).unwrap_or(Value::Null)
 }
 
 fn build_available_models(providers: &[ProviderEntry]) -> Vec<ModelOption> {

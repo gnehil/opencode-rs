@@ -56,6 +56,7 @@ impl VertexProvider {
     }
 }
 
+#[async_trait]
 impl Provider for VertexProvider {
     fn name(&self) -> &str { "google-vertex" }
     fn default_model(&self) -> Option<&ModelInfo> { MODELS.first() }
@@ -68,13 +69,7 @@ impl Provider for VertexProvider {
             self.location, self.project_id, self.location, model
         );
 
-        let messages: Vec<serde_json::Value> = request.messages.iter().map(|msg| match msg {
-            crate::message::Message::User(u) => serde_json::json!({
-                "role": "user",
-                "parts": [{"text": u.summary.as_ref().and_then(|s| s.body.clone()).unwrap_or_default()}]
-            }),
-            crate::message::Message::Assistant(_) => serde_json::json!({ "role": "model", "parts": [{"text": ""}] }),
-        }).collect();
+        let messages: Vec<serde_json::Value> = request.messages.iter().map(|msg| serde_json::json!({"role": msg.role, "content": msg.content})).collect();
 
         let body = serde_json::json!({ "contents": messages, "generationConfig": { "maxOutputTokens": request.max_tokens.unwrap_or(4096) } });
 
@@ -85,9 +80,9 @@ impl Provider for VertexProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
-        let data: serde_json::Value = response.json().await.map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        let data: serde_json::Value = response.json().await.map_err(|e| ProviderError::api(0, e.to_string()))?;
 
         let content = data["candidates"][0]["content"]["parts"][0]["text"]
             .as_str().unwrap_or("").to_string();
@@ -96,9 +91,10 @@ impl Provider for VertexProvider {
             content,
             tool_calls: vec![],
             usage: TokenUsage { input: 0, output: 0, cache_read: None, cache_write: None },
-            stop_reason: data["candidates"][0]["finishReason"].as_str().unwrap_or("STOP").to_string(),
+            stop_reason: Some(data["candidates"][0]["finishReason"].as_str().unwrap_or("STOP").to_string()),
+            model: model.clone(),
         })
     }
 
-    async fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> { Err(ProviderError::StreamNotSupported) }
+    fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> { Err(ProviderError::stream("streaming not implemented")) }
 }

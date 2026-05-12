@@ -86,12 +86,12 @@ impl Tool for BackgroundOutputTool {
             let params: BackgroundOutputParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid background_output parameters: {}", e))?;
 
-            let data_dir = std::path::PathBuf::from(
-                std::env::var("OPENCODE_DATA_DIR")
-                    .unwrap_or_else(|_| dirs::data_local_dir()
-                        .map(|p| p.join("opencode"))
-                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")))
-            );
+            let data_dir = std::env::var("OPENCODE_DATA_DIR")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| dirs::data_local_dir()
+                    .map(|p| p.join("opencode"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")));
 
             let store = std::sync::Arc::new(crate::session::SessionStore::new(data_dir).await?);
             

@@ -12,6 +12,10 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
+    pub fn new(output: impl Into<String>) -> Self {
+        Self::text(output)
+    }
+
     pub fn text(output: impl Into<String>) -> Self {
         Self {
             output: output.into(),

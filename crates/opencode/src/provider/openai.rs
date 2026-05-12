@@ -223,13 +223,7 @@ impl OpenAIProvider {
         let messages: Vec<OpenAIMessage> = request
             .messages
             .iter()
-            .map(|msg| {
-                let (role, text) = match msg {
-                    crate::message::Message::User(_) => ("user".to_string(), String::new()),
-                    crate::message::Message::Assistant(_) => ("assistant".to_string(), String::new()),
-                };
-                OpenAIMessage { role, content: text }
-            })
+            .map(|msg| OpenAIMessage { role: msg.role.clone(), content: msg.content.clone() })
             .collect();
 
         let tools: Vec<OpenAITool> = request

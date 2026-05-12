@@ -28,16 +28,10 @@ impl GoogleProvider {
 
     fn build_contents(&self, request: &CompletionRequest) -> Vec<GoogleContent> {
         request.messages.iter().map(|msg| {
-            let text = match msg {
-                crate::message::Message::User(u) => u.id.to_string(),
-                crate::message::Message::Assistant(a) => a.id.to_string(),
-            };
+            let role = if msg.role == "assistant" { "model".to_string() } else { msg.role.clone() };
             GoogleContent {
-                role: match msg {
-                    crate::message::Message::User(_) => "user".to_string(),
-                    crate::message::Message::Assistant(_) => "model".to_string(),
-                },
-                parts: vec![GooglePart { text }],
+                role,
+                parts: vec![GooglePart { text: msg.content.clone() }],
             }
         }).collect()
     }

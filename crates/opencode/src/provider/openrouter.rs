@@ -72,6 +72,7 @@ impl OpenRouterProvider {
     }
 }
 
+#[async_trait]
 impl Provider for OpenRouterProvider {
     fn name(&self) -> &str { "openrouter" }
 
@@ -81,18 +82,7 @@ impl Provider for OpenRouterProvider {
 
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let model = request.model.to_string();
-        let messages: Vec<serde_json::Value> = request.messages.iter().map(|msg| {
-            match msg {
-                crate::message::Message::User(u) => serde_json::json!({
-                    "role": "user",
-                    "content": u.summary.as_ref().and_then(|s| s.body.clone()).unwrap_or_default()
-                }),
-                crate::message::Message::Assistant(_) => serde_json::json!({
-                    "role": "assistant",
-                    "content": ""
-                }),
-            }
-        }).collect();
+        let messages: Vec<serde_json::Value> = request.messages.iter().map(|msg| serde_json::json!({"role": msg.role, "content": msg.content})).collect();
 
         let body = serde_json::json!({
             "model": model,
@@ -109,10 +99,10 @@ impl Provider for OpenRouterProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
         let data: serde_json::Value = response.json().await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
         let content = data["choices"][0]["message"]["content"]
             .as_str().unwrap_or("").to_string();
@@ -121,16 +111,17 @@ impl Provider for OpenRouterProvider {
             content,
             tool_calls: vec![],
             usage: TokenUsage {
-                input: data["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as i32,
-                output: data["usage"]["completion_tokens"].as_u64().unwrap_or(0) as i32,
+                input: data["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
+                output: data["usage"]["completion_tokens"].as_u64().unwrap_or(0),
                 cache_read: None,
                 cache_write: None,
             },
-            stop_reason: data["choices"][0]["finish_reason"].as_str().unwrap_or("stop").to_string(),
+            stop_reason: Some(data["choices"][0]["finish_reason"].as_str().unwrap_or("stop").to_string()),
+            model: model.clone(),
         })
     }
 
-    async fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> {
-        Err(ProviderError::StreamNotSupported)
+    fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> {
+        Err(ProviderError::stream("streaming not implemented"))
     }
 }
