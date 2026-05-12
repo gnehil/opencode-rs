@@ -133,7 +133,79 @@ impl Provider for CohereProvider {
         })
     }
 
-    fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> {
-        Err(ProviderError::stream("streaming not implemented"))
+    fn stream(&self, request: CompletionRequest) -> ProviderResult<EventStream> {
+        // Cohere /v1/chat streams NDJSON with `event_type`-discriminated
+        // chunks:
+        //   {"event_type":"stream-start","generation_id":"..."}
+        //   {"event_type":"text-generation","text":"hi"}
+        //   {"event_type":"stream-end","finish_reason":"COMPLETE","response":{...}}
+        let model = request.model.to_string();
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(crate::provider::openai_compat_message_json)
+            .collect();
+        let body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "max_tokens": request.max_tokens.unwrap_or(4096),
+            "stream": true,
+        });
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+
+        let stream = async_stream::try_stream! {
+            use futures::StreamExt;
+            let response = client
+                .post(API_URL)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await?;
+            let response = response.error_for_status()
+                .map_err(|e| ProviderError::api(e.status().map(|s| s.as_u16()).unwrap_or(0), e.to_string()))?;
+            let mut bytes = response.bytes_stream();
+            let mut buffer = String::new();
+            while let Some(chunk) = bytes.next().await.transpose()? {
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(nl) = buffer.find('\n') {
+                    let line: String = buffer.drain(..=nl).collect();
+                    let line = line.trim();
+                    if line.is_empty() { continue; }
+                    let v: serde_json::Value = match serde_json::from_str(line) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    match v["event_type"].as_str() {
+                        Some("text-generation") => {
+                            let delta = v["text"].as_str().unwrap_or("").to_string();
+                            if !delta.is_empty() {
+                                yield StreamEvent {
+                                    event_type: "content_block_delta".to_string(),
+                                    delta: Some(delta),
+                                    tool_call: None,
+                                    stop_reason: None,
+                                    usage: None,
+                                };
+                            }
+                        }
+                        Some("stream-end") => {
+                            let usage = TokenUsage {
+                                input: v["response"]["meta"]["tokens"]["input_tokens"].as_u64().unwrap_or(0),
+                                output: v["response"]["meta"]["tokens"]["output_tokens"].as_u64().unwrap_or(0),
+                                cache_read: None,
+                                cache_write: None,
+                            };
+                            let stop = v["finish_reason"].as_str().unwrap_or("stop").to_lowercase();
+                            yield StreamEvent::message_stop(stop, usage);
+                        }
+                        // stream-start, tool-calls-generation, etc.: drop.
+                        _ => {}
+                    }
+                }
+            }
+        };
+        Ok(Box::pin(stream))
     }
 }

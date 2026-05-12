@@ -151,7 +151,72 @@ impl Provider for OllamaProvider {
         })
     }
 
-    fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> {
-        Err(ProviderError::stream("streaming not implemented"))
+    fn stream(&self, request: CompletionRequest) -> ProviderResult<EventStream> {
+        // Ollama's /api/chat streams NDJSON (newline-delimited JSON), not
+        // SSE. Each line is a full chat-response object with a `message`
+        // field whose `content` field is the incremental token(s) and a
+        // top-level `done: bool`.
+        let model = request.model.to_string();
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(crate::provider::openai_compat_message_json)
+            .collect();
+        let body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "stream": true,
+        });
+        let client = self.client.clone();
+        let url = self.base_url.clone();
+
+        let stream = async_stream::try_stream! {
+            use futures::StreamExt;
+            let response = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await?;
+            let response = response.error_for_status()
+                .map_err(|e| ProviderError::api(e.status().map(|s| s.as_u16()).unwrap_or(0), e.to_string()))?;
+            let mut bytes = response.bytes_stream();
+            let mut buffer = String::new();
+            while let Some(chunk) = bytes.next().await.transpose()? {
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(nl) = buffer.find('\n') {
+                    let line: String = buffer.drain(..=nl).collect();
+                    let line = line.trim();
+                    if line.is_empty() { continue; }
+                    let v: serde_json::Value = match serde_json::from_str(line) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    let delta = v["message"]["content"].as_str().unwrap_or("").to_string();
+                    let done = v["done"].as_bool().unwrap_or(false);
+                    if done {
+                        // Ollama reports cumulative tokens in the final
+                        // frame; surface them as input/output for parity
+                        // with other providers.
+                        let usage = TokenUsage {
+                            input: v["prompt_eval_count"].as_u64().unwrap_or(0),
+                            output: v["eval_count"].as_u64().unwrap_or(0),
+                            cache_read: None,
+                            cache_write: None,
+                        };
+                        yield StreamEvent::message_stop("stop".to_string(), usage);
+                    } else if !delta.is_empty() {
+                        yield StreamEvent {
+                            event_type: "content_block_delta".to_string(),
+                            delta: Some(delta),
+                            tool_call: None,
+                            stop_reason: None,
+                            usage: None,
+                        };
+                    }
+                }
+            }
+        };
+        Ok(Box::pin(stream))
     }
 }

@@ -96,5 +96,90 @@ impl Provider for VertexProvider {
         })
     }
 
-    fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> { Err(ProviderError::stream("streaming not implemented")) }
+    fn stream(&self, request: CompletionRequest) -> ProviderResult<EventStream> {
+        // Vertex Gemini's streamGenerateContent endpoint returns SSE (when
+        // ?alt=sse is set; otherwise it's a streamed JSON array which is
+        // harder to parse incrementally). Each `data:` chunk is a
+        // GenerateContentResponse whose candidates[0].content.parts[*].text
+        // is the *delta* in stream mode.
+        let model = request.model.to_string();
+        let url = format!(
+            "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}/publishers/google/models/{}:streamGenerateContent?alt=sse",
+            self.location, self.project_id, self.location, model
+        );
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(crate::provider::openai_compat_message_json)
+            .collect();
+        let body = serde_json::json!({
+            "contents": messages,
+            "generationConfig": { "maxOutputTokens": request.max_tokens.unwrap_or(4096) }
+        });
+        let client = self.client.clone();
+        let access_token = self.access_token.clone();
+
+        let stream = async_stream::try_stream! {
+            use futures::StreamExt;
+            let response = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", access_token))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .json(&body)
+                .send()
+                .await?;
+            let response = response.error_for_status()
+                .map_err(|e| ProviderError::api(e.status().map(|s| s.as_u16()).unwrap_or(0), e.to_string()))?;
+            let mut bytes = response.bytes_stream();
+            let mut buffer = String::new();
+            while let Some(chunk) = bytes.next().await.transpose()? {
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(nl) = buffer.find('\n') {
+                    let line: String = buffer.drain(..=nl).collect();
+                    let line = line.trim();
+                    if line.is_empty() || !line.starts_with("data:") {
+                        continue;
+                    }
+                    let data = line.trim_start_matches("data:").trim();
+                    let v: serde_json::Value = match serde_json::from_str(data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    // Concatenate every text part of the first candidate
+                    // (a single chunk usually has one part, but Gemini
+                    // can interleave text + thoughts).
+                    let mut delta = String::new();
+                    if let Some(parts) = v["candidates"][0]["content"]["parts"].as_array() {
+                        for part in parts {
+                            if let Some(t) = part["text"].as_str() {
+                                delta.push_str(t);
+                            }
+                        }
+                    }
+                    let finish = v["candidates"][0]["finishReason"].as_str()
+                        .filter(|s| !s.is_empty() && *s != "FINISH_REASON_UNSPECIFIED");
+                    if !delta.is_empty() {
+                        yield StreamEvent {
+                            event_type: "content_block_delta".to_string(),
+                            delta: Some(delta),
+                            tool_call: None,
+                            stop_reason: None,
+                            usage: None,
+                        };
+                    }
+                    if let Some(fr) = finish {
+                        let usage = TokenUsage {
+                            input: v["usageMetadata"]["promptTokenCount"].as_u64().unwrap_or(0),
+                            output: v["usageMetadata"]["candidatesTokenCount"].as_u64().unwrap_or(0),
+                            cache_read: None,
+                            cache_write: None,
+                        };
+                        yield StreamEvent::message_stop(fr.to_lowercase(), usage);
+                    }
+                }
+            }
+        };
+        Ok(Box::pin(stream))
+    }
 }
