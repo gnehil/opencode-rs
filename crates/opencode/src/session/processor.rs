@@ -118,7 +118,12 @@ impl PromptProcessor {
 
             let request = self.build_request_from_history(&model_id, history)?;
 
-            let response = match self.provider.complete(request).await {
+            let response = match crate::session::complete_with_retry(
+                self.provider.as_ref(),
+                request,
+                crate::session::retry::DEFAULT_MAX_ATTEMPTS,
+                std::time::Duration::from_millis(crate::session::retry::DEFAULT_BASE_DELAY_MS),
+            ).await {
                 Ok(r) => r,
                 Err(e) => {
                     events.push(ProcessEvent::Error(e.to_string()));

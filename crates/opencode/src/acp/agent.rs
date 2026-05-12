@@ -847,7 +847,12 @@ impl ACPAgent {
             };
 
             let response = tokio::select! {
-                r = self.provider.complete(completion_request) => r?,
+                r = crate::session::complete_with_retry(
+                    self.provider.as_ref(),
+                    completion_request,
+                    crate::session::retry::DEFAULT_MAX_ATTEMPTS,
+                    std::time::Duration::from_millis(crate::session::retry::DEFAULT_BASE_DELAY_MS),
+                ) => r?,
                 _ = cancel_notify.notified() => {
                     self.cancel_signals.write().await.remove(&request.session_id);
                     let prompt_response = PromptResponse {
