@@ -70,6 +70,11 @@ enum AnthropicContent {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    Image {
+        source: AnthropicImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -85,6 +90,13 @@ enum AnthropicContent {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicImageSource {
+    Base64 { media_type: String, data: String },
+    Url { url: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -550,13 +562,22 @@ fn convert_messages(messages: &[crate::provider::CompletionMessage]) -> Vec<Anth
             }
             // "user" and any other role we treat as a user text turn.
             _ => {
-                push_user(
-                    &mut out,
-                    vec![AnthropicContent::Text {
+                let mut blocks: Vec<AnthropicContent> = Vec::new();
+                if !msg.content.is_empty() {
+                    blocks.push(AnthropicContent::Text {
                         text: msg.content.clone(),
                         cache_control: None,
-                    }],
-                );
+                    });
+                }
+                for img in &msg.images {
+                    blocks.push(AnthropicContent::Image {
+                        source: parse_image_source(img),
+                        cache_control: None,
+                    });
+                }
+                if !blocks.is_empty() {
+                    push_user(&mut out, blocks);
+                }
             }
         }
     }
@@ -579,9 +600,32 @@ fn convert_messages(messages: &[crate::provider::CompletionMessage]) -> Vec<Anth
 fn set_cache_control(content: &mut AnthropicContent, cc: Option<CacheControl>) {
     match content {
         AnthropicContent::Text { cache_control, .. } => *cache_control = cc,
+        AnthropicContent::Image { cache_control, .. } => *cache_control = cc,
         AnthropicContent::ToolUse { cache_control, .. } => *cache_control = cc,
         AnthropicContent::ToolResult { cache_control, .. } => *cache_control = cc,
     }
+}
+
+/// Parse a `data:image/<mime>;base64,<payload>` URL or fall through to the
+/// `url:` source for `https://...` references.
+fn parse_image_source(url: &str) -> AnthropicImageSource {
+    if let Some(after_data) = url.strip_prefix("data:") {
+        if let Some((header, payload)) = after_data.split_once(",") {
+            let media_type = header
+                .split(';')
+                .next()
+                .unwrap_or("image/png")
+                .to_string();
+            // Anthropic only accepts base64 sources for data URLs; if the
+            // user passed `data:image/png,...` (no base64 encoding) we'd
+            // need to re-encode. For now assume base64.
+            return AnthropicImageSource::Base64 {
+                media_type,
+                data: payload.to_string(),
+            };
+        }
+    }
+    AnthropicImageSource::Url { url: url.to_string() }
 }
 
 #[cfg(test)]
@@ -595,6 +639,7 @@ mod tests {
             content: content.to_string(),
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
 
@@ -620,6 +665,7 @@ mod tests {
                 "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
             })]),
             tool_call_id: None,
+            images: Vec::new(),
         };
         let result = convert_messages(&[assistant]);
         assert_eq!(result.len(), 1);
@@ -643,12 +689,14 @@ mod tests {
                 content: "out1".to_string(),
                 tool_calls: None,
                 tool_call_id: Some("toolu_1".to_string()),
+            images: Vec::new(),
             },
             CompletionMessage {
                 role: "tool".to_string(),
                 content: "out2".to_string(),
                 tool_calls: None,
                 tool_call_id: Some("toolu_2".to_string()),
+            images: Vec::new(),
             },
         ]);
         assert_eq!(result.len(), 1);
@@ -729,6 +777,7 @@ mod tests {
     fn cc(content: &AnthropicContent) -> Option<CacheControl> {
         match content {
             AnthropicContent::Text { cache_control, .. } => *cache_control,
+            AnthropicContent::Image { cache_control, .. } => *cache_control,
             AnthropicContent::ToolUse { cache_control, .. } => *cache_control,
             AnthropicContent::ToolResult { cache_control, .. } => *cache_control,
         }
@@ -759,12 +808,14 @@ mod tests {
                 content: "r1".to_string(),
                 tool_calls: None,
                 tool_call_id: Some("toolu_1".to_string()),
+            images: Vec::new(),
             },
             CompletionMessage {
                 role: "tool".to_string(),
                 content: "r2".to_string(),
                 tool_calls: None,
                 tool_call_id: Some("toolu_2".to_string()),
+            images: Vec::new(),
             },
         ]);
         assert_eq!(result.len(), 1);
@@ -776,5 +827,51 @@ mod tests {
     fn empty_history_does_not_panic() {
         let result = convert_messages(&[]);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn data_url_image_becomes_base64_source() {
+        let user = CompletionMessage {
+            role: "user".to_string(),
+            content: "what is this?".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            images: vec!["data:image/png;base64,iVBORw0KGgoAAAANSUhEUg".to_string()],
+        };
+        let result = convert_messages(&[user]);
+        assert_eq!(result.len(), 1);
+        // First block: the text. Second block: the image.
+        assert_eq!(result[0].content.len(), 2);
+        match &result[0].content[1] {
+            AnthropicContent::Image { source, .. } => match source {
+                AnthropicImageSource::Base64 { media_type, data } => {
+                    assert_eq!(media_type, "image/png");
+                    assert_eq!(data, "iVBORw0KGgoAAAANSUhEUg");
+                }
+                _ => panic!("expected base64 source"),
+            },
+            _ => panic!("expected Image block"),
+        }
+    }
+
+    #[test]
+    fn https_image_becomes_url_source() {
+        let user = CompletionMessage {
+            role: "user".to_string(),
+            content: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            images: vec!["https://example.com/cat.png".to_string()],
+        };
+        let result = convert_messages(&[user]);
+        assert_eq!(result.len(), 1);
+        // No text, so just the one Image block.
+        assert_eq!(result[0].content.len(), 1);
+        match &result[0].content[0] {
+            AnthropicContent::Image { source: AnthropicImageSource::Url { url }, .. } => {
+                assert_eq!(url, "https://example.com/cat.png");
+            }
+            _ => panic!("expected URL image"),
+        }
     }
 }

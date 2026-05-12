@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::id::ModelID;
 use super::model::ModelInfo;
@@ -32,8 +33,13 @@ struct OpenAIRequest {
 #[derive(Debug, Serialize)]
 struct OpenAIMessage {
     role: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    content: String,
+    // `content` is either a plain string (text-only) or an array of
+    // content-part objects (vision: text + image_url). serde_json::Value
+    // lets us emit whichever shape the message needs without a custom
+    // serializer. Skip if explicitly Null so role=tool / assistant
+    // tool_calls-only turns don't ship an empty key.
+    #[serde(skip_serializing_if = "Value::is_null")]
+    content: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,7 +236,7 @@ impl OpenAIProvider {
             .iter()
             .map(|msg| OpenAIMessage {
                 role: msg.role.clone(),
-                content: msg.content.clone(),
+                content: openai_content_value(msg),
                 tool_calls: msg.tool_calls.clone(),
                 tool_call_id: msg.tool_call_id.clone(),
             })
@@ -446,5 +452,89 @@ impl OpenAIProvider {
             stop_reason: finish_reason,
             usage: None,
         })
+    }
+}
+
+/// Render a CompletionMessage's content into OpenAI's wire shape.
+///
+/// Returns:
+///   * `Value::Null` when content is empty and no images (e.g. an
+///     assistant turn that's pure tool_calls). `skip_serializing_if`
+///     drops the key in that case.
+///   * `Value::String(...)` when there are no images.
+///   * `Value::Array([{type:"text",text}, {type:"image_url",image_url:{url}}, ...])`
+///     when at least one image is attached. OpenAI requires the array
+///     form for multi-modal input.
+///
+/// Exposed at module scope so the shared `openai_compat_message_json`
+/// helper in provider/mod.rs can reuse it for every OpenAI-compatible
+/// provider without each one re-rolling the logic.
+pub(crate) fn openai_content_value(msg: &crate::provider::CompletionMessage) -> Value {
+    if msg.images.is_empty() {
+        if msg.content.is_empty() {
+            return Value::Null;
+        }
+        return Value::String(msg.content.clone());
+    }
+    let mut parts: Vec<Value> = Vec::new();
+    if !msg.content.is_empty() {
+        parts.push(serde_json::json!({"type": "text", "text": msg.content}));
+    }
+    for url in &msg.images {
+        parts.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": {"url": url},
+        }));
+    }
+    Value::Array(parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::CompletionMessage;
+
+    fn msg(content: &str, images: Vec<&str>) -> CompletionMessage {
+        CompletionMessage {
+            role: "user".to_string(),
+            content: content.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            images: images.into_iter().map(String::from).collect(),
+        }
+    }
+
+    #[test]
+    fn no_images_yields_plain_string_content() {
+        let v = openai_content_value(&msg("hello", vec![]));
+        assert_eq!(v, Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn empty_text_and_no_images_yields_null() {
+        let v = openai_content_value(&msg("", vec![]));
+        assert!(v.is_null());
+    }
+
+    #[test]
+    fn images_yield_content_parts_array() {
+        let v = openai_content_value(&msg(
+            "what is this?",
+            vec!["https://example.com/cat.png"],
+        ));
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "what is this?");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "https://example.com/cat.png");
+    }
+
+    #[test]
+    fn image_only_message_omits_text_part() {
+        let v = openai_content_value(&msg("", vec!["data:image/png;base64,xx"]));
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "image_url");
     }
 }

@@ -75,13 +75,20 @@ pub use xai::XAIProvider;
 /// shape. Used by the OpenAI provider and every OpenAI-compatible provider
 /// (Groq, Mistral, xAI, Together, etc.) so tool_calls / tool_call_id are
 /// preserved on the wire instead of being stripped to a flat `{role, content}`.
+///
+/// Honours `msg.images`: if any are set, `content` is emitted as the
+/// content-parts array form `[{type:"text", ...}, {type:"image_url", ...}]`
+/// that OpenAI's vision models accept. Providers in the OpenAI-compat
+/// ecosystem that don't have vision (Groq, Cerebras, etc.) will see the
+/// array form too; some will silently drop the image parts, which is fine
+/// — falling back to text-only content is acceptable behavior.
 pub fn openai_compat_message_json(msg: &CompletionMessage) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     obj.insert("role".to_string(), serde_json::Value::String(msg.role.clone()));
-    obj.insert(
-        "content".to_string(),
-        serde_json::Value::String(msg.content.clone()),
-    );
+    let content = openai::openai_content_value(msg);
+    if !content.is_null() {
+        obj.insert("content".to_string(), content);
+    }
     if let Some(tc) = &msg.tool_calls {
         obj.insert("tool_calls".to_string(), serde_json::Value::Array(tc.clone()));
     }

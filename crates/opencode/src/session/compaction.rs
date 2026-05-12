@@ -47,6 +47,7 @@ pub async fn compact_session(
         content: SUMMARY_INSTRUCTION.to_string(),
         tool_calls: None,
         tool_call_id: None,
+            images: Vec::new(),
     });
 
     let request = CompletionRequest {

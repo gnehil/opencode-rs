@@ -16,6 +16,17 @@ pub struct CompletionMessage {
     pub tool_calls: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Optional image attachments. Each entry is either an `https://` URL
+    /// or a `data:image/<mime>;base64,<...>` data URL.
+    ///
+    /// Anthropic and OpenAI both support multi-modal input via content
+    /// blocks; their respective providers serialize this field into the
+    /// appropriate wire shape. Providers that don't support vision (most
+    /// of the OpenAI-compatible ecosystem hosted by Cerebras / Together /
+    /// Groq / etc.) silently drop it. We don't reject the request — the
+    /// model just sees the text content without the image.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

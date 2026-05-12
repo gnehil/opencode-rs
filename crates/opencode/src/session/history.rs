@@ -64,6 +64,7 @@ pub async fn build_completion_messages(
                         content: text,
                         tool_calls: None,
                         tool_call_id: None,
+            images: Vec::new(),
                     });
                 }
             }
@@ -80,6 +81,7 @@ pub async fn build_completion_messages(
                         content: text,
                         tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
                         tool_call_id: None,
+                        images: Vec::new(),
                     });
                 }
 
@@ -95,6 +97,7 @@ pub async fn build_completion_messages(
                         content: output,
                         tool_calls: None,
                         tool_call_id: Some(call_id),
+            images: Vec::new(),
                     });
                 }
             }
