@@ -30,6 +30,13 @@ pub struct ACPAgent {
     // a StopReason::Cancelled response and skip persisting the partial
     // assistant message.
     cancel_signals: Arc<RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
+    // Tool registry. The provider sees these as available functions and can
+    // request invocation via tool_calls; handle_prompt then executes them
+    // locally and feeds results back as role=tool messages.
+    tools: Vec<Arc<dyn crate::tool::Tool>>,
+    /// Maximum tool-use iterations per prompt before we force EndTurn to
+    /// prevent doom loops.
+    max_iterations: usize,
 }
 
 pub struct JsonRpcNotification {
@@ -46,6 +53,14 @@ impl ACPAgent {
         event_bus: EventBus,
         notification_tx: mpsc::Sender<JsonRpcNotification>,
     ) -> Self {
+        let tools: Vec<Arc<dyn crate::tool::Tool>> = vec![
+            Arc::new(crate::tool::BashTool),
+            Arc::new(crate::tool::ReadTool),
+            Arc::new(crate::tool::WriteTool),
+            Arc::new(crate::tool::EditTool),
+            Arc::new(crate::tool::GlobTool),
+            Arc::new(crate::tool::GrepTool),
+        ];
         Self {
             session_manager,
             store,
@@ -59,7 +74,19 @@ impl ACPAgent {
             tool_starts: Arc::new(RwLock::new(HashSet::new())),
             permission_queues: Arc::new(RwLock::new(HashMap::new())),
             cancel_signals: Arc::new(RwLock::new(HashMap::new())),
+            tools,
+            max_iterations: 10,
         }
+    }
+
+    pub fn with_tools(mut self, tools: Vec<Arc<dyn crate::tool::Tool>>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    pub fn with_max_iterations(mut self, n: usize) -> Self {
+        self.max_iterations = n;
+        self
     }
 
     pub async fn start_event_subscription(&self) {
@@ -748,12 +775,12 @@ impl ACPAgent {
 
         let session_id = crate::id::SessionID::parse(&request.session_id)?;
         let cwd = session.cwd.clone();
-
-        let message_id = crate::id::MessageID::new();
         let now = chrono::Utc::now().timestamp_millis();
 
+        // 1. Persist the user turn so it shows up in the rebuilt history.
+        let user_message_id = crate::id::MessageID::new();
         let user_msg = crate::message::UserMessage {
-            id: message_id.clone(),
+            id: user_message_id.clone(),
             session_id: session_id.clone(),
             role: "user".to_string(),
             time: crate::message::UserTime { created: now },
@@ -768,120 +795,146 @@ impl ACPAgent {
             system: None,
             tools: None,
         };
-
-        self.store.save_message(&session_id, &crate::message::Message::User(user_msg.clone())).await?;
-        self.store.save_text_part(&session_id, &message_id, &prompt_text).await?;
-
+        self.store.save_message(&session_id, &crate::message::Message::User(user_msg)).await?;
+        self.store.save_text_part(&session_id, &user_message_id, &prompt_text).await?;
         self.event_bus.publish(crate::bus::Event::message_create(
             request.session_id.clone(),
-            message_id.to_string(),
+            user_message_id.to_string(),
             crate::bus::MessageRole::User,
         ));
 
-        // Build the full conversation from persisted state so the model sees
-        // prior turns, including any tool_use/tool_result history.
-        let history = crate::session::build_completion_messages(
-            self.store.as_ref(),
-            &session_id,
-        ).await?;
-
-        let completion_request = crate::provider::CompletionRequest {
-            model: crate::provider::ModelID::new(&model.model_id),
-            messages: history,
-            system: None,
-            tools: vec![],
-            max_tokens: Some(4096),
-            temperature: None,
-            top_p: None,
-            stop_sequences: None,
-        };
-        let _ = prompt_text; // already persisted as a text part above
-
-        // Register a cancel notifier for this session before we kick off the
-        // provider call. If cancel arrives we abort and return a cancelled
-        // PromptResponse without persisting a partial assistant message.
+        // 2. Register a per-session cancel handle.
         let cancel_notify = Arc::new(tokio::sync::Notify::new());
         {
             let mut signals = self.cancel_signals.write().await;
             signals.insert(request.session_id.clone(), cancel_notify.clone());
         }
 
-        let response = tokio::select! {
-            r = self.provider.complete(completion_request) => r?,
-            _ = cancel_notify.notified() => {
-                self.cancel_signals.write().await.remove(&request.session_id);
-                let prompt_response = PromptResponse {
-                    stop_reason: StopReason::Cancelled,
-                    usage: None,
-                    _meta: HashMap::new(),
-                };
-                return Ok(serde_json::to_value(prompt_response)?);
+        // 3. Build tool defs + system prompt once per prompt; both are
+        //    deterministic functions of (tools, session.cwd).
+        let tool_defs: Vec<crate::provider::ToolDefinition> = self.tools.iter().map(|t| {
+            crate::provider::ToolDefinition {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                parameters: t.parameters_schema(),
             }
-        };
+        }).collect();
+        let system_prompt = build_system_prompt(&cwd, &self.tools);
 
-        // Drop the cancel handle now that the LLM call has returned; any
-        // cancel notification arriving after this point is a no-op for this
-        // turn.
+        let mut total_input: u64 = 0;
+        let mut total_output: u64 = 0;
+        let mut total_cache_read: u64 = 0;
+        let mut total_cache_write: u64 = 0;
+        let mut stop_reason = StopReason::EndTurn;
+
+        for _ in 0..self.max_iterations {
+            // Rebuild history on every turn so the assistant's tool_use and
+            // our tool_result are visible to the model.
+            let history = crate::session::build_completion_messages(
+                self.store.as_ref(),
+                &session_id,
+            ).await?;
+
+            let completion_request = crate::provider::CompletionRequest {
+                model: crate::provider::ModelID::new(&model.model_id),
+                messages: history,
+                system: Some(system_prompt.clone()),
+                tools: tool_defs.clone(),
+                max_tokens: Some(4096),
+                temperature: None,
+                top_p: None,
+                stop_sequences: None,
+            };
+
+            let response = tokio::select! {
+                r = self.provider.complete(completion_request) => r?,
+                _ = cancel_notify.notified() => {
+                    self.cancel_signals.write().await.remove(&request.session_id);
+                    let prompt_response = PromptResponse {
+                        stop_reason: StopReason::Cancelled,
+                        usage: None,
+                        _meta: HashMap::new(),
+                    };
+                    return Ok(serde_json::to_value(prompt_response)?);
+                }
+            };
+
+            total_input += response.usage.input;
+            total_output += response.usage.output;
+            total_cache_read += response.usage.cache_read.unwrap_or(0);
+            total_cache_write += response.usage.cache_write.unwrap_or(0);
+
+            // 4. Persist the assistant turn (text part now, tool parts below).
+            let assistant_message_id = crate::id::MessageID::new();
+            let turn_time = chrono::Utc::now().timestamp_millis();
+            let assistant_msg = crate::message::AssistantMessage {
+                id: assistant_message_id.clone(),
+                session_id: session_id.clone(),
+                role: "assistant".to_string(),
+                time: crate::message::AssistantTime { created: turn_time, completed: Some(turn_time) },
+                error: None,
+                parent_id: user_message_id.to_string(),
+                model_id: model.model_id.clone(),
+                provider_id: model.provider_id.clone(),
+                mode: session.mode_id.clone().unwrap_or_else(|| "default".to_string()),
+                agent: "build".to_string(),
+                path: crate::message::PathInfo { cwd: cwd.clone(), root: "/".to_string() },
+                summary: None,
+                cost: 0.0,
+                tokens: crate::message::TokenUsage {
+                    input: response.usage.input as f64,
+                    output: response.usage.output as f64,
+                    reasoning: 0.0,
+                    total: None,
+                    cache: crate::message::CacheUsage {
+                        read: response.usage.cache_read.unwrap_or(0) as f64,
+                        write: response.usage.cache_write.unwrap_or(0) as f64,
+                    },
+                },
+                structured: None,
+                variant: session.variant.clone(),
+                finish: None,
+            };
+            self.store.save_message(&session_id, &crate::message::Message::Assistant(assistant_msg)).await?;
+            if !response.content.is_empty() {
+                self.store.save_text_part(&session_id, &assistant_message_id, &response.content).await?;
+            }
+            self.event_bus.publish(crate::bus::Event::message_create(
+                request.session_id.clone(),
+                assistant_message_id.to_string(),
+                crate::bus::MessageRole::Assistant,
+            ));
+
+            // 5. If the model didn't request any tools, this turn is done.
+            if response.tool_calls.is_empty() {
+                stop_reason = StopReason::EndTurn;
+                break;
+            }
+
+            // 6. Otherwise execute each requested tool, persist a ToolPart
+            //    per call, and loop. The next iteration's history rebuild
+            //    will surface these as role=tool messages to the model.
+            self.execute_and_persist_tool_calls(
+                &session_id,
+                &assistant_message_id,
+                &cwd,
+                &response.tool_calls,
+            ).await?;
+
+            // If the model only ever runs tool calls, ToolUse is the
+            // terminal stop_reason once max_iterations is reached.
+            stop_reason = StopReason::ToolUse;
+        }
+
         self.cancel_signals.write().await.remove(&request.session_id);
 
-        let assistant_message_id = crate::id::MessageID::new();
-        let assistant_msg = crate::message::AssistantMessage {
-            id: assistant_message_id.clone(),
-            session_id: session_id.clone(),
-            role: "assistant".to_string(),
-            time: crate::message::AssistantTime {
-                created: now,
-                completed: Some(now),
-            },
-            error: None,
-            parent_id: message_id.to_string(),
-            model_id: model.model_id.clone(),
-            provider_id: model.provider_id.clone(),
-            mode: session.mode_id.clone().unwrap_or_else(|| "default".to_string()),
-            agent: "build".to_string(),
-            path: crate::message::PathInfo {
-                cwd: cwd.clone(),
-                root: "/".to_string(),
-            },
-            summary: None,
-            cost: 0.0,
-            tokens: crate::message::TokenUsage {
-                input: response.usage.input as f64,
-                output: response.usage.output as f64,
-                reasoning: 0.0,
-                total: None,
-                cache: crate::message::CacheUsage {
-                    read: response.usage.cache_read.unwrap_or(0) as f64,
-                    write: response.usage.cache_write.unwrap_or(0) as f64,
-                },
-            },
-            structured: None,
-            variant: session.variant.clone(),
-            finish: None,
-        };
-
-        self.store.save_message(&session_id, &crate::message::Message::Assistant(assistant_msg.clone())).await?;
-        self.store.save_text_part(&session_id, &assistant_message_id, &response.content).await?;
-
-        self.event_bus.publish(crate::bus::Event::message_create(
-            request.session_id.clone(),
-            assistant_message_id.to_string(),
-            crate::bus::MessageRole::Assistant,
-        ));
-
-        let stop_reason = if response.tool_calls.is_empty() {
-            StopReason::EndTurn
-        } else {
-            StopReason::ToolUse
-        };
-
         let usage = Usage {
-            total_tokens: Some(response.usage.input as i64 + response.usage.output as i64),
-            input_tokens: Some(response.usage.input as i64),
-            output_tokens: Some(response.usage.output as i64),
+            total_tokens: Some(total_input as i64 + total_output as i64),
+            input_tokens: Some(total_input as i64),
+            output_tokens: Some(total_output as i64),
             thought_tokens: None,
-            cached_read_tokens: response.usage.cache_read.map(|v| v as i64),
-            cached_write_tokens: response.usage.cache_write.map(|v| v as i64),
+            cached_read_tokens: if total_cache_read > 0 { Some(total_cache_read as i64) } else { None },
+            cached_write_tokens: if total_cache_write > 0 { Some(total_cache_write as i64) } else { None },
         };
 
         let prompt_response = PromptResponse {
@@ -889,8 +942,84 @@ impl ACPAgent {
             usage: Some(usage),
             _meta: HashMap::new(),
         };
-
         Ok(serde_json::to_value(prompt_response)?)
+    }
+
+    /// Execute each tool call the model asked for and persist a ToolPart
+    /// per call (Completed on success, Error on failure / unknown tool).
+    /// Shared shape with `session::processor`.
+    async fn execute_and_persist_tool_calls(
+        &self,
+        session_id: &crate::id::SessionID,
+        message_id: &crate::id::MessageID,
+        cwd: &str,
+        tool_calls: &[crate::provider::ToolCall],
+    ) -> Result<()> {
+        use crate::session::service::ToolPartResult;
+        use crate::tool::ToolContext;
+
+        let working_dir = std::path::PathBuf::from(cwd);
+
+        for call in tool_calls {
+            let params: Value = serde_json::from_str(&call.arguments).unwrap_or(serde_json::json!({}));
+
+            self.event_bus.publish(crate::bus::Event::tool_start(
+                session_id.to_string(),
+                call.name.clone(),
+                params.clone(),
+            ));
+
+            let outcome = match self.tools.iter().find(|t| t.name() == call.name) {
+                Some(tool) => {
+                    let ctx = ToolContext {
+                        session_id: session_id.clone(),
+                        working_dir: working_dir.clone(),
+                        permission_rules: crate::permission::Ruleset::default(),
+                    };
+                    match tool.execute(params.clone(), ctx).await {
+                        Ok(r) => ToolPartResult::Completed { output: r.output },
+                        Err(e) => ToolPartResult::Error { error: e.to_string() },
+                    }
+                }
+                None => ToolPartResult::Error {
+                    error: format!("Unknown tool: {}", call.name),
+                },
+            };
+
+            self.store.save_tool_part(
+                session_id,
+                message_id,
+                &call.name,
+                &call.id,
+                &params,
+                match &outcome {
+                    ToolPartResult::Completed { output } => {
+                        ToolPartResult::Completed { output: output.clone() }
+                    }
+                    ToolPartResult::Error { error } => {
+                        ToolPartResult::Error { error: error.clone() }
+                    }
+                },
+            ).await?;
+
+            match outcome {
+                ToolPartResult::Completed { output } => {
+                    self.event_bus.publish(crate::bus::Event::tool_complete(
+                        session_id.to_string(),
+                        call.name.clone(),
+                        serde_json::json!({"result": output}),
+                    ));
+                }
+                ToolPartResult::Error { error } => {
+                    self.event_bus.publish(crate::bus::Event::tool_error(
+                        session_id.to_string(),
+                        call.name.clone(),
+                        error,
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn extract_prompt_text(&self, prompt: &[PromptContent]) -> String {
@@ -1040,6 +1169,8 @@ impl Clone for ACPAgent {
             tool_starts: self.tool_starts.clone(),
             permission_queues: self.permission_queues.clone(),
             cancel_signals: self.cancel_signals.clone(),
+            tools: self.tools.clone(),
+            max_iterations: self.max_iterations,
         }
     }
 }
@@ -1056,6 +1187,26 @@ struct TodoEntry {
     status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     priority: Option<String>,
+}
+
+/// Construct a minimal system prompt that introduces the agent role,
+/// names the working directory, and enumerates available tools. This is
+/// deliberately small — the heavy "agent persona" prompt lives in TS's
+/// session/system.ts and isn't ported yet. Keeping it concise also keeps
+/// token usage predictable until compaction is wired in.
+pub fn build_system_prompt(cwd: &str, tools: &[Arc<dyn crate::tool::Tool>]) -> String {
+    let mut s = String::new();
+    s.push_str("You are an autonomous coding agent operating inside a developer's project.\n");
+    s.push_str(&format!("Working directory: {}\n", cwd));
+    s.push_str("Use the provided tools to inspect and modify the project. ");
+    s.push_str("Prefer reading before writing, and avoid destructive shell commands unless explicitly asked.\n\n");
+    if !tools.is_empty() {
+        s.push_str("Available tools:\n");
+        for tool in tools {
+            s.push_str(&format!("- {}: {}\n", tool.name(), tool.description()));
+        }
+    }
+    s
 }
 
 fn tool_state_input(state: &crate::message::ToolState) -> Value {
@@ -1207,4 +1358,28 @@ fn build_tool_content(part: &crate::bus::event::MessagePartData, kind: &ToolKind
     }
 
     content
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_prompt_includes_cwd_and_tools() {
+        let tools: Vec<Arc<dyn crate::tool::Tool>> = vec![
+            Arc::new(crate::tool::BashTool),
+            Arc::new(crate::tool::ReadTool),
+        ];
+        let prompt = build_system_prompt("/repo/x", &tools);
+        assert!(prompt.contains("/repo/x"));
+        assert!(prompt.contains("bash:"));
+        assert!(prompt.contains("read:"));
+    }
+
+    #[test]
+    fn system_prompt_handles_empty_tools() {
+        let prompt = build_system_prompt("/repo/x", &[]);
+        assert!(prompt.contains("/repo/x"));
+        assert!(!prompt.contains("Available tools:"));
+    }
 }

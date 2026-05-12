@@ -286,10 +286,15 @@ impl PromptProcessor {
             parameters: t.parameters_schema(),
         }).collect();
 
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let system = crate::acp::agent::build_system_prompt(&cwd, &self.tools);
+
         Ok(CompletionRequest {
             model: crate::provider::ModelID::new(model_id),
             messages,
-            system: None,
+            system: Some(system),
             tools,
             max_tokens: Some(4096),
             temperature: None,

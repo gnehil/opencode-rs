@@ -201,7 +201,7 @@ impl SessionStore {
 
     pub async fn get_messages(&self, session_id: &SessionID) -> Result<Vec<Message>> {
         let rows = sqlx::query_as::<_, MessageRow>(
-            "SELECT * FROM message WHERE session_id = ?1 ORDER BY time_created ASC"
+            "SELECT * FROM message WHERE session_id = ?1 ORDER BY time_created ASC, id ASC"
         )
         .bind(session_id.to_string())
         .fetch_all(self.pool.as_ref())
@@ -217,7 +217,7 @@ impl SessionStore {
 
     pub async fn get_parts_by_session(&self, session_id: &SessionID) -> Result<HashMap<String, Vec<Part>>> {
         let rows = sqlx::query_as::<_, PartRow>(
-            "SELECT * FROM part WHERE session_id = ?1 ORDER BY time_created ASC"
+            "SELECT * FROM part WHERE session_id = ?1 ORDER BY time_created ASC, id ASC"
         )
         .bind(session_id.to_string())
         .fetch_all(self.pool.as_ref())
