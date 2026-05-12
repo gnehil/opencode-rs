@@ -39,11 +39,13 @@ impl Tool for WriteTool {
     fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: ToolContext,
+        ctx: ToolContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>> {
         Box::pin(async move {
             let params: WriteParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid write parameters: {}", e))?;
+
+            ctx.check_permission("edit", &params.file_path)?;
 
             let path = Path::new(&params.file_path);
 

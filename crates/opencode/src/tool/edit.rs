@@ -48,11 +48,13 @@ impl Tool for EditTool {
     fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: ToolContext,
+        ctx: ToolContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>> {
         Box::pin(async move {
             let params: EditParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid edit parameters: {}", e))?;
+
+            ctx.check_permission("edit", &params.file_path)?;
 
             if params.old_string == params.new_string {
                 return Err(anyhow::anyhow!(

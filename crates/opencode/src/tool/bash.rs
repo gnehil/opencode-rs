@@ -50,6 +50,8 @@ impl Tool for BashTool {
             let params: BashParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid bash parameters: {}", e))?;
 
+            ctx.check_permission("bash", &params.command)?;
+
             let cwd = params.workdir.unwrap_or_else(|| ctx.working_dir.clone());
             let shell = detect_shell();
 

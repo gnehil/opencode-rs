@@ -13,15 +13,27 @@ use crate::storage::SessionRow;
 #[derive(Clone)]
 pub struct AppState {
     data_dir: std::path::PathBuf,
+    /// All filesystem queries (read/list/find/git) are constrained to paths
+    /// canonicalized under this root. Defaults to the process cwd.
+    pub workspace_root: std::path::PathBuf,
     pub event_bus: EventBus,
 }
 
 impl AppState {
     pub fn new(data_dir: std::path::PathBuf) -> Self {
+        let workspace_root = std::env::current_dir()
+            .and_then(|p| p.canonicalize())
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
         Self {
             data_dir,
+            workspace_root,
             event_bus: EventBus::new(),
         }
+    }
+
+    pub fn with_workspace_root(mut self, root: std::path::PathBuf) -> Self {
+        self.workspace_root = root.canonicalize().unwrap_or(root);
+        self
     }
 
     pub async fn get_store(&self) -> SessionStore {
@@ -79,6 +91,9 @@ pub async fn create_session(
         .create(&body.title, &body.project_id, &std::path::PathBuf::from(&body.directory))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .event_bus
+        .publish(crate::bus::Event::session_create(&session.id));
     Ok(Json(SessionResponse::from(session)))
 }
 
@@ -112,10 +127,15 @@ pub async fn update_session(
     if let Some(model) = body.model {
         store.set_model(&session_id, &model).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
-    
+
     let session = store.get(&session_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     match session {
-        Some(s) => Ok(Json(SessionResponse::from(s))),
+        Some(s) => {
+            state
+                .event_bus
+                .publish(crate::bus::Event::session_update(&id));
+            Ok(Json(SessionResponse::from(s)))
+        }
         None => Err(StatusCode::NOT_FOUND),
     }
 }
@@ -127,6 +147,9 @@ pub async fn delete_session(
     let store = state.get_store().await;
     let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
     store.delete(&session_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .event_bus
+        .publish(crate::bus::Event::session_delete(&id));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -137,6 +160,9 @@ pub async fn archive_session(
     let store = state.get_store().await;
     let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
     store.archive(&session_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .event_bus
+        .publish(crate::bus::Event::session_update(&id));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -171,7 +197,31 @@ pub async fn session_children(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<SessionResponse>>, StatusCode> {
-    Ok(Json(vec![]))
+    let store = state.get_store().await;
+    let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    // Verify the parent exists so callers can distinguish "no children" from
+    // "unknown session".
+    if store
+        .get(&session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let all = store
+        .list(None)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let parent_id = session_id.to_string();
+    let children: Vec<SessionResponse> = all
+        .into_iter()
+        .filter(|s| s.parent_id.as_deref() == Some(parent_id.as_str()))
+        .map(SessionResponse::from)
+        .collect();
+    Ok(Json(children))
 }
 
 #[derive(Deserialize)]
@@ -179,36 +229,65 @@ pub struct RevertBody {
     pub message_id: String,
 }
 
+/// Revert is not implemented in the storage layer yet. Return 501 rather
+/// than pretending to succeed.
 pub async fn revert_message(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(body): Json<RevertBody>,
+    State(_state): State<Arc<AppState>>,
+    Path(_id): Path<String>,
+    Json(_body): Json<RevertBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "session_id": id,
-        "reverted_message_id": body.message_id
-    })))
+    Err(StatusCode::NOT_IMPLEMENTED)
 }
 
+/// Abort signals any in-flight processing for the session. There is no
+/// shared "in-flight prompt registry" wired through the HTTP server yet
+/// (cancellation lives on ACPAgent), so we publish a session.update event
+/// so subscribers can observe the request and return 202.
 pub async fn abort_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "session_id": id,
-        "aborted": true
-    })))
+) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let store = state.get_store().await;
+    if store
+        .get(&session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    state
+        .event_bus
+        .publish(crate::bus::Event::session_update(&id));
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "session_id": id,
+            "aborted": true,
+        })),
+    ))
 }
 
 pub async fn session_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let store = state.get_store().await;
+    let sessions = store
+        .list(None)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let total = sessions.len();
+    let archived = sessions
+        .iter()
+        .filter(|s| s.time_archived.is_some())
+        .count();
     Ok(Json(serde_json::json!({
-        "active": 0,
-        "processing": 0,
-        "waiting": 0
+        "total": total,
+        "active": total - archived,
+        "archived": archived,
     })))
 }
 
