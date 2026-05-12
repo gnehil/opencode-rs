@@ -1,5 +1,6 @@
-use std::io::{BufRead, Write, stdin, stdout};
+use std::io::{BufRead, stdin};
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use anyhow::Result;
@@ -44,11 +45,14 @@ impl ACPServer {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let mut stdout = stdout();
+        let mut stdout = tokio::io::stdout();
 
         let (request_tx, mut request_rx) = mpsc::channel::<String>(64);
 
-        tokio::task::spawn_blocking(move || {
+        // stdin's only blocking API is BufRead::lines(); we own the FD for the
+        // lifetime of the ACP server so it's fine to park a dedicated OS
+        // thread on it.
+        std::thread::spawn(move || {
             let stdin = stdin();
             for line in stdin.lock().lines() {
                 match line {
@@ -66,18 +70,19 @@ impl ACPServer {
         loop {
             tokio::select! {
                 Some(line) = request_rx.recv() => {
-                    let request: JsonRpcRequest = serde_json::from_str(&line)
-                        .map_err(|e| {
-                            let response = error_response(None, PARSE_ERROR, format!("Parse error: {}", e));
-                            let _ = writeln!(stdout, "{}", serde_json::to_string(&response).unwrap());
-                            e
-                        })?;
-
-                    let response = self.handle_request(request).await;
+                    let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
+                        Ok(request) => self.handle_request(request).await,
+                        Err(e) => error_response(
+                            None,
+                            PARSE_ERROR,
+                            format!("Parse error: {}", e),
+                        ),
+                    };
 
                     let json_response = serde_json::to_string(&response)?;
-                    writeln!(stdout, "{}", json_response)?;
-                    stdout.flush()?;
+                    stdout.write_all(json_response.as_bytes()).await?;
+                    stdout.write_all(b"\n").await?;
+                    stdout.flush().await?;
                 }
 
                 Some(notification) = self.notification_rx.recv() => {
@@ -86,8 +91,10 @@ impl ACPServer {
                         "method": notification.method,
                         "params": notification.params
                     });
-                    writeln!(stdout, "{}", serde_json::to_string(&notification_json)?)?;
-                    stdout.flush()?;
+                    let serialized = serde_json::to_string(&notification_json)?;
+                    stdout.write_all(serialized.as_bytes()).await?;
+                    stdout.write_all(b"\n").await?;
+                    stdout.flush().await?;
                 }
 
                 else => break,

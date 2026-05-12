@@ -25,6 +25,11 @@ pub struct ACPAgent {
     shell_snapshots: Arc<RwLock<HashMap<String, String>>>,
     tool_starts: Arc<RwLock<HashSet<String>>>,
     permission_queues: Arc<RwLock<HashMap<String, tokio::sync::Mutex<()>>>>,
+    // Per-session cancellation: handle_cancel notifies any in-flight prompt
+    // running for the given session_id, which causes handle_prompt to return
+    // a StopReason::Cancelled response and skip persisting the partial
+    // assistant message.
+    cancel_signals: Arc<RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
 }
 
 pub struct JsonRpcNotification {
@@ -53,6 +58,7 @@ impl ACPAgent {
             shell_snapshots: Arc::new(RwLock::new(HashMap::new())),
             tool_starts: Arc::new(RwLock::new(HashSet::new())),
             permission_queues: Arc::new(RwLock::new(HashMap::new())),
+            cancel_signals: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -788,7 +794,32 @@ impl ACPAgent {
             stop_sequences: None,
         };
 
-        let response = self.provider.complete(completion_request).await?;
+        // Register a cancel notifier for this session before we kick off the
+        // provider call. If cancel arrives we abort and return a cancelled
+        // PromptResponse without persisting a partial assistant message.
+        let cancel_notify = Arc::new(tokio::sync::Notify::new());
+        {
+            let mut signals = self.cancel_signals.write().await;
+            signals.insert(request.session_id.clone(), cancel_notify.clone());
+        }
+
+        let response = tokio::select! {
+            r = self.provider.complete(completion_request) => r?,
+            _ = cancel_notify.notified() => {
+                self.cancel_signals.write().await.remove(&request.session_id);
+                let prompt_response = PromptResponse {
+                    stop_reason: StopReason::Cancelled,
+                    usage: None,
+                    _meta: HashMap::new(),
+                };
+                return Ok(serde_json::to_value(prompt_response)?);
+            }
+        };
+
+        // Drop the cancel handle now that the LLM call has returned; any
+        // cancel notification arriving after this point is a no-op for this
+        // turn.
+        self.cancel_signals.write().await.remove(&request.session_id);
 
         let assistant_message_id = crate::id::MessageID::new();
         let assistant_msg = crate::message::AssistantMessage {
@@ -876,8 +907,20 @@ impl ACPAgent {
 
     pub async fn handle_cancel(&self, params: Value) -> Result<()> {
         let request: CancelNotification = serde_json::from_value(params)?;
-        let session = self.session_manager.get(&request.session_id).await?;
+        // Validate the session exists; surface "unknown session" to the
+        // client rather than silently swallowing.
+        let _ = self.session_manager.get(&request.session_id).await?;
 
+        // Take the notify out so subsequent cancels for the same session_id
+        // are harmless no-ops until a new prompt starts.
+        let signal = self
+            .cancel_signals
+            .write()
+            .await
+            .remove(&request.session_id);
+        if let Some(notify) = signal {
+            notify.notify_waiters();
+        }
         Ok(())
     }
 
@@ -993,6 +1036,7 @@ impl Clone for ACPAgent {
             shell_snapshots: self.shell_snapshots.clone(),
             tool_starts: self.tool_starts.clone(),
             permission_queues: self.permission_queues.clone(),
+            cancel_signals: self.cancel_signals.clone(),
         }
     }
 }

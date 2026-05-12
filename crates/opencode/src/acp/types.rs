@@ -453,6 +453,8 @@ pub enum StopReason {
     ToolUse,
     #[serde(rename = "stop_sequence")]
     StopSequence,
+    #[serde(rename = "cancelled")]
+    Cancelled,
 }
 
 /// Usage Stats

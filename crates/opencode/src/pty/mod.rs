@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{mpsc, RwLock};
 use serde::{Deserialize, Serialize};
 use portable_pty::{PtyPair, PtySize as PortablePtySize, CommandBuilder, PtySystem, Child};
@@ -58,9 +58,17 @@ pub struct PtySize {
 
 pub struct PtySession {
     pub info: PtyInfo,
-    pub buffer: Arc<RwLock<Vec<u8>>>,
-    pub buffer_cursor: usize,
-    pub cursor: Arc<RwLock<usize>>,
+    // Sliding-window output buffer. We track two monotonic counters in absolute
+    // bytes-since-spawn terms:
+    //   - `buffer_cursor` = absolute byte offset of buffer[0]
+    //   - `cursor`        = absolute byte offset of "one past last byte written"
+    // The window invariant is: cursor - buffer_cursor == buffer.len().
+    // When the buffer exceeds BUFFER_LIMIT we drop bytes from the front and
+    // advance `buffer_cursor` by the same amount so consumers can detect when
+    // they've fallen behind.
+    pub buffer: Arc<std::sync::Mutex<Vec<u8>>>,
+    pub buffer_cursor: Arc<AtomicUsize>,
+    pub cursor: Arc<AtomicUsize>,
     pub pair: Arc<std::sync::Mutex<Option<PtyPair>>>,
     pub child: Arc<std::sync::Mutex<Option<Box<dyn Child + Send + Sync>>>>,
     pub writer: Arc<std::sync::Mutex<Option<Box<dyn std::io::Write + Send>>>>,
@@ -150,8 +158,9 @@ impl PtyService {
         let sessions_clone = self.sessions.clone();
         let event_bus_clone = self.event_bus.clone();
         let session_id = id.0.clone();
-        let buffer = Arc::new(RwLock::new(Vec::new()));
-        let cursor = Arc::new(RwLock::new(0usize));
+        let buffer = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let buffer_cursor = Arc::new(AtomicUsize::new(0));
+        let cursor = Arc::new(AtomicUsize::new(0));
         let pair_arc = Arc::new(std::sync::Mutex::new(Some(pair)));
         let child_arc: Arc<std::sync::Mutex<Option<Box<dyn Child + Send + Sync>>>> =
             Arc::new(std::sync::Mutex::new(Some(child)));
@@ -165,7 +174,7 @@ impl PtyService {
             sessions.insert(id.0.clone(), PtySession {
                 info: info.clone(),
                 buffer: buffer.clone(),
-                buffer_cursor: 0,
+                buffer_cursor: buffer_cursor.clone(),
                 cursor: cursor.clone(),
                 pair: pair_arc.clone(),
                 child: child_arc.clone(),
@@ -178,12 +187,16 @@ impl PtyService {
 
         self.event_bus.publish(crate::bus::Event::session_create(&id.0));
 
-        let buffer_clone = buffer.clone();
-        let cursor_clone = cursor.clone();
-        let output_tx_clone = output_tx.clone();
+        // Reader: portable-pty's reader is blocking, so run it on a dedicated
+        // OS thread. Use only sync primitives + blocking_send to avoid
+        // block_on(handle) which can deadlock the runtime under load.
+        let buffer_reader = buffer.clone();
+        let buffer_cursor_reader = buffer_cursor.clone();
+        let cursor_reader = cursor.clone();
+        let output_tx_reader = output_tx.clone();
         let killed_reader = killed.clone();
 
-        tokio::task::spawn_blocking(move || {
+        std::thread::spawn(move || {
             use std::io::Read;
             let mut reader = reader;
             let mut buf = [0u8; 4096];
@@ -194,35 +207,37 @@ impl PtyService {
                 match reader.read(&mut buf) {
                     Ok(n) if n > 0 => {
                         let data = buf[..n].to_vec();
-                        let cursor_clone = cursor_clone.clone();
-                        let buffer_clone = buffer_clone.clone();
-                        let output_tx_clone = output_tx_clone.clone();
-
-                        tokio::runtime::Handle::current().block_on(async {
-                            *cursor_clone.write().await += n;
-                            buffer_clone.write().await.extend_from_slice(&data);
-
-                            if buffer_clone.read().await.len() > BUFFER_LIMIT {
-                                let mut buffer = buffer_clone.write().await;
-                                let excess = buffer.len() - BUFFER_LIMIT;
-                                *buffer = buffer[excess..].to_vec();
+                        cursor_reader.fetch_add(n, Ordering::SeqCst);
+                        {
+                            let mut guard = buffer_reader.lock().unwrap();
+                            guard.extend_from_slice(&data);
+                            if guard.len() > BUFFER_LIMIT {
+                                let excess = guard.len() - BUFFER_LIMIT;
+                                guard.drain(0..excess);
+                                buffer_cursor_reader.fetch_add(excess, Ordering::SeqCst);
                             }
-
-                            let _ = output_tx_clone.send(data).await;
-                        });
+                        }
+                        // Best-effort: subscribers that have hung up don't
+                        // matter, and we don't want to block reading from the
+                        // PTY if no one is listening.
+                        let _ = output_tx_reader.blocking_send(data);
                     }
                     Ok(_) | Err(_) => break,
                 }
             }
         });
 
+        // Wait for child exit on a dedicated OS thread; mutate shared state
+        // through sync primitives + a tokio-spawned task for the async map
+        // update so we don't block_on the current runtime handle.
         let exited_wait = exited.clone();
         let killed_wait = killed.clone();
         let child_wait = child_arc.clone();
         let sessions_for_wait = sessions_clone.clone();
         let session_id_for_wait = session_id.clone();
+        let handle = tokio::runtime::Handle::current();
 
-        tokio::task::spawn_blocking(move || {
+        std::thread::spawn(move || {
             let status = {
                 let mut guard = child_wait.lock().unwrap();
                 match guard.as_mut() {
@@ -234,17 +249,20 @@ impl PtyService {
                 return;
             }
             if let Ok(status) = status {
-                let exit_code = status.exit_code();
+                let exit_code = status.exit_code() as i32;
                 exited_wait.store(true, Ordering::SeqCst);
-                tokio::runtime::Handle::current().block_on(async {
-                    let mut sessions = sessions_for_wait.write().await;
-                    if let Some(session) = sessions.get_mut(&session_id_for_wait) {
+                let sessions = sessions_for_wait.clone();
+                let sid = session_id_for_wait.clone();
+                let bus = event_bus_clone.clone();
+                handle.spawn(async move {
+                    let mut sessions = sessions.write().await;
+                    if let Some(session) = sessions.get_mut(&sid) {
                         if !session.killed.load(Ordering::SeqCst) {
                             session.info.status = PtyStatus::Exited;
-                            session.info.exit_code = Some(exit_code as i32);
+                            session.info.exit_code = Some(exit_code);
                         }
                     }
-                    event_bus_clone.publish(crate::bus::Event::session_update(&session_id_for_wait));
+                    bus.publish(crate::bus::Event::session_update(&sid));
                 });
             }
         });
@@ -334,25 +352,25 @@ impl PtyService {
         Ok(())
     }
 
+    /// Return any output between absolute byte offset `cursor` (defaults to 0)
+    /// and the current write head, along with the new write-head offset that
+    /// the caller should pass next time.
+    ///
+    /// If `cursor` is older than the buffer's start (the reader has rotated it
+    /// out), the returned data starts from the oldest still-available byte and
+    /// callers should treat that as a forced resync.
     pub async fn connect(&self, id: &PtyID, cursor: Option<usize>) -> Option<(Vec<u8>, usize)> {
         let sessions = self.sessions.read().await;
-        if let Some(session) = sessions.get(&id.0) {
-            let start = session.buffer_cursor;
-            let end = *session.cursor.read().await;
-            let from = cursor.unwrap_or(0);
+        let session = sessions.get(&id.0)?;
 
-            let offset = from.saturating_sub(start);
-            let buffer = session.buffer.read().await;
-            let data = if offset < buffer.len() {
-                buffer[offset..].to_vec()
-            } else {
-                Vec::new()
-            };
+        let start = session.buffer_cursor.load(Ordering::SeqCst);
+        let end = session.cursor.load(Ordering::SeqCst);
+        let from = cursor.unwrap_or(0);
 
-            Some((data, end))
-        } else {
-            None
-        }
+        let buffer = session.buffer.lock().unwrap();
+        let offset = from.saturating_sub(start).min(buffer.len());
+        let data = buffer[offset..].to_vec();
+        Some((data, end))
     }
 
     pub async fn kill(&self, id: &PtyID) -> Result<()> {
