@@ -50,7 +50,19 @@ impl Tool for BashTool {
             let params: BashParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid bash parameters: {}", e))?;
 
-            ctx.check_permission("bash", &params.command)?;
+            // Split the command on shell operators (&&, ||, ;, |) and
+            // check each sub-command against the bash permission rules
+            // independently. This way `git push && rm -rf /` can be
+            // denied on the rm even if `git push` is allowed. A single
+            // segment (the common case) just checks the whole string.
+            let segments = crate::permission::split_commands(&params.command);
+            if segments.is_empty() {
+                ctx.check_permission("bash", &params.command)?;
+            } else {
+                for segment in &segments {
+                    ctx.check_permission("bash", segment)?;
+                }
+            }
 
             let cwd = params.workdir.unwrap_or_else(|| ctx.working_dir.clone());
             let shell = detect_shell();
@@ -167,4 +179,79 @@ fn truncate_output(data: &[u8]) -> Vec<u8> {
     }
     result.extend_from_slice(&tail[start..]);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::permission::{Action, PermissionRule};
+    use crate::tool::ToolContext;
+    use std::path::PathBuf;
+
+    fn ctx(rules: Vec<PermissionRule>) -> ToolContext {
+        ToolContext {
+            session_id: crate::id::SessionID::new(),
+            working_dir: PathBuf::from("/tmp"),
+            permission_rules: rules,
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_rule_on_segment_blocks_whole_command() {
+        // Allow any `git *`, deny anything that begins with `rm`. Note
+        // that `glob-match` uses POSIX semantics where `*` does not
+        // cross `/`, so to match `rm -rf /tmp/foo` we need `rm **`.
+        let rules = vec![
+            PermissionRule {
+                permission: "bash".to_string(),
+                pattern: "git **".to_string(),
+                action: Action::Allow,
+            },
+            PermissionRule {
+                permission: "bash".to_string(),
+                pattern: "rm **".to_string(),
+                action: Action::Deny,
+            },
+        ];
+        let tool = BashTool;
+        let result = tool
+            .execute(
+                serde_json::json!({"command": "git status && rm -rf /tmp/foo"}),
+                ctx(rules),
+            )
+            .await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("denied") || err.contains("Deny"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn allow_rule_passes_compound_command() {
+        // Allow git for any subcommand; the compound command should not
+        // hit any other deny.
+        let rules = vec![PermissionRule {
+            permission: "bash".to_string(),
+            pattern: "git **".to_string(),
+            action: Action::Allow,
+        }];
+        let tool = BashTool;
+        // We don't actually want to spawn git here; just check that the
+        // permission gate doesn't reject. Use a command that would
+        // fail at exec but pass the gate.
+        let result = tool
+            .execute(
+                serde_json::json!({"command": "git status && git diff"}),
+                ctx(rules),
+            )
+            .await;
+        // Either Ok (it ran) or Err for non-permission reasons (e.g.
+        // "Command failed"). What we don't want is the permission gate
+        // rejecting it.
+        if let Err(e) = result {
+            let msg = e.to_string();
+            assert!(
+                !msg.contains("denied") && !msg.contains("user approval"),
+                "permission gate should pass; got: {msg}"
+            );
+        }
+    }
 }

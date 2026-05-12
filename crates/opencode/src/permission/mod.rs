@@ -4,6 +4,7 @@ use glob_match::glob_match;
 use serde::{Deserialize, Serialize};
 
 pub mod action;
+pub mod arity;
 pub mod error;
 pub mod id;
 pub mod reply;
@@ -11,6 +12,7 @@ pub mod request;
 pub mod rule;
 
 pub use action::Action;
+pub use arity::split_commands;
 pub use error::PermissionError;
 pub use id::PermissionID;
 pub use reply::Reply;

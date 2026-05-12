@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::collections::HashMap;
 
+use std::sync::atomic::{AtomicI64, Ordering};
+
 use crate::id::SessionID;
 use crate::storage::{SessionRow, MessageRow, PartRow, init_db};
 use crate::message::{Message, WithParts, Part};
@@ -13,6 +15,28 @@ use crate::message::{Message, WithParts, Part};
 pub enum ToolPartResult {
     Completed { output: String },
     Error { error: String },
+}
+
+/// Process-wide monotonic clock for persistence timestamps.
+///
+/// Two `save_message` calls in the same millisecond would otherwise share
+/// a `time_created` value, and SQLite's stable sort can pick either
+/// order on retrieval. The downstream conversation-history rebuild needs
+/// the ordering to match insertion order, so we hand out a unique,
+/// strictly increasing integer per call by taking the system clock as a
+/// floor and incrementing past any prior value.
+static LAST_TS_MS: AtomicI64 = AtomicI64::new(0);
+
+fn next_monotonic_ms() -> i64 {
+    let wall = chrono::Utc::now().timestamp_millis();
+    loop {
+        let prev = LAST_TS_MS.load(Ordering::SeqCst);
+        let next = if wall > prev { wall } else { prev + 1 };
+        match LAST_TS_MS.compare_exchange(prev, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return next,
+            Err(_) => continue,
+        }
+    }
 }
 
 pub struct SessionStore {
@@ -250,7 +274,7 @@ impl SessionStore {
     }
 
     pub async fn save_message(&self, session_id: &SessionID, message: &Message) -> Result<()> {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = next_monotonic_ms();
         let id = match message {
             Message::User(u) => u.id.to_string(),
             Message::Assistant(a) => a.id.to_string(),
@@ -282,7 +306,7 @@ impl SessionStore {
     ) -> Result<()> {
         use crate::message::ToolState;
         let part_id = crate::id::PartID::new();
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = next_monotonic_ms();
 
         let input_map: std::collections::HashMap<String, serde_json::Value> =
             match input {
@@ -348,7 +372,7 @@ impl SessionStore {
         text: &str,
     ) -> Result<()> {
         let part_id = crate::id::PartID::new();
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = next_monotonic_ms();
         let part = serde_json::json!({
             "id": part_id.to_string(),
             "messageID": message_id.to_string(),
