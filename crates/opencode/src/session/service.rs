@@ -184,6 +184,19 @@ impl SessionStore {
         Ok(())
     }
 
+    pub async fn set_time_compacting(&self, session_id: &SessionID, ts: i64) -> Result<()> {
+        let now = chrono::Utc::now().timestamp_millis();
+        sqlx::query(
+            "UPDATE session SET time_compacting = ?1, time_updated = ?2 WHERE id = ?3",
+        )
+        .bind(ts)
+        .bind(now)
+        .bind(session_id.to_string())
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(())
+    }
+
     pub async fn set_model(&self, session_id: &SessionID, model: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp_millis();
 

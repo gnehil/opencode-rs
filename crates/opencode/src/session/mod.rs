@@ -1,6 +1,8 @@
+pub mod compaction;
 pub mod history;
 pub mod info;
 pub mod model;
+pub mod overflow;
 pub mod revert;
 pub mod share;
 pub mod summary;
@@ -8,8 +10,10 @@ pub mod time;
 pub mod service;
 pub mod processor;
 
+pub use compaction::compact_session;
 pub use history::build_completion_messages;
 pub use info::SessionInfo;
+pub use overflow::{should_compact, usable_context};
 pub use model::SessionModel;
 pub use revert::SessionRevert;
 pub use share::SessionShare;

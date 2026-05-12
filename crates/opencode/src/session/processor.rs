@@ -67,6 +67,7 @@ impl PromptProcessor {
     pub async fn process_stream(&self, session_id: &SessionID, prompt: &str) -> anyhow::Result<Vec<ProcessEvent>> {
         let mut events = Vec::new();
         let mut accumulated_content = String::new();
+        let mut total_input_tokens: u64 = 0;
 
         let model_id = self.provider.default_model()
             .and_then(|m| m.id.clone())
@@ -125,6 +126,7 @@ impl PromptProcessor {
                 }
             };
 
+            total_input_tokens += response.usage.input;
             accumulated_content.push_str(&response.content);
             if !response.content.is_empty() {
                 events.push(ProcessEvent::TextDelta(response.content.clone()));
@@ -185,6 +187,21 @@ impl PromptProcessor {
                 &response.tool_calls,
                 &mut events,
             ).await?;
+
+            // Auto-compact before the next iteration if cumulative input
+            // is approaching the model's context ceiling.
+            if let Some(model_info) = self.provider.default_model() {
+                if crate::session::should_compact(total_input_tokens, model_info) {
+                    if let Err(e) = crate::session::compact_session(
+                        &self.store,
+                        session_id,
+                        &self.provider,
+                        &model_id,
+                    ).await {
+                        tracing::warn!("compaction failed (continuing without): {}", e);
+                    }
+                }
+            }
         }
 
         Ok(events)

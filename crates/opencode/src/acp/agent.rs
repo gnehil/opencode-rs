@@ -924,6 +924,24 @@ impl ACPAgent {
             // If the model only ever runs tool calls, ToolUse is the
             // terminal stop_reason once max_iterations is reached.
             stop_reason = StopReason::ToolUse;
+
+            // 7. Auto-compact if the running input usage is approaching
+            //    the model's context ceiling. We use the cumulative
+            //    `input` count from this prompt's iterations; on the
+            //    first iteration of a fresh prompt that's
+            //    response.usage.input, on later ones the running total.
+            if let Some(model_info) = self.provider.default_model() {
+                if crate::session::should_compact(total_input, model_info) {
+                    if let Err(e) = crate::session::compact_session(
+                        &self.store,
+                        &session_id,
+                        &self.provider,
+                        &model.model_id,
+                    ).await {
+                        tracing::warn!("compaction failed (continuing without): {}", e);
+                    }
+                }
+            }
         }
 
         self.cancel_signals.write().await.remove(&request.session_id);

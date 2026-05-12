@@ -33,10 +33,28 @@ pub async fn build_completion_messages(
     store: &SessionStore,
     session_id: &SessionID,
 ) -> Result<Vec<CompletionMessage>> {
+    // Honour compaction: if a boundary timestamp is set, drop every
+    // message that originated before it. The compaction summary itself
+    // was persisted with time_created == boundary so it survives.
+    let compaction_boundary: Option<i64> = store
+        .get(session_id)
+        .await?
+        .and_then(|row| row.time_compacting);
+
     let with_parts = store.get_messages_with_parts(session_id).await?;
     let mut out = Vec::new();
 
     for wp in with_parts {
+        if let Some(boundary) = compaction_boundary {
+            let created = match &wp.info {
+                Message::User(u) => u.time.created,
+                Message::Assistant(a) => a.time.created,
+            };
+            if created < boundary {
+                continue;
+            }
+        }
+
         match &wp.info {
             Message::User(_) => {
                 let text = collect_text(&wp.parts);
@@ -269,5 +287,61 @@ mod tests {
         assert_eq!(history[2].role, "tool");
         assert_eq!(history[2].tool_call_id.as_deref(), Some("toolu_42"));
         assert_eq!(history[2].content, "a\nb");
+    }
+
+    #[tokio::test]
+    async fn compaction_boundary_drops_older_messages() {
+        let (store, _tmp) = store_with_tmp_data_dir().await;
+        let session = store
+            .create("t", "p", &std::path::PathBuf::from("/tmp"))
+            .await
+            .unwrap();
+        let session_id = SessionID::parse(&session.id).unwrap();
+
+        // Save two user messages at different timestamps.
+        let m1_id = crate::id::MessageID::new();
+        let m1 = crate::message::UserMessage {
+            id: m1_id.clone(),
+            session_id: session_id.clone(),
+            role: "user".to_string(),
+            time: crate::message::UserTime { created: 1_000 },
+            format: None, summary: None, agent: "build".to_string(),
+            model: crate::message::ModelRef {
+                provider_id: "anthropic".to_string(),
+                model_id: "m".to_string(),
+                variant: None,
+            },
+            system: None, tools: None,
+        };
+        store.save_message(&session_id, &crate::message::Message::User(m1)).await.unwrap();
+        store.save_text_part(&session_id, &m1_id, "OLD MESSAGE").await.unwrap();
+
+        let m2_id = crate::id::MessageID::new();
+        let m2 = crate::message::UserMessage {
+            id: m2_id.clone(),
+            session_id: session_id.clone(),
+            role: "user".to_string(),
+            time: crate::message::UserTime { created: 5_000 },
+            format: None, summary: None, agent: "build".to_string(),
+            model: crate::message::ModelRef {
+                provider_id: "anthropic".to_string(),
+                model_id: "m".to_string(),
+                variant: None,
+            },
+            system: None, tools: None,
+        };
+        store.save_message(&session_id, &crate::message::Message::User(m2)).await.unwrap();
+        store.save_text_part(&session_id, &m2_id, "NEW MESSAGE").await.unwrap();
+
+        // No boundary yet — both are visible.
+        let before = build_completion_messages(&store, &session_id).await.unwrap();
+        assert_eq!(before.len(), 2, "{:?}", before);
+
+        // Set the boundary between the two messages.
+        store.set_time_compacting(&session_id, 4_000).await.unwrap();
+
+        let after = build_completion_messages(&store, &session_id).await.unwrap();
+        assert_eq!(after.len(), 1, "{:?}", after);
+        assert_eq!(after[0].content, "NEW MESSAGE");
     }
 }
