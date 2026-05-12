@@ -7,6 +7,7 @@ pub mod file;
 pub mod git;
 pub mod global;
 pub mod id;
+pub mod lsp;
 pub mod mcp;
 pub mod message;
 pub mod permission;
