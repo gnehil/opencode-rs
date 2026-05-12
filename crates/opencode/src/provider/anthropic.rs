@@ -65,13 +65,25 @@ struct AnthropicMessage {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicContent {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: serde_json::Value },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     ToolResult {
         tool_use_id: String,
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
 }
 
@@ -504,13 +516,17 @@ fn convert_messages(messages: &[crate::provider::CompletionMessage]) -> Vec<Anth
                         tool_use_id,
                         content: msg.content.clone(),
                         is_error: None,
+                        cache_control: None,
                     }],
                 );
             }
             "assistant" => {
                 let mut content: Vec<AnthropicContent> = Vec::new();
                 if !msg.content.is_empty() {
-                    content.push(AnthropicContent::Text { text: msg.content.clone() });
+                    content.push(AnthropicContent::Text {
+                        text: msg.content.clone(),
+                        cache_control: None,
+                    });
                 }
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
@@ -520,7 +536,12 @@ fn convert_messages(messages: &[crate::provider::CompletionMessage]) -> Vec<Anth
                         let raw_args = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
                         let input: serde_json::Value =
                             serde_json::from_str(raw_args).unwrap_or(serde_json::json!({}));
-                        content.push(AnthropicContent::ToolUse { id, name, input });
+                        content.push(AnthropicContent::ToolUse {
+                            id,
+                            name,
+                            input,
+                            cache_control: None,
+                        });
                     }
                 }
                 if !content.is_empty() {
@@ -531,13 +552,36 @@ fn convert_messages(messages: &[crate::provider::CompletionMessage]) -> Vec<Anth
             _ => {
                 push_user(
                     &mut out,
-                    vec![AnthropicContent::Text { text: msg.content.clone() }],
+                    vec![AnthropicContent::Text {
+                        text: msg.content.clone(),
+                        cache_control: None,
+                    }],
                 );
             }
         }
     }
 
+    // Mark the LAST content block of the LAST message with cache_control.
+    // Combined with the markers already on system + tools, this gives us
+    // exactly 3 cache breakpoints per request (system, tools, history).
+    // The cached prefix grows by one assistant + tool_result pair each
+    // turn, so any model "thinking" beyond turn 3 hits an ever-larger
+    // cached prefix.
+    if let Some(last_msg) = out.last_mut() {
+        if let Some(last_block) = last_msg.content.last_mut() {
+            set_cache_control(last_block, Some(EPHEMERAL));
+        }
+    }
+
     out
+}
+
+fn set_cache_control(content: &mut AnthropicContent, cc: Option<CacheControl>) {
+    match content {
+        AnthropicContent::Text { cache_control, .. } => *cache_control = cc,
+        AnthropicContent::ToolUse { cache_control, .. } => *cache_control = cc,
+        AnthropicContent::ToolResult { cache_control, .. } => *cache_control = cc,
+    }
 }
 
 #[cfg(test)]
@@ -582,7 +626,7 @@ mod tests {
         assert_eq!(result[0].content.len(), 2);
         assert!(matches!(result[0].content[0], AnthropicContent::Text { .. }));
         match &result[0].content[1] {
-            AnthropicContent::ToolUse { id, name, input } => {
+            AnthropicContent::ToolUse { id, name, input, .. } => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(name, "bash");
                 assert_eq!(input["command"], "ls");
@@ -680,5 +724,57 @@ mod tests {
         let p = provider();
         let r = p.build_request(&req(Some("x"), 0), false);
         assert!(r.tools.is_empty());
+    }
+
+    fn cc(content: &AnthropicContent) -> Option<CacheControl> {
+        match content {
+            AnthropicContent::Text { cache_control, .. } => *cache_control,
+            AnthropicContent::ToolUse { cache_control, .. } => *cache_control,
+            AnthropicContent::ToolResult { cache_control, .. } => *cache_control,
+        }
+    }
+
+    #[test]
+    fn last_history_block_gets_cache_breakpoint() {
+        // Two turns: user → assistant. The assistant's text block is
+        // the last content of the last message and should carry
+        // cache_control.
+        let history = convert_messages(&[msg("user", "hi"), msg("assistant", "hello")]);
+        let last = history.last().unwrap();
+        assert!(cc(last.content.last().unwrap()).is_some());
+
+        // Earlier blocks must NOT be marked (we use exactly 3
+        // breakpoints in a request: system, tools, history-tail).
+        let first = &history[0];
+        assert!(cc(first.content.last().unwrap()).is_none());
+    }
+
+    #[test]
+    fn last_tool_result_in_coalesced_user_gets_cache_breakpoint() {
+        // Two tool results coalesce into a single user message. The
+        // breakpoint lands on the LAST tool_result, caching both.
+        let result = convert_messages(&[
+            CompletionMessage {
+                role: "tool".to_string(),
+                content: "r1".to_string(),
+                tool_calls: None,
+                tool_call_id: Some("toolu_1".to_string()),
+            },
+            CompletionMessage {
+                role: "tool".to_string(),
+                content: "r2".to_string(),
+                tool_calls: None,
+                tool_call_id: Some("toolu_2".to_string()),
+            },
+        ]);
+        assert_eq!(result.len(), 1);
+        assert!(cc(&result[0].content[0]).is_none());
+        assert!(cc(&result[0].content[1]).is_some());
+    }
+
+    #[test]
+    fn empty_history_does_not_panic() {
+        let result = convert_messages(&[]);
+        assert!(result.is_empty());
     }
 }
