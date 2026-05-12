@@ -17,8 +17,12 @@ struct AnthropicRequest {
     model: String,
     max_tokens: u64,
     messages: Vec<AnthropicMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    // Always emit as a content-block array so we can attach
+    // cache_control to the system prompt. Anthropic accepts either a
+    // plain string or this array form; we standardize on the array so
+    // the prompt cache picks up on long-stable system prompts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    system: Vec<AnthropicSystemBlock>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -29,6 +33,27 @@ struct AnthropicRequest {
     stop_sequences: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+}
+
+/// Cache breakpoint marker. Attaching `cache_control: ephemeral` to a
+/// content block tells Anthropic to cache everything in the request up
+/// to and including that block; subsequent requests that share the same
+/// prefix hit the cache. Up to 4 breakpoints per request.
+#[derive(Debug, Serialize, Clone, Copy)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    cache_type: &'static str,
+}
+
+const EPHEMERAL: CacheControl = CacheControl { cache_type: "ephemeral" };
+
+#[derive(Debug, Serialize)]
+struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,6 +80,8 @@ struct AnthropicTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,21 +201,43 @@ impl AnthropicProvider {
     fn build_request(&self, request: &CompletionRequest, stream: bool) -> AnthropicRequest {
         let messages = convert_messages(&request.messages);
 
-        let tools: Vec<AnthropicTool> = request
+        // Prompt-cache the system message and the trailing tool entry.
+        // Together these typically account for >90% of the static part
+        // of an agent turn (the system prompt restates the role +
+        // available tools; the tool defs are several KB of JSON schema).
+        // Anthropic charges 25% extra on the first request that creates
+        // a breakpoint and 10% on cache reads — net win after 2 turns.
+        let system = match &request.system {
+            Some(text) if !text.is_empty() => vec![AnthropicSystemBlock {
+                block_type: "text",
+                text: text.clone(),
+                cache_control: Some(EPHEMERAL),
+            }],
+            _ => Vec::new(),
+        };
+
+        let mut tools: Vec<AnthropicTool> = request
             .tools
             .iter()
             .map(|t| AnthropicTool {
                 name: t.name.clone(),
                 description: t.description.clone(),
                 input_schema: t.parameters.clone(),
+                cache_control: None,
             })
             .collect();
+        // Mark the LAST tool with cache_control. Per the Anthropic
+        // protocol, this marks the entire tools array as a cache prefix
+        // (everything up to and including the marker is the cache key).
+        if let Some(last) = tools.last_mut() {
+            last.cache_control = Some(EPHEMERAL);
+        }
 
         AnthropicRequest {
             model: request.model.as_str().to_string(),
             max_tokens: request.max_tokens.unwrap_or(4096),
             messages,
-            system: request.system.clone(),
+            system,
             tools,
             temperature: request.temperature,
             top_p: request.top_p,
@@ -571,5 +620,65 @@ mod tests {
             }
             _ => panic!("expected both ToolResult"),
         }
+    }
+
+    fn provider() -> AnthropicProvider {
+        AnthropicProvider::new("test-key".to_string(), None)
+    }
+
+    fn req(system: Option<&str>, tool_count: usize) -> CompletionRequest {
+        CompletionRequest {
+            model: crate::provider::ModelID::new("claude-3-5-sonnet-20241022"),
+            messages: vec![msg("user", "hi")],
+            system: system.map(|s| s.to_string()),
+            tools: (0..tool_count).map(|i| crate::provider::ToolDefinition {
+                name: format!("tool_{i}"),
+                description: "desc".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }).collect(),
+            max_tokens: Some(1024),
+            temperature: None,
+            top_p: None,
+            stop_sequences: None,
+        }
+    }
+
+    #[test]
+    fn system_block_carries_cache_control() {
+        let p = provider();
+        let r = p.build_request(&req(Some("you are an agent"), 0), false);
+        assert_eq!(r.system.len(), 1);
+        assert!(r.system[0].cache_control.is_some());
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains(r#""cache_control":{"type":"ephemeral"}"#));
+        // and that the system block is the array form, not a plain string
+        assert!(json.contains(r#""system":[{"type":"text","text":"you are an agent""#));
+    }
+
+    #[test]
+    fn empty_system_omits_field_entirely() {
+        let p = provider();
+        let r = p.build_request(&req(None, 0), false);
+        assert!(r.system.is_empty());
+        let json = serde_json::to_string(&r).unwrap();
+        // skip_serializing_if = "Vec::is_empty" -> no `system` key.
+        assert!(!json.contains(r#""system":"#), "{json}");
+    }
+
+    #[test]
+    fn only_last_tool_gets_cache_control() {
+        let p = provider();
+        let r = p.build_request(&req(None, 3), false);
+        assert_eq!(r.tools.len(), 3);
+        assert!(r.tools[0].cache_control.is_none());
+        assert!(r.tools[1].cache_control.is_none());
+        assert!(r.tools[2].cache_control.is_some());
+    }
+
+    #[test]
+    fn zero_tools_does_not_panic() {
+        let p = provider();
+        let r = p.build_request(&req(Some("x"), 0), false);
+        assert!(r.tools.is_empty());
     }
 }
