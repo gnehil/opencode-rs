@@ -126,9 +126,11 @@ enum_dispatch = "0.3"
 
 # Crypto
 sha2 = "0.10"
+hmac = "0.12"
 base64 = "0.22"
 rand = "0.8"
 hex = "0.4"
+urlencoding = "2"
 
 # Markdown/code parsing
 gray_matter = "0.3"
