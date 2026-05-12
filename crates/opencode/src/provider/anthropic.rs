@@ -41,6 +41,13 @@ struct AnthropicMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicContent {
     Text { text: String },
+    ToolUse { id: String, name: String, input: serde_json::Value },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -165,14 +172,7 @@ impl AnthropicProvider {
     }
 
     fn build_request(&self, request: &CompletionRequest, stream: bool) -> AnthropicRequest {
-        let messages: Vec<AnthropicMessage> = request
-            .messages
-            .iter()
-            .map(|msg| AnthropicMessage {
-                role: msg.role.clone(),
-                content: vec![AnthropicContent::Text { text: msg.content.clone() }],
-            })
-            .collect();
+        let messages = convert_messages(&request.messages);
 
         let tools: Vec<AnthropicTool> = request
             .tools
@@ -414,6 +414,162 @@ impl AnthropicProvider {
                 stop_reason: None,
                 usage: None,
             }),
+        }
+    }
+}
+
+/// Convert the provider-neutral `CompletionMessage` list into Anthropic's
+/// nested-content-block format.
+///
+/// Anthropic only has `user` and `assistant` roles; tool_use lives in
+/// assistant content, tool_result lives in user content. Consecutive
+/// tool_result entries are coalesced into a single user message because
+/// Anthropic rejects multiple user messages in a row.
+fn convert_messages(messages: &[crate::provider::CompletionMessage]) -> Vec<AnthropicMessage> {
+    let mut out: Vec<AnthropicMessage> = Vec::new();
+
+    let push_user = |out: &mut Vec<AnthropicMessage>, content: Vec<AnthropicContent>| {
+        if content.is_empty() {
+            return;
+        }
+        // Coalesce with the previous user message if it was just a
+        // tool_result run; otherwise push a new entry.
+        if let Some(last) = out.last_mut() {
+            if last.role == "user" {
+                last.content.extend(content);
+                return;
+            }
+        }
+        out.push(AnthropicMessage { role: "user".to_string(), content });
+    };
+
+    for msg in messages {
+        match msg.role.as_str() {
+            "tool" => {
+                // OpenAI-shaped tool result: convert to Anthropic tool_result
+                // and attach to the (coalesced) user message.
+                let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
+                push_user(
+                    &mut out,
+                    vec![AnthropicContent::ToolResult {
+                        tool_use_id,
+                        content: msg.content.clone(),
+                        is_error: None,
+                    }],
+                );
+            }
+            "assistant" => {
+                let mut content: Vec<AnthropicContent> = Vec::new();
+                if !msg.content.is_empty() {
+                    content.push(AnthropicContent::Text { text: msg.content.clone() });
+                }
+                if let Some(tool_calls) = &msg.tool_calls {
+                    for tc in tool_calls {
+                        let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let func = tc.get("function").cloned().unwrap_or(serde_json::Value::Null);
+                        let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let raw_args = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
+                        let input: serde_json::Value =
+                            serde_json::from_str(raw_args).unwrap_or(serde_json::json!({}));
+                        content.push(AnthropicContent::ToolUse { id, name, input });
+                    }
+                }
+                if !content.is_empty() {
+                    out.push(AnthropicMessage { role: "assistant".to_string(), content });
+                }
+            }
+            // "user" and any other role we treat as a user text turn.
+            _ => {
+                push_user(
+                    &mut out,
+                    vec![AnthropicContent::Text { text: msg.content.clone() }],
+                );
+            }
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::CompletionMessage;
+
+    fn msg(role: &str, content: &str) -> CompletionMessage {
+        CompletionMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn user_assistant_turns_serialize_as_text_blocks() {
+        let result = convert_messages(&[
+            msg("user", "hi"),
+            msg("assistant", "hello"),
+        ]);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].role, "user");
+        assert!(matches!(result[0].content[0], AnthropicContent::Text { .. }));
+    }
+
+    #[test]
+    fn assistant_tool_call_emits_tool_use_block() {
+        let assistant = CompletionMessage {
+            role: "assistant".to_string(),
+            content: "let me check".to_string(),
+            tool_calls: Some(vec![serde_json::json!({
+                "id": "toolu_1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
+            })]),
+            tool_call_id: None,
+        };
+        let result = convert_messages(&[assistant]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content.len(), 2);
+        assert!(matches!(result[0].content[0], AnthropicContent::Text { .. }));
+        match &result[0].content[1] {
+            AnthropicContent::ToolUse { id, name, input } => {
+                assert_eq!(id, "toolu_1");
+                assert_eq!(name, "bash");
+                assert_eq!(input["command"], "ls");
+            }
+            _ => panic!("expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn tool_role_coalesces_into_user_message() {
+        let result = convert_messages(&[
+            CompletionMessage {
+                role: "tool".to_string(),
+                content: "out1".to_string(),
+                tool_calls: None,
+                tool_call_id: Some("toolu_1".to_string()),
+            },
+            CompletionMessage {
+                role: "tool".to_string(),
+                content: "out2".to_string(),
+                tool_calls: None,
+                tool_call_id: Some("toolu_2".to_string()),
+            },
+        ]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "user");
+        assert_eq!(result[0].content.len(), 2);
+        match (&result[0].content[0], &result[0].content[1]) {
+            (
+                AnthropicContent::ToolResult { tool_use_id: id1, .. },
+                AnthropicContent::ToolResult { tool_use_id: id2, .. },
+            ) => {
+                assert_eq!(id1, "toolu_1");
+                assert_eq!(id2, "toolu_2");
+            }
+            _ => panic!("expected both ToolResult"),
         }
     }
 }

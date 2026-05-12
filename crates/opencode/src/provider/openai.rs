@@ -32,7 +32,12 @@ struct OpenAIRequest {
 #[derive(Debug, Serialize)]
 struct OpenAIMessage {
     role: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -223,7 +228,12 @@ impl OpenAIProvider {
         let messages: Vec<OpenAIMessage> = request
             .messages
             .iter()
-            .map(|msg| OpenAIMessage { role: msg.role.clone(), content: msg.content.clone() })
+            .map(|msg| OpenAIMessage {
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                tool_calls: msg.tool_calls.clone(),
+                tool_call_id: msg.tool_call_id.clone(),
+            })
             .collect();
 
         let tools: Vec<OpenAITool> = request

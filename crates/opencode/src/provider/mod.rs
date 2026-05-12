@@ -69,3 +69,26 @@ pub use venice::VeniceProvider;
 pub use vercel::VercelProvider;
 pub use vertex::VertexProvider;
 pub use xai::XAIProvider;
+
+/// Serialize a `CompletionMessage` into the OpenAI chat-completions message
+/// shape. Used by the OpenAI provider and every OpenAI-compatible provider
+/// (Groq, Mistral, xAI, Together, etc.) so tool_calls / tool_call_id are
+/// preserved on the wire instead of being stripped to a flat `{role, content}`.
+pub fn openai_compat_message_json(msg: &CompletionMessage) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("role".to_string(), serde_json::Value::String(msg.role.clone()));
+    obj.insert(
+        "content".to_string(),
+        serde_json::Value::String(msg.content.clone()),
+    );
+    if let Some(tc) = &msg.tool_calls {
+        obj.insert("tool_calls".to_string(), serde_json::Value::Array(tc.clone()));
+    }
+    if let Some(id) = &msg.tool_call_id {
+        obj.insert(
+            "tool_call_id".to_string(),
+            serde_json::Value::String(id.clone()),
+        );
+    }
+    serde_json::Value::Object(obj)
+}

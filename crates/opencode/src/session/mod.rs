@@ -1,3 +1,4 @@
+pub mod history;
 pub mod info;
 pub mod model;
 pub mod revert;
@@ -7,6 +8,7 @@ pub mod time;
 pub mod service;
 pub mod processor;
 
+pub use history::build_completion_messages;
 pub use info::SessionInfo;
 pub use model::SessionModel;
 pub use revert::SessionRevert;

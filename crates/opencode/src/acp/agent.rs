@@ -778,14 +778,16 @@ impl ACPAgent {
             crate::bus::MessageRole::User,
         ));
 
+        // Build the full conversation from persisted state so the model sees
+        // prior turns, including any tool_use/tool_result history.
+        let history = crate::session::build_completion_messages(
+            self.store.as_ref(),
+            &session_id,
+        ).await?;
+
         let completion_request = crate::provider::CompletionRequest {
             model: crate::provider::ModelID::new(&model.model_id),
-            messages: vec![crate::provider::CompletionMessage {
-                role: "user".to_string(),
-                content: prompt_text,
-                tool_calls: None,
-                tool_call_id: None,
-            }],
+            messages: history,
             system: None,
             tools: vec![],
             max_tokens: Some(4096),
@@ -793,6 +795,7 @@ impl ACPAgent {
             top_p: None,
             stop_sequences: None,
         };
+        let _ = prompt_text; // already persisted as a text part above
 
         // Register a cancel notifier for this session before we kick off the
         // provider call. If cancel arrives we abort and return a cancelled

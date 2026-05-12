@@ -29,7 +29,12 @@ impl GroqProvider {
     }
 
     fn build_messages(&self, request: &CompletionRequest) -> Vec<GroqMessage> {
-        request.messages.iter().map(|msg| GroqMessage { role: msg.role.clone(), content: msg.content.clone() }).collect()
+        request.messages.iter().map(|msg| GroqMessage {
+            role: msg.role.clone(),
+            content: msg.content.clone(),
+            tool_calls: msg.tool_calls.clone(),
+            tool_call_id: msg.tool_call_id.clone(),
+        }).collect()
     }
 
     fn build_request(&self, request: &CompletionRequest, stream: bool) -> GroqRequest {
@@ -47,7 +52,12 @@ impl GroqProvider {
 #[derive(Serialize)]
 struct GroqMessage {
     role: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
 }
 
 #[derive(Serialize)]

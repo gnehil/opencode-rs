@@ -36,12 +36,16 @@ pub struct PathInfo {
     pub root: String,
 }
 
+fn assistant_role_default() -> String { "assistant".to_string() }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantMessage {
     pub id: MessageID,
     #[serde(rename = "sessionID")]
     pub session_id: SessionID,
+    // See user.rs::role for why this is skipped on both sides.
+    #[serde(skip, default = "assistant_role_default")]
     pub role: String,
     pub time: AssistantTime,
     #[serde(skip_serializing_if = "Option::is_none")]

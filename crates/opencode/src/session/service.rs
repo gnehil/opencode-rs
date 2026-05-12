@@ -8,6 +8,13 @@ use crate::id::SessionID;
 use crate::storage::{SessionRow, MessageRow, PartRow, init_db};
 use crate::message::{Message, WithParts, Part};
 
+/// Argument for `save_tool_part` — the outcome side of a tool call we want
+/// to persist as a `ToolPart` of the assistant message.
+pub enum ToolPartResult {
+    Completed { output: String },
+    Error { error: String },
+}
+
 pub struct SessionStore {
     pub pool: Arc<SqlitePool>,
 }
@@ -242,6 +249,76 @@ impl SessionStore {
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .bind(&id)
+        .bind(session_id.to_string())
+        .bind(now)
+        .bind(now)
+        .bind(data)
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn save_tool_part(
+        &self,
+        session_id: &SessionID,
+        message_id: &crate::id::MessageID,
+        tool_name: &str,
+        call_id: &str,
+        input: &serde_json::Value,
+        result: ToolPartResult,
+    ) -> Result<()> {
+        use crate::message::ToolState;
+        let part_id = crate::id::PartID::new();
+        let now = chrono::Utc::now().timestamp_millis();
+
+        let input_map: std::collections::HashMap<String, serde_json::Value> =
+            match input {
+                serde_json::Value::Object(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                _ => std::collections::HashMap::new(),
+            };
+
+        let state = match result {
+            ToolPartResult::Completed { output } => ToolState::Completed(crate::message::tool_state::ToolStateCompleted {
+                input: input_map,
+                output,
+                title: tool_name.to_string(),
+                metadata: std::collections::HashMap::new(),
+                time: crate::message::tool_state::ToolStateEndedTime {
+                    start: now,
+                    end: now,
+                    compacted: None,
+                },
+                attachments: None,
+            }),
+            ToolPartResult::Error { error } => ToolState::Error(crate::message::tool_state::ToolStateError {
+                input: input_map,
+                error,
+                metadata: None,
+                time: crate::message::tool_state::ToolStateEndedTime {
+                    start: now,
+                    end: now,
+                    compacted: None,
+                },
+            }),
+        };
+
+        let tool_part = crate::message::part::ToolPart {
+            id: part_id.clone(),
+            session_id: session_id.clone(),
+            message_id: message_id.clone(),
+            call_id: call_id.to_string(),
+            tool: tool_name.to_string(),
+            state,
+            metadata: None,
+        };
+        let data = serde_json::to_string(&crate::message::part::Part::Tool(tool_part))?;
+
+        sqlx::query(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(part_id.to_string())
+        .bind(message_id.to_string())
         .bind(session_id.to_string())
         .bind(now)
         .bind(now)

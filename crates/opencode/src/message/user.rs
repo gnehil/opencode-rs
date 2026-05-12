@@ -21,6 +21,10 @@ pub struct UserMessage {
     pub id: MessageID,
     #[serde(rename = "sessionID")]
     pub session_id: SessionID,
+    // The discriminant lives on the enum (`#[serde(tag = "role")]`); we keep
+    // a local copy for ergonomics inside the struct but skip it on both
+    // serialize and deserialize so the JSON has exactly one `role` key.
+    #[serde(skip, default = "user_role_default")]
     pub role: String,
     pub time: UserTime,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,6 +59,8 @@ impl Default for UserMessage {
         }
     }
 }
+
+fn user_role_default() -> String { "user".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

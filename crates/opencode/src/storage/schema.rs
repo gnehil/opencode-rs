@@ -13,14 +13,18 @@ pub fn migration_sql() -> &'static str {
 }
 
 pub async fn init_db<P: AsRef<Path>>(db_path: P) -> anyhow::Result<SqlitePool> {
+    use sqlx::sqlite::SqliteConnectOptions;
+    use std::str::FromStr;
+
     let path = db_path.as_ref();
 
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let db_url = format!("sqlite:{}", path.display());
-    let pool = SqlitePool::connect(&db_url).await?;
+    let opts = SqliteConnectOptions::from_str(&format!("sqlite:{}", path.display()))?
+        .create_if_missing(true);
+    let pool = SqlitePool::connect_with(opts).await?;
 
     migrate(&pool).await?;
 

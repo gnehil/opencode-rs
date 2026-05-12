@@ -1,10 +1,8 @@
 use std::sync::Arc;
-use std::collections::HashMap;
 
-use crate::id::{SessionID, MessageID, PartID};
+use crate::id::{SessionID, MessageID};
 use crate::message::{Message, UserMessage, AssistantMessage, UserTime, ModelRef};
 use crate::message::{AssistantTime, TokenUsage, CacheUsage, PathInfo};
-use crate::message::part::TextPart;
 use crate::provider::{CompletionMessage, CompletionRequest, Provider, ToolDefinition};
 use crate::session::SessionStore;
 use crate::tool::{Tool, ToolContext, BashTool, ReadTool, WriteTool, EditTool, GlobTool, GrepTool};
@@ -68,48 +66,57 @@ impl PromptProcessor {
 
     pub async fn process_stream(&self, session_id: &SessionID, prompt: &str) -> anyhow::Result<Vec<ProcessEvent>> {
         let mut events = Vec::new();
-        let mut iteration = 0;
-        let mut current_prompt = prompt.to_string();
         let mut accumulated_content = String::new();
 
-        while iteration < self.max_iterations {
-            iteration += 1;
-            
-            let user_message_id = MessageID::new();
-            let now = chrono::Utc::now().timestamp_millis();
-            let model_id = self.provider.default_model()
-                .and_then(|m| m.id.clone())
-                .map(|m| m.to_string())
-                .unwrap_or_else(|| "claude-3-5-sonnet-20241022".to_string());
+        let model_id = self.provider.default_model()
+            .and_then(|m| m.id.clone())
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "claude-3-5-sonnet-20241022".to_string());
 
-            let user_msg = UserMessage {
-                id: user_message_id.clone(),
-                session_id: session_id.clone(),
-                role: "user".to_string(),
-                time: UserTime { created: now },
-                format: None,
-                summary: None,
-                agent: "build".to_string(),
-                model: ModelRef {
-                    provider_id: self.provider.name().to_string(),
-                    model_id: model_id.clone(),
-                    variant: None,
-                },
-                system: None,
-                tools: None,
-            };
+        // Persist the user turn exactly once. Subsequent provider calls in
+        // the same `process_stream` invocation are tool-result iterations,
+        // not new user messages — they replay the persisted history.
+        let user_message_id = MessageID::new();
+        let now = chrono::Utc::now().timestamp_millis();
+        let user_msg = UserMessage {
+            id: user_message_id.clone(),
+            session_id: session_id.clone(),
+            role: "user".to_string(),
+            time: UserTime { created: now },
+            format: None,
+            summary: None,
+            agent: "build".to_string(),
+            model: ModelRef {
+                provider_id: self.provider.name().to_string(),
+                model_id: model_id.clone(),
+                variant: None,
+            },
+            system: None,
+            tools: None,
+        };
+        self.store.save_message(session_id, &Message::User(user_msg)).await?;
+        self.store.save_text_part(session_id, &user_message_id, prompt).await?;
+        self.bus.publish(Event::message_create(
+            session_id.to_string(),
+            user_message_id.to_string(),
+            MessageRole::User,
+        ));
 
-            self.save_message(session_id, &Message::User(user_msg)).await?;
-            self.save_text_part(session_id, &user_message_id, &current_prompt, now).await?;
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
 
-            self.bus.publish(Event::message_create(
-                session_id.to_string(),
-                user_message_id.to_string(),
-                MessageRole::User,
-            ));
+        for _ in 0..self.max_iterations {
+            // Rebuild the full conversation from persisted state every
+            // iteration so each turn sees the canonical view (the model's
+            // own prior tool_use calls + our tool_result responses).
+            let history = crate::session::build_completion_messages(
+                self.store.as_ref(),
+                session_id,
+            ).await?;
 
-            let request = self.build_request(&model_id, &current_prompt)?;
-            
+            let request = self.build_request_from_history(&model_id, history)?;
+
             let response = match self.provider.complete(request).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -119,35 +126,26 @@ impl PromptProcessor {
             };
 
             accumulated_content.push_str(&response.content);
-            events.push(ProcessEvent::TextDelta(response.content.clone()));
+            if !response.content.is_empty() {
+                events.push(ProcessEvent::TextDelta(response.content.clone()));
+            }
 
-            self.bus.publish(Event::message_stream(
-                session_id.to_string(),
-                MessageID::new().to_string(),
-                &response.content,
-            ));
-
+            // Persist the assistant turn before running tools so a crash
+            // mid-tool leaves a recoverable trace.
             let assistant_message_id = MessageID::new();
+            let turn_time = chrono::Utc::now().timestamp_millis();
             let assistant_msg = AssistantMessage {
                 id: assistant_message_id.clone(),
                 session_id: session_id.clone(),
                 role: "assistant".to_string(),
-                time: AssistantTime {
-                    created: now,
-                    completed: Some(now),
-                },
+                time: AssistantTime { created: turn_time, completed: Some(turn_time) },
                 error: None,
                 parent_id: user_message_id.to_string(),
-                model_id: model_id,
+                model_id: model_id.clone(),
                 provider_id: self.provider.name().to_string(),
                 mode: "default".to_string(),
                 agent: "build".to_string(),
-                path: PathInfo {
-                    cwd: std::env::current_dir()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default(),
-                    root: "/".to_string(),
-                },
+                path: PathInfo { cwd: cwd.clone(), root: "/".to_string() },
                 summary: None,
                 cost: 0.0,
                 tokens: TokenUsage {
@@ -164,10 +162,10 @@ impl PromptProcessor {
                 variant: None,
                 finish: None,
             };
-
-            self.save_message(session_id, &Message::Assistant(assistant_msg)).await?;
-            self.save_text_part(session_id, &assistant_message_id, &response.content, now).await?;
-
+            self.store.save_message(session_id, &Message::Assistant(assistant_msg)).await?;
+            if !response.content.is_empty() {
+                self.store.save_text_part(session_id, &assistant_message_id, &response.content).await?;
+            }
             self.bus.publish(Event::message_create(
                 session_id.to_string(),
                 assistant_message_id.to_string(),
@@ -179,145 +177,109 @@ impl PromptProcessor {
                 break;
             }
 
-            let tool_results = self.execute_tool_calls_with_events(session_id, &response.tool_calls, &mut events).await?;
-            
-            current_prompt = self.format_tool_results(&tool_results);
+            // Execute each tool call and persist a ToolPart on the
+            // assistant message so the next history rebuild picks it up.
+            self.execute_and_persist_tool_calls(
+                session_id,
+                &assistant_message_id,
+                &response.tool_calls,
+                &mut events,
+            ).await?;
         }
 
         Ok(events)
     }
 
-    async fn execute_tool_calls_with_events(
-        &self, 
-        session_id: &SessionID, 
+    async fn execute_and_persist_tool_calls(
+        &self,
+        session_id: &SessionID,
+        message_id: &MessageID,
         tool_calls: &[crate::provider::ToolCall],
-        events: &mut Vec<ProcessEvent>
-    ) -> anyhow::Result<HashMap<String, serde_json::Value>> {
+        events: &mut Vec<ProcessEvent>,
+    ) -> anyhow::Result<()> {
+        use crate::session::service::ToolPartResult;
+
         let working_dir = std::env::current_dir()?;
-        let mut results = HashMap::new();
-        
+
         for tool_call in tool_calls {
+            let params: serde_json::Value =
+                serde_json::from_str(&tool_call.arguments).unwrap_or(serde_json::json!({}));
+
+            self.bus.publish(Event::tool_start(
+                session_id.to_string(),
+                tool_call.name.clone(),
+                params.clone(),
+            ));
+            events.push(ProcessEvent::ToolStart(tool_call.name.clone(), params.clone()));
+
             let tool = self.tools.iter().find(|t| t.name() == tool_call.name);
-            
-            if let Some(tool) = tool {
-                let params: serde_json::Value = match serde_json::from_str(&tool_call.arguments) {
-                    Ok(p) => p,
-                    Err(_) => serde_json::json!({}),
-                };
 
-                self.bus.publish(Event::tool_start(
-                    session_id.to_string(),
-                    tool_call.name.clone(),
-                    params.clone(),
-                ));
-                events.push(ProcessEvent::ToolStart(tool_call.name.clone(), params.clone()));
-
-                let ctx = ToolContext {
-                    session_id: session_id.clone(),
-                    working_dir: working_dir.clone(),
-                    permission_rules: crate::permission::Ruleset::default(),
-                };
-
-                let result = tool.execute(params.clone(), ctx).await;
-                
-                match result {
-                    Ok(tool_result) => {
-                        let output = serde_json::to_string(&tool_result)?;
-                        let output_value = serde_json::json!({ "result": output });
-                        results.insert(tool_call.id.clone(), output_value.clone());
-                        
-                        self.bus.publish(Event::tool_complete(
-                            session_id.to_string(),
-                            tool_call.name.clone(),
-                            output_value.clone(),
-                        ));
-                        events.push(ProcessEvent::ToolComplete(tool_call.name.clone(), output_value));
-                    }
-                    Err(e) => {
-                        let error_msg = e.to_string();
-                        results.insert(tool_call.id.clone(), serde_json::json!({ "error": error_msg }));
-                        
-                        self.bus.publish(Event::tool_error(
-                            session_id.to_string(),
-                            tool_call.name.clone(),
-                            error_msg.clone(),
-                        ));
+            let outcome = match tool {
+                Some(tool) => {
+                    let ctx = ToolContext {
+                        session_id: session_id.clone(),
+                        working_dir: working_dir.clone(),
+                        permission_rules: crate::permission::Ruleset::default(),
+                    };
+                    match tool.execute(params.clone(), ctx).await {
+                        Ok(tool_result) => ToolPartResult::Completed {
+                            output: tool_result.output,
+                        },
+                        Err(e) => ToolPartResult::Error { error: e.to_string() },
                     }
                 }
-            } else {
-                let error_msg = format!("Unknown tool: {}", tool_call.name);
-                results.insert(tool_call.id.clone(), serde_json::json!({ "error": error_msg }));
-                
-                self.bus.publish(Event::tool_error(
-                    session_id.to_string(),
-                    tool_call.name.clone(),
-                    error_msg,
-                ));
+                None => ToolPartResult::Error {
+                    error: format!("Unknown tool: {}", tool_call.name),
+                },
+            };
+
+            // Persist BEFORE publishing the complete event so a subscriber
+            // racing to read history doesn't miss it.
+            self.store
+                .save_tool_part(
+                    session_id,
+                    message_id,
+                    &tool_call.name,
+                    &tool_call.id,
+                    &params,
+                    match &outcome {
+                        ToolPartResult::Completed { output } => {
+                            ToolPartResult::Completed { output: output.clone() }
+                        }
+                        ToolPartResult::Error { error } => ToolPartResult::Error {
+                            error: error.clone(),
+                        },
+                    },
+                )
+                .await?;
+
+            match &outcome {
+                ToolPartResult::Completed { output } => {
+                    let value = serde_json::json!({ "result": output });
+                    self.bus.publish(Event::tool_complete(
+                        session_id.to_string(),
+                        tool_call.name.clone(),
+                        value.clone(),
+                    ));
+                    events.push(ProcessEvent::ToolComplete(tool_call.name.clone(), value));
+                }
+                ToolPartResult::Error { error } => {
+                    self.bus.publish(Event::tool_error(
+                        session_id.to_string(),
+                        tool_call.name.clone(),
+                        error.clone(),
+                    ));
+                }
             }
         }
-
-        Ok(results)
-    }
-
-    fn format_tool_results(&self, results: &HashMap<String, serde_json::Value>) -> String {
-        let mut formatted = String::new();
-        for (id, result) in results {
-            formatted.push_str(&format!("Tool result {}:\n{}\n\n", id, serde_json::to_string(result).unwrap_or_default()));
-        }
-        formatted
-    }
-
-    async fn save_message(&self, session_id: &SessionID, message: &Message) -> anyhow::Result<()> {
-        let data = serde_json::to_string(message)?;
-        let now = chrono::Utc::now().timestamp_millis();
-        let message_id_str = match message {
-            Message::User(u) => u.id.to_string(),
-            Message::Assistant(a) => a.id.to_string(),
-        };
-
-        sqlx::query(
-            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)"
-        )
-        .bind(&message_id_str)
-        .bind(session_id.to_string())
-        .bind(now)
-        .bind(now)
-        .bind(&data)
-        .execute(self.store.pool.as_ref())
-        .await?;
-
         Ok(())
     }
 
-    async fn save_text_part(&self, session_id: &SessionID, message_id: &MessageID, text: &str, time: i64) -> anyhow::Result<()> {
-        let part_id = PartID::new();
-        let part_data = serde_json::to_string(&TextPart {
-            id: part_id.clone(),
-            session_id: session_id.clone(),
-            message_id: message_id.clone(),
-            text: text.to_string(),
-            synthetic: None,
-            ignored: None,
-            time: None,
-            metadata: None,
-        })?;
-
-        sqlx::query(
-            "INSERT INTO part (id, session_id, message_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
-        )
-        .bind(part_id.to_string())
-        .bind(session_id.to_string())
-        .bind(message_id.to_string())
-        .bind(time)
-        .bind(time)
-        .bind(&part_data)
-        .execute(self.store.pool.as_ref())
-        .await?;
-
-        Ok(())
-    }
-
-    fn build_request(&self, model_id: &str, prompt: &str) -> anyhow::Result<CompletionRequest> {
+    fn build_request_from_history(
+        &self,
+        model_id: &str,
+        messages: Vec<CompletionMessage>,
+    ) -> anyhow::Result<CompletionRequest> {
         let tools: Vec<ToolDefinition> = self.tools.iter().map(|t| ToolDefinition {
             name: t.name().to_string(),
             description: t.description().to_string(),
@@ -326,12 +288,7 @@ impl PromptProcessor {
 
         Ok(CompletionRequest {
             model: crate::provider::ModelID::new(model_id),
-            messages: vec![CompletionMessage {
-                role: "user".to_string(),
-                content: prompt.to_string(),
-                tool_calls: None,
-                tool_call_id: None,
-            }],
+            messages,
             system: None,
             tools,
             max_tokens: Some(4096),
