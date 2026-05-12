@@ -1,0 +1,169 @@
+[package]
+name = "opencode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "opencode"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive", "env", "string"] }
+clap_complete = "4"
+
+# Async
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["io", "codec"] }
+futures = "0.3"
+async-stream = "0.3"
+async-trait = "0.1"
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "migrate", "json"] }
+libsqlite3-sys = { version = "0.27", features = ["bundled"] }
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+hyper = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+jsonc-parser = "0.1"
+schemars = "0.8"
+
+# TUI
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+unicode-width = "0.1"
+
+# MCP
+rmcp = { workspace = true }
+
+# LLM Providers (feature-gated)
+async-openai = { version = "0.20", optional = true, features = ["rustls"], default-features = false }
+
+# Errors
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+ulid = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+glob-match = "0.1"
+walkdir = "2"
+ignore = "0.4"
+which = "6"
+directories = "5"
+once_cell = "1"
+lazy_static = "1"
+parking_lot = "0.12"
+arc-swap = "1"
+dashmap = "5"
+smallvec = "1"
+bytes = "1"
+tokio-stream = "0.1"
+pin-project-lite = "0.2"
+
+# Git
+gix = { version = "0.63", features = ["blocking-network-client"] }
+
+# File watching
+notify = "6"
+
+# Process
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+
+# Shell escaping
+shell-words = "1"
+
+# Markdown
+pulldown-cmark = "0.9"
+
+# Diff handling
+diffy = "0.3"
+
+# Text
+textwrap = "0.16"
+strip-ansi-escapes = "0.1"
+
+# Clipboard
+arboard = "3"
+
+# WASM Plugin Runtime
+wasmtime = { version = "23", optional = true }
+wasmtime-wasi = { version = "23", optional = true }
+
+# Self-update
+self_update = { version = "0.41", optional = true, features = ["rustls"], default-features = false }
+semver = "1"
+
+# LSP
+lsp-types = "0.95"
+
+# Misc
+num_cpus = "1"
+sysinfo = "0.30"
+tempfile = "3"
+indoc = "2"
+derive_more = { version = "1", features = ["display", "error", "from"] }
+strum = { version = "0.26", features = ["derive"] }
+enum_dispatch = "0.3"
+
+# Crypto
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+hex = "0.4"
+
+# Markdown/code parsing
+gray_matter = "0.3"
+
+# PTY
+portable-pty = "0.8"
+
+[features]
+default = ["anthropic", "openai", "self-update"]
+anthropic = []
+openai = ["dep:async-openai"]
+azure = []
+google = []
+bedrock = []
+groq = ["dep:async-openai"]
+mistral = ["dep:async-openai"]
+xai = ["dep:async-openai"]
+openrouter = ["dep:async-openai"]
+copilot = []
+gitlab = []
+perplexity = ["dep:async-openai"]
+together = ["dep:async-openai"]
+deepinfra = ["dep:async-openai"]
+cerebras = ["dep:async-openai"]
+cohere = []
+alibaba = []
+vercel = ["dep:async-openai"]
+venice = ["dep:async-openai"]
+custom = ["dep:async-openai"]
+all-providers = ["anthropic", "openai", "azure", "google", "bedrock", "groq", "mistral", "xai", "openrouter", "copilot", "gitlab", "perplexity", "together", "deepinfra", "cerebras", "cohere", "alibaba", "vercel", "venice", "custom"]
+plugins = ["dep:wasmtime", "dep:wasmtime-wasi"]
+self-update = ["dep:self_update"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.12"
+pretty_assertions = "1"
+proptest = "1"
+insta = "1"

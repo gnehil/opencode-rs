@@ -1,0 +1,20 @@
+[package]
+name = "opencode-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = "0.8"
+thiserror = { workspace = true }
+wasmtime = { version = "23", optional = true }
+wasmtime-wasi = { version = "23", optional = true }
+
+[features]
+default = []
+runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
+
+[dev-dependencies]
+pretty_assertions = "1"

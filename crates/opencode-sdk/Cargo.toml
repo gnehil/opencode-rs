@@ -1,0 +1,18 @@
+[package]
+name = "opencode-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.12", features = ["json", "stream"], default-features = false }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+futures = "0.3"
+tokio-stream = "0.1"
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "stream"] }
+
+[dev-dependencies]
+tokio-test = "0.4"

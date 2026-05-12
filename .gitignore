@@ -1,0 +1,35 @@
+# Build artifacts
+target/
+**/target/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Lock files (keep Cargo.lock for binary crates)
+# Cargo.lock
+
+# Debug
+.debug/
+
+# Temporary
+*.tmp
+*.temp
+
+# Working directories
+.sisyphus/
