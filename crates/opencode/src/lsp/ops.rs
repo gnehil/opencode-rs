@@ -17,31 +17,13 @@ use serde_json::Value;
 use super::client::LspClient;
 use super::registry;
 
-/// Spawn the server, open the file, and return both. Caller drives
-/// the actual LSP request and calls shutdown() on the client.
-async fn prepare(file_path: &Path, workspace_root: &Path) -> Result<(LspClient, String, &'static str)> {
-    let spec = registry::for_path(file_path)
-        .ok_or_else(|| anyhow!("no LSP server registered for {}", file_path.display()))?;
-    let file_text = std::fs::read_to_string(file_path)
-        .with_context(|| format!("read source file: {}", file_path.display()))?;
-    let file_uri = super::diagnostics::path_to_uri(file_path)?;
-    let root_uri = super::diagnostics::path_to_uri(workspace_root)?;
-
-    let client = LspClient::spawn(spec, &root_uri).await?;
-    client
-        .notify(
-            "textDocument/didOpen",
-            serde_json::json!({
-                "textDocument": {
-                    "uri": file_uri,
-                    "languageId": spec.language_id,
-                    "version": 1,
-                    "text": file_text,
-                }
-            }),
-        )
-        .await?;
-    Ok((client, file_uri, spec.language_id))
+/// Go through the global pool: ensure the language server is running
+/// for this workspace, open (or update) the document. Returns a handle
+/// the caller uses to issue further LSP requests. Callers do NOT call
+/// shutdown — the pool owns the server's lifetime.
+async fn prepare(file_path: &Path, workspace_root: &Path) -> Result<super::pool::LiveDoc> {
+    let pool = super::pool::global().await;
+    pool.ensure(workspace_root, file_path).await
 }
 
 /// `textDocument/hover` — return the hover text (markdown or plain).
@@ -51,7 +33,9 @@ pub async fn hover(
     line: u32,
     character: u32,
 ) -> Result<String> {
-    let (client, file_uri, _lang) = prepare(file_path, workspace_root).await?;
+    let live = prepare(file_path, workspace_root).await?;
+    let client = &live.client;
+    let file_uri = &live.uri;
 
     #[derive(Deserialize)]
     struct HoverResponse {
@@ -69,7 +53,6 @@ pub async fn hover(
         .await
         .ok();
 
-    let _ = client.shutdown().await;
 
     let Some(resp) = result else {
         return Ok(format!("No hover info for {}:{}:{}", file_path.display(), line + 1, character + 1));
@@ -109,7 +92,9 @@ pub async fn goto_definition(
     line: u32,
     character: u32,
 ) -> Result<Vec<Location>> {
-    let (client, file_uri, _lang) = prepare(file_path, workspace_root).await?;
+    let live = prepare(file_path, workspace_root).await?;
+    let client = &live.client;
+    let file_uri = &live.uri;
     let result: Result<Value, _> = client
         .request(
             "textDocument/definition",
@@ -119,7 +104,6 @@ pub async fn goto_definition(
             }),
         )
         .await;
-    let _ = client.shutdown().await;
     Ok(parse_locations(result.unwrap_or(Value::Null)))
 }
 
@@ -130,7 +114,9 @@ pub async fn find_references(
     line: u32,
     character: u32,
 ) -> Result<Vec<Location>> {
-    let (client, file_uri, _lang) = prepare(file_path, workspace_root).await?;
+    let live = prepare(file_path, workspace_root).await?;
+    let client = &live.client;
+    let file_uri = &live.uri;
     let result: Result<Value, _> = client
         .request(
             "textDocument/references",
@@ -141,7 +127,6 @@ pub async fn find_references(
             }),
         )
         .await;
-    let _ = client.shutdown().await;
     Ok(parse_locations(result.unwrap_or(Value::Null)))
 }
 

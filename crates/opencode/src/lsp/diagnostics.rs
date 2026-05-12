@@ -85,39 +85,28 @@ impl Diagnostic {
 ///
 /// Returns the raw diagnostics list. `tool/lsp.rs` formats them.
 pub async fn fetch(file_path: &Path, workspace_root: &Path) -> Result<Vec<Diagnostic>> {
-    let spec = registry::for_path(file_path)
-        .ok_or_else(|| anyhow!("no LSP server registered for {}", file_path.display()))?;
-
-    let file_text = std::fs::read_to_string(file_path)
-        .with_context(|| format!("read source file: {}", file_path.display()))?;
-    let file_uri = path_to_uri(file_path)?;
-    let root_uri = path_to_uri(workspace_root)?;
-
-    let client = LspClient::spawn(spec, &root_uri)
+    // Go through the pool: server reused across calls if already
+    // spawned, document opened (or didChange-updated) automatically.
+    let live = super::pool::global()
         .await
-        .with_context(|| format!("spawn LSP server: {}", spec.command[0]))?;
-
-    // Open the document. The server is now obligated (per LSP spec) to
-    // publish diagnostics for it.
-    client
-        .notify(
-            "textDocument/didOpen",
-            serde_json::json!({
-                "textDocument": {
-                    "uri": file_uri,
-                    "languageId": spec.language_id,
-                    "version": 1,
-                    "text": file_text,
-                }
-            }),
-        )
+        .ensure(workspace_root, file_path)
         .await?;
+    let file_uri = live.uri.clone();
+    let client = live.client.clone();
 
     // Drain notifications. rust-analyzer emits multiple
     // publishDiagnostics events as it processes the file: first an
     // empty one (clearing prior state), then the real one once
     // analysis completes. We take the LAST one we see within the
     // timeout window.
+    //
+    // Caveat: with the pool, the server may emit diagnostics for
+    // OTHER files (because another tool call earlier opened them).
+    // We filter by uri here. If the server emitted diagnostics for
+    // this file *before* we started awaiting (because the file was
+    // re-opened a moment ago and notifications already drained), the
+    // 15s timeout will expire and we'll return an empty list. That's
+    // the cost of a stateful server: an occasional re-call needed.
     let timeout = Duration::from_secs(15);
     let diagnostics = tokio::time::timeout(timeout, async {
         let mut latest: Option<Vec<Diagnostic>> = None;
@@ -133,10 +122,6 @@ pub async fn fetch(file_path: &Path, workspace_root: &Path) -> Result<Vec<Diagno
                             notif.params.get("diagnostics").cloned().unwrap_or(serde_json::Value::Null),
                         ).unwrap_or_default();
                         latest = Some(diags);
-                        // After first diagnostic, give the server a short
-                        // window to send a follow-up (rust-analyzer
-                        // typically emits 2-3 events for a single file as
-                        // it processes deps). Reset the idle timer.
                         idle_after_first.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(400));
                     }
                 }
@@ -148,9 +133,6 @@ pub async fn fetch(file_path: &Path, workspace_root: &Path) -> Result<Vec<Diagno
         latest.unwrap_or_default()
     })
     .await;
-
-    // Shut the server down before returning so processes don't pile up.
-    let _ = client.shutdown().await;
 
     diagnostics.map_err(|_| anyhow!("LSP server did not publish diagnostics within 15s"))
 }
