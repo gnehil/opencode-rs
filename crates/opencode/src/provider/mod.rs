@@ -22,6 +22,7 @@ mod model;
 mod ollama;
 mod openai;
 mod openrouter;
+pub mod openai_sse;
 mod options;
 mod perplexity;
 mod togetherai;

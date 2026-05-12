@@ -84,5 +84,26 @@ impl Provider for CerebrasProvider {
         })
     }
 
-    fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> { Err(ProviderError::stream("streaming not implemented")) }
+    fn stream(&self, request: CompletionRequest) -> ProviderResult<EventStream> {
+        let model = request.model.to_string();
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(crate::provider::openai_compat_message_json)
+            .collect();
+        let body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "max_tokens": request.max_tokens.unwrap_or(4096),
+            "stream": true,
+        });
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Authorization".to_string(), format!("Bearer {}", self.api_key));
+        crate::provider::openai_sse::stream_openai_sse(
+            self.client.clone(),
+            API_URL.to_string(),
+            headers,
+            body,
+        )
+    }
 }
