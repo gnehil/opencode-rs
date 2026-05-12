@@ -13,6 +13,7 @@
 pub mod client;
 pub mod diagnostics;
 pub mod framing;
+pub mod ops;
 pub mod registry;
 
 pub use client::{LspClient, LspError, ServerNotification};

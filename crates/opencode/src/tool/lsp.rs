@@ -129,30 +129,45 @@ impl Tool for LspTool {
                 "diagnostics" => {
                     diagnostics(&file_path, &ctx.working_dir, params.severity.as_deref()).await?
                 }
-                "goToDefinition" | "findReferences" | "hover" => {
-                    let line = params.line.unwrap_or(1);
-                    let char = params.character.unwrap_or(0);
-                    format!(
-                        "{} for {} at {}:{} - use lsp_goto_definition or lsp_find_references tool",
-                        params.operation,
-                        file_path.display(),
-                        line,
-                        char
-                    )
+                "hover" => {
+                    // Inputs in this tool's schema are 1-indexed
+                    // (matches editor convention); LSP is 0-indexed.
+                    let line = params.line.unwrap_or(1).saturating_sub(1) as u32;
+                    let character = params.character.unwrap_or(0) as u32;
+                    crate::lsp::ops::hover(&file_path, &ctx.working_dir, line, character).await
+                        .unwrap_or_else(|e| format!("hover failed: {}", e))
+                }
+                "goToDefinition" => {
+                    let line = params.line.unwrap_or(1).saturating_sub(1) as u32;
+                    let character = params.character.unwrap_or(0) as u32;
+                    match crate::lsp::ops::goto_definition(&file_path, &ctx.working_dir, line, character).await {
+                        Ok(locs) if locs.is_empty() => format!("No definition found for {}:{}:{}", file_path.display(), line + 1, character + 1),
+                        Ok(locs) => locs.iter().map(|l| l.format()).collect::<Vec<_>>().join("\n"),
+                        Err(e) => format!("goToDefinition failed: {}", e),
+                    }
+                }
+                "findReferences" => {
+                    let line = params.line.unwrap_or(1).saturating_sub(1) as u32;
+                    let character = params.character.unwrap_or(0) as u32;
+                    match crate::lsp::ops::find_references(&file_path, &ctx.working_dir, line, character).await {
+                        Ok(locs) if locs.is_empty() => format!("No references found for {}:{}:{}", file_path.display(), line + 1, character + 1),
+                        Ok(locs) => locs.iter().map(|l| l.format()).collect::<Vec<_>>().join("\n"),
+                        Err(e) => format!("findReferences failed: {}", e),
+                    }
                 }
                 "documentSymbol" => {
-                    format!("Document symbols for {} - use lsp_symbols tool", file_path.display())
+                    format!("Document symbols for {} - not yet implemented", file_path.display())
                 }
                 "workspaceSymbol" => {
                     let query = params.query.unwrap_or_default();
-                    format!("Workspace symbol search for '{}' - use lsp_symbols(scope='workspace') tool", query)
+                    format!("Workspace symbol search for '{}' - not yet implemented", query)
                 }
                 "rename" => {
                     let new_name = params.new_name.unwrap_or_default();
                     let line = params.line.unwrap_or(1);
                     let char = params.character.unwrap_or(0);
                     format!(
-                        "Rename symbol to '{}' at {}:{}:{} - use lsp_rename tool",
+                        "Rename symbol to '{}' at {}:{}:{} - not yet implemented",
                         new_name,
                         file_path.display(),
                         line,

@@ -157,7 +157,7 @@ pub async fn fetch(file_path: &Path, workspace_root: &Path) -> Result<Vec<Diagno
 
 /// Convert a filesystem path to a `file://` URI per RFC 8089 §3, well
 /// enough for what LSP servers expect.
-fn path_to_uri(path: &Path) -> Result<String> {
+pub(crate) fn path_to_uri(path: &Path) -> Result<String> {
     let abs = path
         .canonicalize()
         .with_context(|| format!("canonicalize {}", path.display()))?;
