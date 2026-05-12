@@ -49,7 +49,7 @@ impl Tool for ReadTool {
     fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: ToolContext,
+        ctx: ToolContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>> {
         Box::pin(async move {
             let params: ReadParams = serde_json::from_value(params)
@@ -64,9 +64,81 @@ impl Tool for ReadTool {
                 return read_directory(path, &params);
             }
 
+            // Image files are not readable as text. Emit them as a
+            // FilePart attachment with a `data:image/<mime>;base64,...`
+            // URL so the surrounding plumbing (history rebuild → provider
+            // serializer) can surface them as vision-input on the next
+            // turn.
+            if let Some(mime) = image_mime_for(path) {
+                return read_image(path, mime, &ctx);
+            }
+
             read_file(path, &params)
         })
     }
+}
+
+fn image_mime_for(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        // Anthropic doesn't accept SVG; downstream will reject. Still
+        // emit so a model relying on filename hints can act.
+        Some("svg") => Some("image/svg+xml"),
+        _ => None,
+    }
+}
+
+const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+fn read_image(path: &Path, mime: &str, ctx: &ToolContext) -> Result<ToolResult> {
+    use base64::Engine;
+
+    let bytes = fs::read(path)
+        .with_context(|| format!("Cannot read image: {}", path.display()))?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        anyhow::bail!(
+            "Image {} is {} bytes; refusing to inline images larger than {} bytes",
+            path.display(),
+            bytes.len(),
+            MAX_IMAGE_BYTES
+        );
+    }
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let url = format!("data:{};base64,{}", mime, b64);
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string());
+
+    let attachment = crate::message::part::FilePart {
+        id: crate::id::PartID::new(),
+        session_id: ctx.session_id.clone(),
+        // ToolPart's attachments live on the assistant message that
+        // emitted the tool call. We don't know its id from here, so we
+        // synthesize a fresh one — history rebuild only cares about the
+        // url + mime fields, not message_id linkage.
+        message_id: crate::id::MessageID::new(),
+        mime: mime.to_string(),
+        filename: filename.clone(),
+        url,
+        source: None,
+    };
+
+    let output = format!(
+        "<path>{}</path>\n<type>image</type>\n<mime>{}</mime>\n<size_bytes>{}</size_bytes>\n<note>The image is attached and will be sent to the model with the next prompt turn.</note>",
+        path.display(),
+        mime,
+        bytes.len(),
+    );
+
+    Ok(ToolResult::with_attachments(output, vec![attachment]))
 }
 
 fn read_directory(path: &Path, params: &ReadParams) -> Result<ToolResult> {
@@ -196,4 +268,50 @@ fn read_file(path: &Path, params: &ReadParams) -> Result<ToolResult> {
             "total_lines": total_lines,
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool::Tool;
+
+    fn ctx() -> ToolContext {
+        ToolContext {
+            session_id: crate::id::SessionID::new(),
+            working_dir: std::path::PathBuf::from("/tmp"),
+            permission_rules: crate::permission::Ruleset::default(),
+        }
+    }
+
+    #[test]
+    fn image_mime_for_known_extensions() {
+        assert_eq!(image_mime_for(Path::new("a.png")), Some("image/png"));
+        assert_eq!(image_mime_for(Path::new("a.JPG")), Some("image/jpeg"));
+        assert_eq!(image_mime_for(Path::new("a.webp")), Some("image/webp"));
+        assert_eq!(image_mime_for(Path::new("a.rs")), None);
+        assert_eq!(image_mime_for(Path::new("a")), None);
+    }
+
+    #[tokio::test]
+    async fn read_image_returns_attachment_with_data_url() {
+        // Write a tiny PNG header — content doesn't have to be a valid
+        // image; the tool just base64-encodes bytes.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("test.png");
+        std::fs::write(&p, b"\x89PNG\r\n\x1a\n").unwrap();
+
+        let tool = ReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({"filePath": p.to_string_lossy()}),
+                ctx(),
+            )
+            .await
+            .unwrap();
+        let attachments = result.attachments.expect("attachments expected");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].mime, "image/png");
+        assert!(attachments[0].url.starts_with("data:image/png;base64,"));
+        assert!(result.output.contains("<type>image</type>"));
+    }
 }

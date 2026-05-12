@@ -246,6 +246,7 @@ impl PromptProcessor {
                     match tool.execute(params.clone(), ctx).await {
                         Ok(tool_result) => ToolPartResult::Completed {
                             output: tool_result.output,
+                            attachments: tool_result.attachments.unwrap_or_default(),
                         },
                         Err(e) => ToolPartResult::Error { error: e.to_string() },
                     }
@@ -265,8 +266,11 @@ impl PromptProcessor {
                     &tool_call.id,
                     &params,
                     match &outcome {
-                        ToolPartResult::Completed { output } => {
-                            ToolPartResult::Completed { output: output.clone() }
+                        ToolPartResult::Completed { output, attachments } => {
+                            ToolPartResult::Completed {
+                                output: output.clone(),
+                                attachments: attachments.clone(),
+                            }
                         }
                         ToolPartResult::Error { error } => ToolPartResult::Error {
                             error: error.clone(),
@@ -276,7 +280,7 @@ impl PromptProcessor {
                 .await?;
 
             match &outcome {
-                ToolPartResult::Completed { output } => {
+                ToolPartResult::Completed { output, .. } => {
                     let value = serde_json::json!({ "result": output });
                     self.bus.publish(Event::tool_complete(
                         session_id.to_string(),

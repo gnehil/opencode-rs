@@ -91,13 +91,32 @@ pub async fn build_completion_messages(
                 // OpenAI-shaped providers can render them as separate
                 // role=tool messages. Anthropic's serializer collapses on
                 // its end.
-                for (call_id, output) in tool_results {
+                let mut all_attachments: Vec<String> = Vec::new();
+                for (call_id, output, images) in tool_results {
                     out.push(CompletionMessage {
                         role: "tool".to_string(),
                         content: output,
                         tool_calls: None,
                         tool_call_id: Some(call_id),
-            images: Vec::new(),
+                        images: Vec::new(),
+                    });
+                    all_attachments.extend(images);
+                }
+
+                // If any tool returned image attachments, surface them
+                // in a synthetic user message right after the
+                // tool_results. This works for every provider: they
+                // all accept images in user messages, and the model
+                // sees the image immediately after the "look at this
+                // file" tool result that produced it. The text content
+                // is a hint so a text-only model isn't left wondering.
+                if !all_attachments.is_empty() {
+                    out.push(CompletionMessage {
+                        role: "user".to_string(),
+                        content: "[Tool returned image attachments.]".to_string(),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        images: all_attachments,
                     });
                 }
             }
@@ -120,8 +139,10 @@ fn collect_text(parts: &[Part]) -> String {
 
 /// Walk the assistant's parts and return:
 ///   * `Vec<Value>` shaped like OpenAI's tool_calls array
-///   * `Vec<(call_id, output_string)>` for completed/errored calls
-fn collect_tool_parts(parts: &[Part]) -> (Vec<Value>, Vec<(String, String)>) {
+///   * `Vec<(call_id, output_string, image_urls)>` for completed/errored
+///     calls. `image_urls` are the data/https URLs of any attachments
+///     the tool emitted (only Completed state can have them).
+fn collect_tool_parts(parts: &[Part]) -> (Vec<Value>, Vec<(String, String, Vec<String>)>) {
     let mut tool_calls = Vec::new();
     let mut tool_results = Vec::new();
 
@@ -137,12 +158,31 @@ fn collect_tool_parts(parts: &[Part]) -> (Vec<Value>, Vec<(String, String)>) {
                 }
             }));
             if let Some(output) = tool_state_output(&t.state) {
-                tool_results.push((t.call_id.clone(), output));
+                let images = tool_state_attachments(&t.state);
+                tool_results.push((t.call_id.clone(), output, images));
             }
         }
     }
 
     (tool_calls, tool_results)
+}
+
+/// Return the image-bearing attachment URLs from a Completed tool state.
+/// Errors/Pending/Running never carry attachments.
+fn tool_state_attachments(state: &ToolState) -> Vec<String> {
+    match state {
+        ToolState::Completed(c) => c
+            .attachments
+            .as_ref()
+            .map(|a| {
+                a.iter()
+                    .filter(|f| f.mime.starts_with("image/"))
+                    .map(|f| f.url.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 /// Return the input map for any ToolState variant (they all carry input).
@@ -266,7 +306,7 @@ mod tests {
                 "bash",
                 "toolu_42",
                 &serde_json::json!({"command": "ls"}),
-                ToolPartResult::Completed { output: "a\nb".to_string() },
+                ToolPartResult::Completed { output: "a\nb".to_string(), attachments: vec![] },
             )
             .await
             .unwrap();
@@ -346,5 +386,94 @@ mod tests {
         let after = build_completion_messages(&store, &session_id).await.unwrap();
         assert_eq!(after.len(), 1, "{:?}", after);
         assert_eq!(after[0].content, "NEW MESSAGE");
+    }
+
+    #[tokio::test]
+    async fn tool_image_attachment_becomes_user_message_with_images() {
+        let (store, _tmp) = store_with_tmp_data_dir().await;
+        let session = store
+            .create("t", "p", &std::path::PathBuf::from("/tmp"))
+            .await
+            .unwrap();
+        let session_id = SessionID::parse(&session.id).unwrap();
+
+        // user → assistant(tool_call) → tool_completed_with_image
+        let user_id = crate::id::MessageID::new();
+        let user = crate::message::UserMessage {
+            id: user_id.clone(),
+            session_id: session_id.clone(),
+            role: "user".to_string(),
+            time: crate::message::UserTime { created: chrono::Utc::now().timestamp_millis() },
+            format: None, summary: None, agent: "build".to_string(),
+            model: crate::message::ModelRef {
+                provider_id: "anthropic".to_string(),
+                model_id: "m".to_string(),
+                variant: None,
+            },
+            system: None, tools: None,
+        };
+        store.save_message(&session_id, &crate::message::Message::User(user)).await.unwrap();
+        store.save_text_part(&session_id, &user_id, "show me the logo").await.unwrap();
+
+        let asst_id = crate::id::MessageID::new();
+        let asst = crate::message::AssistantMessage {
+            id: asst_id.clone(),
+            session_id: session_id.clone(),
+            role: "assistant".to_string(),
+            time: crate::message::AssistantTime {
+                created: chrono::Utc::now().timestamp_millis(),
+                completed: None,
+            },
+            error: None,
+            parent_id: user_id.to_string(),
+            model_id: "m".to_string(),
+            provider_id: "anthropic".to_string(),
+            mode: "default".to_string(),
+            agent: "build".to_string(),
+            path: crate::message::PathInfo { cwd: "/tmp".to_string(), root: "/".to_string() },
+            summary: None,
+            cost: 0.0,
+            tokens: crate::message::TokenUsage {
+                input: 0.0, output: 0.0, reasoning: 0.0,
+                total: None,
+                cache: crate::message::CacheUsage { read: 0.0, write: 0.0 },
+            },
+            structured: None, variant: None, finish: None,
+        };
+        store.save_message(&session_id, &crate::message::Message::Assistant(asst)).await.unwrap();
+
+        // Persist a tool part with one image attachment.
+        let img = crate::message::part::FilePart {
+            id: crate::id::PartID::new(),
+            session_id: session_id.clone(),
+            message_id: asst_id.clone(),
+            mime: "image/png".to_string(),
+            filename: Some("logo.png".to_string()),
+            url: "data:image/png;base64,XYZ".to_string(),
+            source: None,
+        };
+        store
+            .save_tool_part(
+                &session_id,
+                &asst_id,
+                "read",
+                "call_7",
+                &serde_json::json!({"filePath": "/tmp/logo.png"}),
+                ToolPartResult::Completed {
+                    output: "Read image".to_string(),
+                    attachments: vec![img],
+                },
+            )
+            .await
+            .unwrap();
+
+        let history = build_completion_messages(&store, &session_id).await.unwrap();
+        // user, assistant(tool_call), tool, user(synthetic with image).
+        assert_eq!(history.len(), 4, "{:#?}", history);
+        assert_eq!(history[2].role, "tool");
+        assert!(history[2].images.is_empty());
+        assert_eq!(history[3].role, "user");
+        assert_eq!(history[3].images.len(), 1);
+        assert_eq!(history[3].images[0], "data:image/png;base64,XYZ");
     }
 }

@@ -13,7 +13,13 @@ use crate::message::{Message, WithParts, Part};
 /// Argument for `save_tool_part` — the outcome side of a tool call we want
 /// to persist as a `ToolPart` of the assistant message.
 pub enum ToolPartResult {
-    Completed { output: String },
+    Completed {
+        output: String,
+        /// File attachments (typically images) the tool produced. They
+        /// get persisted into ToolStateCompleted.attachments so the
+        /// next history rebuild can surface them as vision input.
+        attachments: Vec<crate::message::part::FilePart>,
+    },
     Error { error: String },
 }
 
@@ -315,7 +321,7 @@ impl SessionStore {
             };
 
         let state = match result {
-            ToolPartResult::Completed { output } => ToolState::Completed(crate::message::tool_state::ToolStateCompleted {
+            ToolPartResult::Completed { output, attachments } => ToolState::Completed(crate::message::tool_state::ToolStateCompleted {
                 input: input_map,
                 output,
                 title: tool_name.to_string(),
@@ -325,7 +331,7 @@ impl SessionStore {
                     end: now,
                     compacted: None,
                 },
-                attachments: None,
+                attachments: if attachments.is_empty() { None } else { Some(attachments) },
             }),
             ToolPartResult::Error { error } => ToolState::Error(crate::message::tool_state::ToolStateError {
                 input: input_map,

@@ -1000,7 +1000,10 @@ impl ACPAgent {
                         permission_rules: crate::permission::Ruleset::default(),
                     };
                     match tool.execute(params.clone(), ctx).await {
-                        Ok(r) => ToolPartResult::Completed { output: r.output },
+                        Ok(r) => ToolPartResult::Completed {
+                            output: r.output,
+                            attachments: r.attachments.unwrap_or_default(),
+                        },
                         Err(e) => ToolPartResult::Error { error: e.to_string() },
                     }
                 }
@@ -1016,8 +1019,11 @@ impl ACPAgent {
                 &call.id,
                 &params,
                 match &outcome {
-                    ToolPartResult::Completed { output } => {
-                        ToolPartResult::Completed { output: output.clone() }
+                    ToolPartResult::Completed { output, attachments } => {
+                        ToolPartResult::Completed {
+                            output: output.clone(),
+                            attachments: attachments.clone(),
+                        }
                     }
                     ToolPartResult::Error { error } => {
                         ToolPartResult::Error { error: error.clone() }
@@ -1026,7 +1032,7 @@ impl ACPAgent {
             ).await?;
 
             match outcome {
-                ToolPartResult::Completed { output } => {
+                ToolPartResult::Completed { output, .. } => {
                     self.event_bus.publish(crate::bus::Event::tool_complete(
                         session_id.to_string(),
                         call.name.clone(),
