@@ -5,7 +5,7 @@ use crate::id::{SessionID, MessageID, PartID};
 use crate::message::{Message, UserMessage, AssistantMessage, UserTime, ModelRef};
 use crate::message::{AssistantTime, TokenUsage, CacheUsage, PathInfo};
 use crate::message::part::TextPart;
-use crate::provider::{Provider, CompletionRequest, ToolDefinition};
+use crate::provider::{CompletionMessage, CompletionRequest, Provider, ToolDefinition};
 use crate::session::SessionStore;
 use crate::tool::{Tool, ToolContext, BashTool, ReadTool, WriteTool, EditTool, GlobTool, GrepTool};
 use crate::bus::{EventBus, Event, MessageRole};
@@ -108,7 +108,7 @@ impl PromptProcessor {
                 MessageRole::User,
             ));
 
-            let request = self.build_request(&model_id)?;
+            let request = self.build_request(&model_id, &current_prompt)?;
             
             let response = match self.provider.complete(request).await {
                 Ok(r) => r,
@@ -303,11 +303,12 @@ impl PromptProcessor {
         })?;
 
         sqlx::query(
-            "INSERT INTO part (id, session_id, message_id, time_created, data) VALUES (?1, ?2, ?3, ?4, ?5)"
+            "INSERT INTO part (id, session_id, message_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
         )
         .bind(part_id.to_string())
         .bind(session_id.to_string())
         .bind(message_id.to_string())
+        .bind(time)
         .bind(time)
         .bind(&part_data)
         .execute(self.store.pool.as_ref())
@@ -316,33 +317,21 @@ impl PromptProcessor {
         Ok(())
     }
 
-    fn build_request(&self, model_id: &str) -> anyhow::Result<CompletionRequest> {
+    fn build_request(&self, model_id: &str, prompt: &str) -> anyhow::Result<CompletionRequest> {
         let tools: Vec<ToolDefinition> = self.tools.iter().map(|t| ToolDefinition {
             name: t.name().to_string(),
             description: t.description().to_string(),
             parameters: t.parameters_schema(),
         }).collect();
 
-        let user_msg = Message::User(UserMessage {
-            id: MessageID::new(),
-            session_id: SessionID::new(),
-            role: "user".to_string(),
-            time: UserTime { created: chrono::Utc::now().timestamp_millis() },
-            format: None,
-            summary: None,
-            agent: "build".to_string(),
-            model: ModelRef {
-                provider_id: self.provider.name().to_string(),
-                model_id: model_id.to_string(),
-                variant: None,
-            },
-            system: None,
-            tools: None,
-        });
-
         Ok(CompletionRequest {
             model: crate::provider::ModelID::new(model_id),
-            messages: vec![user_msg],
+            messages: vec![CompletionMessage {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            }],
             system: None,
             tools,
             max_tokens: Some(4096),

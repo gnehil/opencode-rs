@@ -24,9 +24,10 @@ impl SessionStore {
     pub async fn create(&self, title: &str, project_id: &str, directory: &PathBuf) -> Result<SessionRow> {
         let session_id = SessionID::new();
         let now = chrono::Utc::now().timestamp_millis();
-let session_id_str = session_id.to_string();
+        let session_id_str = session_id.to_string();
         let slug = session_id_str.chars().take(8).collect::<String>();
         let version = "v1";
+        self.ensure_project(project_id, directory, now).await?;
 
         sqlx::query(
             "INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) 
@@ -67,6 +68,27 @@ let session_id_str = session_id.to_string();
             time_compacting: None,
             time_archived: None,
         })
+    }
+
+    async fn ensure_project(&self, project_id: &str, directory: &PathBuf, now: i64) -> Result<()> {
+        let name = directory
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string());
+
+        sqlx::query(
+            "INSERT OR IGNORE INTO project (id, worktree, name, time_created, time_updated, sandboxes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+        )
+        .bind(project_id)
+        .bind(directory.to_string_lossy().as_ref())
+        .bind(name)
+        .bind(now)
+        .bind(now)
+        .bind("[]")
+        .execute(self.pool.as_ref())
+        .await?;
+
+        Ok(())
     }
 
     pub async fn get(&self, session_id: &SessionID) -> Result<Option<SessionRow>> {

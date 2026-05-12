@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 use super::id::ModelID;
-use crate::message::Message;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
@@ -22,7 +20,7 @@ pub struct CompletionMessage {
 
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
-    pub messages: Vec<Message>,
+    pub messages: Vec<CompletionMessage>,
     pub model: ModelID,
     pub tools: Vec<ToolDefinition>,
     pub system: Option<String>,

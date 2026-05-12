@@ -770,7 +770,12 @@ impl ACPAgent {
 
         let completion_request = crate::provider::CompletionRequest {
             model: crate::provider::ModelID::new(&model.model_id),
-            messages: vec![crate::message::Message::User(user_msg)],
+            messages: vec![crate::provider::CompletionMessage {
+                role: "user".to_string(),
+                content: prompt_text,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
             system: None,
             tools: vec![],
             max_tokens: Some(4096),
