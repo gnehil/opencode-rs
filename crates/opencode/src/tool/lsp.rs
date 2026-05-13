@@ -156,23 +156,66 @@ impl Tool for LspTool {
                     }
                 }
                 "documentSymbol" => {
-                    format!("Document symbols for {} - not yet implemented", file_path.display())
+                    match crate::lsp::ops::document_symbols(&file_path, &ctx.working_dir).await {
+                        Ok(syms) if syms.is_empty() => format!("No symbols in {}", file_path.display()),
+                        Ok(syms) => {
+                            // documentSymbol responses don't carry uri
+                            // — set it to the request file so format()
+                            // produces a stable path column.
+                            syms.iter()
+                                .map(|s| {
+                                    let mut s = s.clone();
+                                    if s.uri.is_empty() {
+                                        s.uri = format!("file://{}", file_path.display());
+                                    }
+                                    s.format()
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
+                        Err(e) => format!("documentSymbol failed: {}", e),
+                    }
                 }
                 "workspaceSymbol" => {
-                    let query = params.query.unwrap_or_default();
-                    format!("Workspace symbol search for '{}' - not yet implemented", query)
+                    let query = params.query.clone().unwrap_or_default();
+                    if query.is_empty() {
+                        "workspaceSymbol requires a non-empty `query` parameter".to_string()
+                    } else {
+                        match crate::lsp::ops::workspace_symbols(
+                            &ctx.working_dir,
+                            &file_path,
+                            &query,
+                        )
+                        .await
+                        {
+                            Ok(syms) if syms.is_empty() => {
+                                format!("No workspace symbols match '{}'", query)
+                            }
+                            Ok(syms) => syms.iter().map(|s| s.format()).collect::<Vec<_>>().join("\n"),
+                            Err(e) => format!("workspaceSymbol failed: {}", e),
+                        }
+                    }
                 }
                 "rename" => {
-                    let new_name = params.new_name.unwrap_or_default();
-                    let line = params.line.unwrap_or(1);
-                    let char = params.character.unwrap_or(0);
-                    format!(
-                        "Rename symbol to '{}' at {}:{}:{} - not yet implemented",
-                        new_name,
-                        file_path.display(),
-                        line,
-                        char
-                    )
+                    let new_name = params.new_name.clone().unwrap_or_default();
+                    let line = params.line.unwrap_or(1).saturating_sub(1) as u32;
+                    let character = params.character.unwrap_or(0) as u32;
+                    if new_name.is_empty() {
+                        "rename requires a non-empty `newName` parameter".to_string()
+                    } else {
+                        match crate::lsp::ops::rename(
+                            &file_path,
+                            &ctx.working_dir,
+                            line,
+                            character,
+                            &new_name,
+                        )
+                        .await
+                        {
+                            Ok(summary) => summary,
+                            Err(e) => format!("rename failed: {}", e),
+                        }
+                    }
                 }
                 _ => format!("{} requested", params.operation),
             };
