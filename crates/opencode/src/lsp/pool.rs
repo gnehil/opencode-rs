@@ -100,18 +100,14 @@ impl ServerPool {
             language_id: spec.language_id,
         };
 
-        // 1. Get-or-spawn the server.
-        let server = {
-            let mut guard = self.servers.lock().await;
-            if let Some(existing) = guard.get(&key) {
-                existing.clone()
-            } else {
-                let pooled = spawn_server(spec, &workspace_canon).await?;
-                let arc = Arc::new(pooled);
-                guard.insert(key.clone(), arc.clone());
-                arc
-            }
-        };
+        // 1. Get-or-spawn the server. If a previously-spawned server
+        //    has died (rust-analyzer OOM'd, user killed the process,
+        //    crashed on a malformed file, etc.), evict it from the
+        //    pool and spawn a replacement. We check liveness on the
+        //    hot path; it's a non-blocking try_wait, ~microseconds.
+        let server = self
+            .get_or_spawn_live(&key, spec, &workspace_canon)
+            .await?;
 
         // 2. Open or update the document, depending on its prior state
         // in this pool.
@@ -122,55 +118,92 @@ impl ServerPool {
         let content_hash: [u8; 32] = hasher.finalize().into();
         let uri = path_to_uri(file_path)?;
 
+        // 2a. Try the open/update. If the notify fails (write to a
+        //     dead stdin returns Err), the server crashed between
+        //     liveness check and this write. Drop the dead entry and
+        //     respawn once — but only once, to avoid infinite loops
+        //     in cases where the server crashes deterministically on
+        //     startup.
         let mut docs = server.documents.lock().await;
-        match docs.get_mut(&uri) {
-            Some(open) if open.content_hash == content_hash => {
-                // Already open and identical; nothing to do.
-            }
-            Some(open) => {
-                // Open but content changed — send didChange.
-                open.version += 1;
-                open.content_hash = content_hash;
-                server
-                    .client
-                    .notify(
-                        "textDocument/didChange",
-                        serde_json::json!({
-                            "textDocument": {"uri": uri, "version": open.version},
-                            "contentChanges": [{"text": file_text}],
-                        }),
-                    )
-                    .await?;
-            }
-            None => {
-                // First time we've seen this document in this server.
-                let version = 1;
-                server
-                    .client
-                    .notify(
-                        "textDocument/didOpen",
-                        serde_json::json!({
-                            "textDocument": {
-                                "uri": uri,
-                                "languageId": spec.language_id,
-                                "version": version,
-                                "text": file_text,
-                            }
-                        }),
-                    )
-                    .await?;
-                docs.insert(
-                    uri.clone(),
-                    OpenDoc { version, content_hash },
-                );
-            }
+        let notify_result = open_or_update(&server, &spec.language_id, &uri, &file_text, content_hash, &mut docs).await;
+        drop(docs);
+
+        if notify_result.is_err() && !server.client.is_alive().await {
+            tracing::warn!(
+                "LSP server for {:?} died between liveness check and didOpen; respawning",
+                key.language_id
+            );
+            self.evict(&key).await;
+            let fresh = self
+                .get_or_spawn_live(&key, spec, &workspace_canon)
+                .await?;
+            let mut docs = fresh.documents.lock().await;
+            open_or_update(&fresh, &spec.language_id, &uri, &file_text, content_hash, &mut docs).await?;
+            return Ok(LiveDoc {
+                client: fresh.client.clone(),
+                uri,
+                language_id: spec.language_id,
+            });
         }
+        notify_result?;
 
         Ok(LiveDoc {
             client: server.client.clone(),
             uri,
             language_id: spec.language_id,
         })
+    }
+
+    /// Look up the server for `key`. If absent OR present-but-dead,
+    /// spawn a fresh one and store it under `key`. Returns the live
+    /// server.
+    async fn get_or_spawn_live(
+        &self,
+        key: &PoolKey,
+        spec: &ServerSpec,
+        workspace_canon: &Path,
+    ) -> Result<Arc<PooledServer>> {
+        // Fast path: peek under the lock, return the existing entry
+        // only if it's still alive. We can't hold the servers lock
+        // across `.is_alive().await` because that lock is itself
+        // async, so do the check after dropping the guard.
+        let existing = {
+            let guard = self.servers.lock().await;
+            guard.get(key).cloned()
+        };
+        if let Some(srv) = &existing {
+            if srv.client.is_alive().await {
+                return Ok(srv.clone());
+            }
+            // Dead — fall through to evict + spawn.
+            self.evict(key).await;
+        }
+
+        // Spawn under the lock so concurrent ensure() calls for the
+        // same key don't each spawn a server. (Race window: two
+        // tasks both find the slot empty, both spawn. We accept that;
+        // the LSP server cost is amortized across the agent session.)
+        let mut guard = self.servers.lock().await;
+        if let Some(srv) = guard.get(key) {
+            if srv.client.is_alive().await {
+                return Ok(srv.clone());
+            }
+        }
+        let pooled = spawn_server(spec, workspace_canon).await?;
+        let arc = Arc::new(pooled);
+        guard.insert(key.clone(), arc.clone());
+        Ok(arc)
+    }
+
+    /// Remove the entry for `key`. Used when we detect a dead server.
+    async fn evict(&self, key: &PoolKey) {
+        let mut guard = self.servers.lock().await;
+        if let Some(removed) = guard.remove(key) {
+            // Best-effort shutdown of the (likely already-dead) handle
+            // to reap any zombie process.
+            drop(guard);
+            let _ = removed.client.shutdown().await;
+        }
     }
 
     /// Drain the pool, sending shutdown to each server. Idempotent.
@@ -185,6 +218,56 @@ impl ServerPool {
 impl Default for ServerPool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Open the document if it's new, didChange it if it's known with a
+/// different hash, or no-op if it's known with the same hash. Lives
+/// on a free fn so the pool's `ensure` can call it twice on the
+/// retry-after-crash path.
+async fn open_or_update(
+    server: &PooledServer,
+    language_id: &str,
+    uri: &str,
+    file_text: &str,
+    content_hash: [u8; 32],
+    docs: &mut tokio::sync::MutexGuard<'_, HashMap<String, OpenDoc>>,
+) -> Result<()> {
+    match docs.get_mut(uri) {
+        Some(open) if open.content_hash == content_hash => Ok(()),
+        Some(open) => {
+            open.version += 1;
+            open.content_hash = content_hash;
+            server
+                .client
+                .notify(
+                    "textDocument/didChange",
+                    serde_json::json!({
+                        "textDocument": {"uri": uri, "version": open.version},
+                        "contentChanges": [{"text": file_text}],
+                    }),
+                )
+                .await
+        }
+        None => {
+            let version = 1;
+            server
+                .client
+                .notify(
+                    "textDocument/didOpen",
+                    serde_json::json!({
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": language_id,
+                            "version": version,
+                            "text": file_text,
+                        }
+                    }),
+                )
+                .await?;
+            docs.insert(uri.to_string(), OpenDoc { version, content_hash });
+            Ok(())
+        }
     }
 }
 

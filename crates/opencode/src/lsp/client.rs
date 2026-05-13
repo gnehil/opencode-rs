@@ -207,6 +207,32 @@ impl LspClient {
         self.notifications.lock().await.recv().await
     }
 
+    /// Cheap liveness check.
+    ///
+    /// Returns false if:
+    ///   * the child has already exited (try_wait yielded a status)
+    ///   * stdin has been dropped (shutdown was called)
+    ///   * the child handle has been taken (e.g. by shutdown)
+    ///
+    /// Does not block, does not perform I/O, and is safe to call from
+    /// the pool's hot path.
+    pub async fn is_alive(&self) -> bool {
+        // stdin gone -> shutdown already happened.
+        if self.stdin.lock().await.is_none() {
+            return false;
+        }
+        let mut child_guard = self.child.lock().await;
+        match child_guard.as_mut() {
+            Some(child) => match child.try_wait() {
+                // None = still running, that's what we want.
+                Ok(None) => true,
+                // Some(status) = exited; Err = OS error querying.
+                _ => false,
+            },
+            None => false,
+        }
+    }
+
     /// Graceful shutdown: shutdown request + exit notification, then
     /// reap the child. Idempotent.
     pub async fn shutdown(&self) -> Result<()> {
@@ -356,5 +382,66 @@ mod tests {
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["id"], 42);
         assert_eq!(v["result"]["echoed"], "test/echo");
+    }
+
+    /// Build an LspClient by directly constructing the struct around a
+    /// real child process — this bypasses the LSP initialize handshake
+    /// (no real LSP server here) and lets us test the liveness probe
+    /// in isolation. We use /bin/cat as a long-lived child that holds
+    /// stdin/stdout open until we kill it.
+    fn client_around_cat() -> Option<LspClient> {
+        let mut cmd = Command::new("cat");
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn().ok()?;
+        let stdin = child.stdin.take()?;
+        let stdout = child.stdout.take()?;
+        let pending: PendingMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let pending_for_reader = pending.clone();
+        let (notify_tx, notify_rx) = mpsc::channel::<ServerNotification>(16);
+        let reader = std::thread::spawn(move || {
+            reader_loop(stdout, pending_for_reader, notify_tx);
+        });
+        Some(LspClient {
+            next_id: std::sync::atomic::AtomicI64::new(1),
+            stdin: Mutex::new(Some(stdin)),
+            pending,
+            notifications: Mutex::new(notify_rx),
+            child: Mutex::new(Some(child)),
+            reader_task: Mutex::new(Some(reader)),
+        })
+    }
+
+    #[tokio::test]
+    async fn is_alive_is_true_for_running_child() {
+        let Some(client) = client_around_cat() else {
+            return; // skip if `cat` isn't on PATH (CI weirdness)
+        };
+        assert!(client.is_alive().await);
+        // Cleanup: drop kills the child via the Drop impl.
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn is_alive_becomes_false_after_child_exits() {
+        let Some(client) = client_around_cat() else { return; };
+        // Closing stdin makes `cat` exit on EOF.
+        {
+            let mut guard = client.stdin.lock().await;
+            guard.take(); // drop ChildStdin -> EOF on cat
+        }
+        // Give the child a moment to wind down.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!client.is_alive().await);
+    }
+
+    #[tokio::test]
+    async fn is_alive_is_false_after_shutdown_takes_handles() {
+        let Some(client) = client_around_cat() else { return; };
+        // Simulate shutdown's effect on the struct without running
+        // the full async shutdown sequence (which would send LSP
+        // messages cat doesn't speak): take stdin + child.
+        client.stdin.lock().await.take();
+        client.child.lock().await.take();
+        assert!(!client.is_alive().await);
     }
 }
