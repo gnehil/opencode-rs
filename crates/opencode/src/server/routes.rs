@@ -168,10 +168,20 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/mcp/resources", get(mcp_handlers::mcp_list_resources))
         .route("/agent", get(agent_handlers::list_agents))
         .route("/agent/default", get(agent_handlers::get_default_agent))
+        .route(
+            "/instance/dispose",
+            post(instance_handlers::instance_dispose),
+        )
+        .route("/vcs", get(instance_handlers::vcs_info))
+        .route("/vcs/status", get(instance_handlers::vcs_status))
+        .route("/vcs/diff", get(instance_handlers::vcs_diff))
+        .route("/vcs/diff/raw", get(instance_handlers::vcs_diff_raw))
+        .route("/vcs/apply", post(instance_handlers::vcs_apply))
         .route("/command", get(instance_handlers::command_list))
         .route("/lsp", get(instance_handlers::lsp_status))
         .route("/tool", get(instance_handlers::tool_list))
         .route("/skill", get(instance_handlers::skill_list))
+        .route("/formatter", get(instance_handlers::formatter_status))
         .route("/path", get(instance_handlers::path_info))
         .route("/permission", get(permission_handlers::list_permissions))
         .route(
@@ -527,6 +537,205 @@ mod tests {
             .unwrap()
             .iter()
             .any(|line| line == "+after"));
+    }
+
+    #[tokio::test]
+    async fn instance_vcs_and_formatter_routes_match_opencode_httpapi_shapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let root_canonical = root.canonicalize().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::fs::write(root.join("tracked.txt"), "before\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["branch", "-M", "main"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::fs::write(root.join("tracked.txt"), "before\nafter\n").unwrap();
+        std::fs::write(root.join("untracked.txt"), "new\n").unwrap();
+
+        let state = std::sync::Arc::new(
+            AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
+        );
+        let app = create_router_with_state(state);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/path")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let paths = response_json(response).await;
+        assert!(paths["home"].as_str().is_some());
+        assert!(paths["state"].as_str().is_some());
+        assert!(paths["config"].as_str().is_some());
+        assert_eq!(paths["worktree"], root_canonical.to_string_lossy().as_ref());
+        assert_eq!(
+            paths["directory"],
+            root_canonical.to_string_lossy().as_ref()
+        );
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/instance/dispose")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!(true));
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/vcs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let vcs = response_json(response).await;
+        assert_eq!(vcs["branch"], "main");
+        assert_eq!(vcs["default_branch"], "main");
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/vcs/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let status = response_json(response).await;
+        assert!(status.as_array().unwrap().iter().any(|item| {
+            item["file"] == "tracked.txt"
+                && item["status"] == "modified"
+                && item["additions"] == 1
+                && item["deletions"] == 0
+        }));
+        assert!(status.as_array().unwrap().iter().any(|item| {
+            item["file"] == "untracked.txt"
+                && item["status"] == "added"
+                && item["additions"] == 1
+                && item["deletions"] == 0
+        }));
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/vcs/diff?mode=git")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let diff = response_json(response).await;
+        assert!(diff.as_array().unwrap().iter().any(|item| {
+            item["file"] == "tracked.txt"
+                && item["status"] == "modified"
+                && item["patch"].as_str().unwrap().contains("+after")
+        }));
+        assert!(diff.as_array().unwrap().iter().any(|item| {
+            item["file"] == "untracked.txt"
+                && item["status"] == "added"
+                && item["patch"].as_str().unwrap().contains("+new")
+        }));
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/vcs/diff/raw")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let raw = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(raw.contains("+after"));
+        assert!(raw.contains("+new"));
+
+        let patch = "\
+diff --git a/applied.txt b/applied.txt
+new file mode 100644
+--- /dev/null
++++ b/applied.txt
+@@ -0,0 +1 @@
++applied
+";
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/vcs/apply")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "patch": patch }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            serde_json::json!({ "applied": true })
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("applied.txt")).unwrap(),
+            "applied\n"
+        );
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("GET")
+                .uri("/formatter")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!([]));
     }
 
     #[tokio::test]
