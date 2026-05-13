@@ -16,6 +16,8 @@ pub enum McpServerStatus {
     Connected,
     Disabled,
     Failed { error: String },
+    NeedsAuth,
+    NeedsClientRegistration { error: String },
 }
 
 pub struct McpManager {

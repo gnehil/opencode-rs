@@ -151,6 +151,18 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
             "/mcp",
             get(mcp_handlers::mcp_status).post(mcp_handlers::mcp_add),
         )
+        .route(
+            "/mcp/:name/auth",
+            post(mcp_handlers::mcp_auth_start).delete(mcp_handlers::mcp_auth_remove),
+        )
+        .route(
+            "/mcp/:name/auth/callback",
+            post(mcp_handlers::mcp_auth_callback),
+        )
+        .route(
+            "/mcp/:name/auth/authenticate",
+            post(mcp_handlers::mcp_auth_authenticate),
+        )
         .route("/mcp/:name/connect", post(mcp_handlers::mcp_connect))
         .route("/mcp/:name/disconnect", post(mcp_handlers::mcp_disconnect))
         .route("/mcp/resources", get(mcp_handlers::mcp_list_resources))
@@ -812,6 +824,176 @@ mod tests {
             state.tui_control.next_response().await.unwrap(),
             serde_json::json!({ "accepted": true })
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_auth_routes_match_remote_oauth_flow_shapes() {
+        let oauth_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let oauth_addr = oauth_listener.local_addr().unwrap();
+        let oauth_base = format!("http://{}", oauth_addr);
+        let oauth_app = Router::new()
+            .route(
+                "/.well-known/oauth-authorization-server",
+                get({
+                    let oauth_base = oauth_base.clone();
+                    move || {
+                        let oauth_base = oauth_base.clone();
+                        async move {
+                            axum::Json(serde_json::json!({
+                                "authorization_endpoint": format!("{oauth_base}/authorize"),
+                                "token_endpoint": format!("{oauth_base}/token")
+                            }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/token",
+                post(|| async {
+                    axum::Json(serde_json::json!({
+                        "access_token": "access-123",
+                        "token_type": "Bearer",
+                        "expires_in": 3600
+                    }))
+                }),
+            );
+        let oauth_server = tokio::spawn(async move {
+            axum::serve(oauth_listener, oauth_app).await.unwrap();
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mcp = std::collections::HashMap::new();
+        mcp.insert(
+            "remote".to_string(),
+            crate::config::McpConfigEntry::Full(crate::config::McpServerConfig {
+                kind: Some("remote".to_string()),
+                url: Some(oauth_base.clone()),
+                oauth: Some(crate::config::McpOAuthConfig::Options(
+                    crate::config::McpOAuthOptions {
+                        client_id: Some("client-123".to_string()),
+                        client_secret: None,
+                        scope: Some("tools.read".to_string()),
+                        redirect_uri: None,
+                    },
+                )),
+                command: None,
+                args: None,
+                env: None,
+                transport: None,
+                enabled: None,
+                timeout: None,
+                headers: None,
+            }),
+        );
+        mcp.insert(
+            "no-oauth".to_string(),
+            crate::config::McpConfigEntry::Full(crate::config::McpServerConfig {
+                kind: Some("remote".to_string()),
+                url: Some(oauth_base.clone()),
+                oauth: Some(crate::config::McpOAuthConfig::Enabled(false)),
+                command: None,
+                args: None,
+                env: None,
+                transport: None,
+                enabled: None,
+                timeout: None,
+                headers: None,
+            }),
+        );
+        let config = crate::config::Config {
+            mcp: Some(mcp),
+            ..Default::default()
+        };
+        let state = std::sync::Arc::new(
+            AppState::new(tmp.path().join("data"))
+                .with_workspace_root(tmp.path().to_path_buf())
+                .with_config_defaults(&config),
+        );
+        let app = create_router_with_state(state.clone());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/mcp/no-oauth/auth")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/mcp/remote/auth")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let started = response_json(response).await;
+        let authorization_url = started["authorizationUrl"].as_str().unwrap();
+        let oauth_state = started["oauthState"].as_str().unwrap();
+        assert!(authorization_url.starts_with(&format!("{oauth_base}/authorize?")));
+        assert!(authorization_url.contains("client_id=client-123"));
+        assert!(authorization_url.contains("code_challenge_method=S256"));
+        assert!(authorization_url.contains("scope=tools.read"));
+        assert!(authorization_url.contains(&format!("state={oauth_state}")));
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/mcp/remote/auth/authenticate")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            serde_json::json!({ "status": "needs_auth" })
+        );
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/mcp/remote/auth/callback")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "code": "abc" }).to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .mcp_auth_store
+                .get("remote")
+                .await
+                .and_then(|entry| entry.tokens)
+                .map(|tokens| tokens.access_token),
+            Some("access-123".to_string())
+        );
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("DELETE")
+                .uri("/mcp/remote/auth")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            serde_json::json!({ "success": true })
+        );
+        assert!(state.mcp_auth_store.get("remote").await.is_none());
+
+        oauth_server.abort();
     }
 
     #[tokio::test]

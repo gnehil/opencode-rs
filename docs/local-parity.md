@@ -21,7 +21,7 @@ Legend:
 | `attach` | `cli/cmd/tui/attach.ts` | `cli/local.rs` | partial | Launch real remote TUI instead of only validating/selecting session |
 | `debug` | `cli/cmd/debug/*` | `cli/local.rs` | partial | Scrap/debug snapshots beyond git-backed fallback |
 | `providers` | `cli/cmd/providers.ts` | `cli/provider_auth.rs`, `auth.rs`, `cli/mod.rs` | partial | Interactive provider selection and OAuth provider UX |
-| `mcp` | `cli/cmd/mcp.ts` | `cli/mcp_cli.rs`, `mcp/*` | partial | needs_auth status, reauth prompts, remote reconnect parity |
+| `mcp` | `cli/cmd/mcp.ts` | `cli/mcp_cli.rs`, `mcp/*` | partial | Token-aware remote reconnect and browser-open authenticate UX |
 | `github`/`pr` | `cli/cmd/github.ts`, `cli/cmd/pr.ts` | `cli/local_process.rs`, `cli/local.rs` | partial | Cross-repo PR remote setup, event simulation parity |
 | `account`/console cloud | `cli/cmd/account.ts` | `cli/local.rs` console stubs | skip | Cloud scope |
 
@@ -49,7 +49,7 @@ Legend:
 | Providers/model auth | `provider/*`, `auth/index.ts` | `provider/*`, `auth.rs`, `cli/provider_auth.rs` | partial | Per-provider auth schema and live smoke tests |
 | Tools | `tool/*` | `tool/*` | partial | Validate behavior, output shape, permission integration per tool |
 | Permission ask | `permission/index.ts` | `permission/broker.rs`, `tool/context.rs` | done | Broaden HTTP/UI reply integration |
-| MCP runtime | `mcp/*` | `mcp/*`, `cli/mcp_cli.rs` | partial | OAuth state/status, unauthorized reconnect parity |
+| MCP runtime | `mcp/*` | `mcp/*`, `cli/mcp_cli.rs` | partial | Token-aware HTTP transport and unauthorized reconnect parity |
 | Plugin runtime | `cli/cmd/tui/plugin/*`, plugin hooks | `plugin/*`, `session/processor.rs`, `message_handlers.rs`, `cli/mod.rs` | partial | External JS/TS plugin loading and TUI plugin slots |
 | LSP | `lsp/*` | `lsp/*`, `tool/lsp.rs` | partial | Long-lived pool behavior and diagnostics shape |
 
@@ -58,5 +58,5 @@ Legend:
 1. Run JSON command/session behavior against the server routes.
 2. External JS/TS plugin loading/runtime compatibility.
 3. Remote TUI attach/control queue and TUI prompt execution.
-4. MCP needs_auth/reconnect parity.
+4. MCP token-aware remote reconnect parity.
 5. Provider/model/auth dynamic loading and stored credential use beyond API keys.

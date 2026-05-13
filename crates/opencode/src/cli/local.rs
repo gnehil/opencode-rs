@@ -1158,6 +1158,10 @@ fn print_mcp_status(manager: &McpManager) {
             McpServerStatus::Connected => println!("{} - connected", name),
             McpServerStatus::Disabled => println!("{} - disabled", name),
             McpServerStatus::Failed { error } => println!("{} - failed: {}", name, error),
+            McpServerStatus::NeedsAuth => println!("{} - needs authentication", name),
+            McpServerStatus::NeedsClientRegistration { error } => {
+                println!("{} - needs client registration: {}", name, error)
+            }
         }
     }
 }

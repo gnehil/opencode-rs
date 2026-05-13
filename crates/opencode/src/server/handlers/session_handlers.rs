@@ -23,6 +23,7 @@ pub struct AppState {
     pub pty_tickets: std::sync::Arc<crate::pty::PtyTicketStore>,
     pub tui_control: std::sync::Arc<crate::tui::control::TuiControl>,
     pub mcp_manager: std::sync::Arc<tokio::sync::RwLock<crate::mcp::McpManager>>,
+    pub mcp_auth_store: std::sync::Arc<crate::mcp::McpAuthStore>,
     pub plugin_manager: std::sync::Arc<crate::plugin::PluginManager>,
     pub default_agent: Option<String>,
     pub default_model: Option<String>,
@@ -40,7 +41,7 @@ impl AppState {
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let event_bus = EventBus::new();
         Self {
-            data_dir,
+            data_dir: data_dir.clone(),
             workspace_root,
             pty_service: std::sync::Arc::new(crate::pty::PtyService::new(event_bus.clone())),
             pty_tickets: std::sync::Arc::new(crate::pty::PtyTicketStore::default()),
@@ -50,6 +51,7 @@ impl AppState {
             mcp_manager: std::sync::Arc::new(tokio::sync::RwLock::new(
                 crate::mcp::McpManager::new(),
             )),
+            mcp_auth_store: std::sync::Arc::new(crate::mcp::McpAuthStore::new(data_dir.clone())),
             plugin_manager: std::sync::Arc::new(crate::plugin::PluginManager::new()),
             default_agent: None,
             default_model: None,
