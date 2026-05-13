@@ -249,6 +249,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_route_returns_opencode_agent_info_array_with_config_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "default_agent": "reviewer",
+            "permission": {
+                "read": {
+                    "*.env": "ask"
+                }
+            },
+            "agent": {
+                "reviewer": {
+                    "description": "Review local changes",
+                    "mode": "subagent",
+                    "model": "openai/gpt-4.1",
+                    "top_p": 0.8,
+                    "temperature": 0.2,
+                    "permission": {
+                        "bash": "ask",
+                        "read": {
+                            "*.env": "deny"
+                        }
+                    },
+                    "options": {
+                        "reasoning": {
+                            "effort": "high"
+                        }
+                    }
+                },
+                "build": {
+                    "color": "blue"
+                },
+                "explore": {
+                    "disable": true
+                }
+            }
+        }))
+        .unwrap();
+
+        let state = std::sync::Arc::new(
+            AppState::new(root.join("data"))
+                .with_workspace_root(root.to_path_buf())
+                .with_config_defaults(&config),
+        );
+        let app = create_router_with_state(state);
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("GET")
+                .uri("/agent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let agents = response_json(response).await;
+        let agents = agents.as_array().expect("/agent returns a bare array");
+        assert_eq!(agents[0]["name"], "reviewer");
+        assert_eq!(agents[0]["description"], "Review local changes");
+        assert_eq!(agents[0]["mode"], "subagent");
+        assert_eq!(agents[0]["model"]["providerID"], "openai");
+        assert_eq!(agents[0]["model"]["modelID"], "gpt-4.1");
+        assert_eq!(agents[0]["topP"], 0.8);
+        assert_eq!(agents[0]["temperature"], 0.2);
+        assert!(agents[0].get("permissions").is_none());
+        assert!(agents[0]["permission"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| {
+                rule["permission"] == "bash" && rule["pattern"] == "*" && rule["action"] == "ask"
+            }));
+        assert!(agents[0]["permission"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| {
+                rule["permission"] == "read"
+                    && rule["pattern"] == "*.env"
+                    && rule["action"] == "deny"
+            }));
+        assert_eq!(agents[0]["options"]["reasoning"]["effort"], "high");
+        assert!(agents.iter().any(|agent| {
+            agent["name"] == "build" && agent["native"] == true && agent["color"] == "blue"
+        }));
+        assert!(agents
+            .iter()
+            .any(|agent| agent["name"] == "compaction" && agent["hidden"] == true));
+        assert!(!agents.iter().any(|agent| agent["name"] == "explore"));
+    }
+
+    #[tokio::test]
     async fn canonical_file_routes_match_opencode_httpapi_shapes() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();

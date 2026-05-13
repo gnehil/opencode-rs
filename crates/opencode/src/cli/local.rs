@@ -141,20 +141,21 @@ pub(crate) fn handle_console(subcommand: args::ConsoleSubcommand) -> Result<()> 
 pub(crate) async fn handle_agent(subcommand: args::AgentSubcommand) -> Result<()> {
     match subcommand {
         args::AgentSubcommand::List => {
-            for name in [
-                "build",
-                "plan",
-                "general",
-                "explore",
-                "scout",
-                "compaction",
-                "title",
-                "summary",
-            ] {
-                if let Some(agent) = crate::agent::get_agent(name) {
-                    let description = agent.description.unwrap_or_default();
-                    println!("{} - {}", agent.name, description);
+            let cwd = std::env::current_dir()?;
+            let config = crate::config::load_project_config(&cwd)?;
+            let mut agents = crate::agent::list_agents(config.as_ref());
+            agents.sort_by(|a, b| {
+                let a_native = a.native.unwrap_or(false);
+                let b_native = b.native.unwrap_or(false);
+                match (a_native, b_native) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a.name.cmp(&b.name),
                 }
+            });
+            for agent in agents {
+                println!("{} ({})", agent.name, agent.mode);
+                println!("  {}", serde_json::to_string_pretty(&agent.permission)?);
             }
         }
         args::AgentSubcommand::Create(create) => {
