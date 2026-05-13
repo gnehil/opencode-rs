@@ -2,12 +2,17 @@ use axum::{
     extract::{Json, Path, State},
     http::StatusCode,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use super::session_handlers::AppState;
 use crate::bus::{Event, MessageRole};
 use crate::id::{MessageID, PartID, SessionID};
+use crate::message::part::{
+    AgentPart, AgentPartSource, FilePart, FilePartSource, SubtaskModel, SubtaskPart, TextPart,
+    TextPartTime,
+};
 use crate::message::{Message, ModelRef, Part, WithParts};
 
 #[derive(Default, Deserialize)]
@@ -43,6 +48,7 @@ pub struct PromptResponse {
 
 struct PromptTurn {
     text: String,
+    parts: Vec<UserPartDraft>,
     message_id: Option<String>,
     agent: Option<String>,
     model_selection: Option<String>,
@@ -52,6 +58,110 @@ struct PromptTurn {
 struct PromptOutput {
     legacy: PromptResponse,
     with_parts: Option<WithParts>,
+}
+
+#[derive(Clone)]
+enum UserPartDraft {
+    Text {
+        id: Option<PartID>,
+        text: String,
+        synthetic: Option<bool>,
+        ignored: Option<bool>,
+        time: Option<TextPartTime>,
+        metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    },
+    File {
+        id: Option<PartID>,
+        mime: String,
+        filename: Option<String>,
+        url: String,
+        source: Option<FilePartSource>,
+    },
+    Agent {
+        id: Option<PartID>,
+        name: String,
+        source: Option<AgentPartSource>,
+    },
+    Subtask {
+        id: Option<PartID>,
+        prompt: String,
+        description: String,
+        agent: String,
+        model: Option<SubtaskModel>,
+        command: Option<String>,
+    },
+}
+
+impl UserPartDraft {
+    fn into_part(self, session_id: &SessionID, message_id: &MessageID) -> Part {
+        match self {
+            UserPartDraft::Text {
+                id,
+                text,
+                synthetic,
+                ignored,
+                time,
+                metadata,
+            } => Part::Text(TextPart {
+                id: id.unwrap_or_else(PartID::new),
+                session_id: session_id.clone(),
+                message_id: message_id.clone(),
+                text,
+                synthetic,
+                ignored,
+                time,
+                metadata,
+            }),
+            UserPartDraft::File {
+                id,
+                mime,
+                filename,
+                url,
+                source,
+            } => Part::File(FilePart {
+                id: id.unwrap_or_else(PartID::new),
+                session_id: session_id.clone(),
+                message_id: message_id.clone(),
+                mime,
+                filename,
+                url,
+                source,
+            }),
+            UserPartDraft::Agent { id, name, source } => Part::Agent(AgentPart {
+                id: id.unwrap_or_else(PartID::new),
+                session_id: session_id.clone(),
+                message_id: message_id.clone(),
+                name,
+                source,
+            }),
+            UserPartDraft::Subtask {
+                id,
+                prompt,
+                description,
+                agent,
+                model,
+                command,
+            } => Part::Subtask(SubtaskPart {
+                id: id.unwrap_or_else(PartID::new),
+                session_id: session_id.clone(),
+                message_id: message_id.clone(),
+                prompt,
+                description,
+                agent,
+                model,
+                command,
+            }),
+        }
+    }
+
+    fn has_content(&self) -> bool {
+        match self {
+            UserPartDraft::Text { text, .. } => !text.trim().is_empty(),
+            UserPartDraft::File { .. }
+            | UserPartDraft::Agent { .. }
+            | UserPartDraft::Subtask { .. } => true,
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -275,8 +385,8 @@ pub async fn prompt(
     Path(id): Path<String>,
     Json(req): Json<PromptRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let turn = prompt_turn_from_request(req);
-    if turn.text.trim().is_empty() {
+    let turn = prompt_turn_from_request(req)?;
+    if !turn.has_content() {
         return Err(StatusCode::BAD_REQUEST);
     }
     run_prompt_turn(state, id, turn)
@@ -289,8 +399,8 @@ pub async fn prompt_async(
     Path(id): Path<String>,
     Json(req): Json<PromptRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let turn = prompt_turn_from_request(req);
-    if turn.text.trim().is_empty() {
+    let turn = prompt_turn_from_request(req)?;
+    if !turn.has_content() {
         return Err(StatusCode::BAD_REQUEST);
     }
     if !turn.no_reply && state.provider.is_none() {
@@ -334,17 +444,20 @@ pub async fn command(
         .ok_or(StatusCode::BAD_REQUEST)?;
 
     let arguments = req.arguments.as_deref().unwrap_or_default();
-    let mut text = crate::command::render_template(&command.template, arguments);
-    let file_notes = request_file_part_notes(&req.parts);
-    if !file_notes.is_empty() {
-        if !text.is_empty() {
-            text.push_str("\n\n");
-        }
-        text.push_str(&file_notes);
-    }
+    let text = crate::command::render_template(&command.template, arguments);
+    let mut parts = vec![UserPartDraft::Text {
+        id: None,
+        text: text.clone(),
+        synthetic: None,
+        ignored: None,
+        time: None,
+        metadata: None,
+    }];
+    parts.extend(parse_user_part_drafts(&req.parts)?);
 
     let turn = PromptTurn {
         text,
+        parts,
         message_id: req.message_id,
         agent: command.agent.or(req.agent),
         model_selection: command
@@ -568,6 +681,7 @@ async fn run_prompt_turn(
         );
         let agent_name = turn
             .agent
+            .clone()
             .or_else(|| session.agent.clone())
             .or_else(|| state.default_agent.clone())
             .unwrap_or_else(|| crate::agent::DEFAULT_AGENT_NAME.to_string());
@@ -588,10 +702,20 @@ async fn run_prompt_turn(
             .save_message(&session_id, &Message::User(msg))
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        store
-            .save_text_part(&session_id, &message_id, &turn.text)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let user_parts = turn.parts_for_message(&session_id, &message_id);
+        if user_parts.is_empty() {
+            store
+                .save_text_part(&session_id, &message_id, &turn.text)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        } else {
+            for part in user_parts {
+                store
+                    .save_part(&part)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            }
+        }
         state.event_bus.publish(Event::message_create(
             session_id.to_string(),
             message_id.to_string(),
@@ -639,8 +763,10 @@ async fn run_prompt_turn(
         processor = processor.with_model_selection(model);
     }
 
+    let user_message_id = optional_message_id(turn.message_id.as_deref())?;
+    let user_parts = turn.parts_for_message(&session_id, &user_message_id);
     let events = processor
-        .process_stream(&session_id, &turn.text)
+        .process_stream_with_parts(&session_id, &turn.text, user_message_id, user_parts)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -721,14 +847,31 @@ async fn run_prompt_turn(
     })
 }
 
-fn prompt_turn_from_request(req: PromptRequest) -> PromptTurn {
-    PromptTurn {
-        text: prompt_request_text(&req),
+impl PromptTurn {
+    fn has_content(&self) -> bool {
+        self.parts.iter().any(UserPartDraft::has_content) || !self.text.trim().is_empty()
+    }
+
+    fn parts_for_message(&self, session_id: &SessionID, message_id: &MessageID) -> Vec<Part> {
+        self.parts
+            .clone()
+            .into_iter()
+            .map(|part| part.into_part(session_id, message_id))
+            .collect()
+    }
+}
+
+fn prompt_turn_from_request(req: PromptRequest) -> Result<PromptTurn, StatusCode> {
+    let text = prompt_request_text(&req);
+    let parts = prompt_request_parts(&req)?;
+    Ok(PromptTurn {
+        text,
+        parts,
         message_id: req.message_id,
         agent: req.agent,
         model_selection: model_selection_from_value(req.model.as_ref()),
         no_reply: req.no_reply.unwrap_or(false),
-    }
+    })
 }
 
 fn prompt_output_json(output: PromptOutput) -> Json<serde_json::Value> {
@@ -776,21 +919,107 @@ fn prompt_request_text(req: &PromptRequest) -> String {
     chunks.join("\n")
 }
 
-fn request_file_part_notes(parts: &Option<Vec<serde_json::Value>>) -> String {
-    let mut notes = Vec::new();
-    if let Some(parts) = parts {
-        for part in parts {
-            if part.get("type").and_then(|value| value.as_str()) == Some("file") {
-                let name = part
-                    .get("filename")
-                    .and_then(|value| value.as_str())
-                    .or_else(|| part.get("url").and_then(|value| value.as_str()))
-                    .unwrap_or("file");
-                notes.push(format!("Attached file: {name}"));
-            }
+fn prompt_request_parts(req: &PromptRequest) -> Result<Vec<UserPartDraft>, StatusCode> {
+    let mut parts = Vec::new();
+    if let Some(message) = req.message.as_deref().filter(|message| !message.is_empty()) {
+        parts.push(UserPartDraft::Text {
+            id: None,
+            text: message.to_string(),
+            synthetic: None,
+            ignored: None,
+            time: None,
+            metadata: None,
+        });
+    }
+    parts.extend(parse_user_part_drafts(&req.parts)?);
+    Ok(parts)
+}
+
+fn parse_user_part_drafts(
+    parts: &Option<Vec<serde_json::Value>>,
+) -> Result<Vec<UserPartDraft>, StatusCode> {
+    let mut parsed = Vec::new();
+    let Some(parts) = parts else {
+        return Ok(parsed);
+    };
+    for part in parts {
+        let part_type = required_string(part, "type")?;
+        let id = optional_part_id(part)?;
+        match part_type {
+            "text" => parsed.push(UserPartDraft::Text {
+                id,
+                text: required_string(part, "text")?.to_string(),
+                synthetic: optional_field(part, "synthetic")?,
+                ignored: optional_field(part, "ignored")?,
+                time: optional_field(part, "time")?,
+                metadata: optional_field(part, "metadata")?,
+            }),
+            "file" => parsed.push(UserPartDraft::File {
+                id,
+                mime: required_string_either(part, "mime", "mediaType")?.to_string(),
+                filename: optional_string(part, "filename").map(ToString::to_string),
+                url: required_string(part, "url")?.to_string(),
+                source: optional_field(part, "source")?,
+            }),
+            "agent" => parsed.push(UserPartDraft::Agent {
+                id,
+                name: required_string(part, "name")?.to_string(),
+                source: optional_field(part, "source")?,
+            }),
+            "subtask" => parsed.push(UserPartDraft::Subtask {
+                id,
+                prompt: required_string(part, "prompt")?.to_string(),
+                description: required_string(part, "description")?.to_string(),
+                agent: required_string(part, "agent")?.to_string(),
+                model: optional_field(part, "model")?,
+                command: optional_string(part, "command").map(ToString::to_string),
+            }),
+            _ => return Err(StatusCode::BAD_REQUEST),
         }
     }
-    notes.join("\n")
+    Ok(parsed)
+}
+
+fn optional_part_id(part: &serde_json::Value) -> Result<Option<PartID>, StatusCode> {
+    let Some(raw) = optional_string(part, "id") else {
+        return Ok(None);
+    };
+    PartID::parse(raw)
+        .map(Some)
+        .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+fn required_string<'a>(part: &'a serde_json::Value, field: &str) -> Result<&'a str, StatusCode> {
+    optional_string(part, field).ok_or(StatusCode::BAD_REQUEST)
+}
+
+fn required_string_either<'a>(
+    part: &'a serde_json::Value,
+    first: &str,
+    second: &str,
+) -> Result<&'a str, StatusCode> {
+    optional_string(part, first)
+        .or_else(|| optional_string(part, second))
+        .ok_or(StatusCode::BAD_REQUEST)
+}
+
+fn optional_string<'a>(part: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    part.get(field).and_then(|value| value.as_str())
+}
+
+fn optional_field<T: DeserializeOwned>(
+    part: &serde_json::Value,
+    field: &str,
+) -> Result<Option<T>, StatusCode> {
+    let Some(value) = part.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|_| StatusCode::BAD_REQUEST)
 }
 
 fn optional_message_id(value: Option<&str>) -> Result<MessageID, StatusCode> {
@@ -873,14 +1102,40 @@ mod tests {
     }
 
     #[test]
-    fn request_file_part_notes_summarizes_file_attachments() {
-        assert_eq!(
-            request_file_part_notes(&Some(vec![serde_json::json!({
-                "type": "file",
-                "filename": "src/lib.rs",
-                "url": "file:///tmp/src/lib.rs"
-            })])),
-            "Attached file: src/lib.rs"
-        );
+    fn prompt_request_parts_accepts_file_agent_and_subtask_inputs() {
+        let req = PromptRequest {
+            message: Some("legacy".to_string()),
+            parts: Some(vec![
+                serde_json::json!({
+                    "type": "file",
+                    "mime": "image/png",
+                    "filename": "diagram.png",
+                    "url": "data:image/png;base64,ABC"
+                }),
+                serde_json::json!({ "type": "agent", "name": "reviewer" }),
+                serde_json::json!({
+                    "type": "subtask",
+                    "prompt": "inspect auth",
+                    "description": "Review auth",
+                    "agent": "reviewer",
+                    "command": "review"
+                }),
+            ]),
+            ..Default::default()
+        };
+
+        let parts = prompt_request_parts(&req).unwrap();
+        assert_eq!(parts.len(), 4);
+
+        let session_id = SessionID::new();
+        let message_id = MessageID::new();
+        let stored = parts
+            .into_iter()
+            .map(|part| part.into_part(&session_id, &message_id))
+            .collect::<Vec<_>>();
+        assert!(matches!(stored[0], Part::Text(_)));
+        assert!(matches!(stored[1], Part::File(_)));
+        assert!(matches!(stored[2], Part::Agent(_)));
+        assert!(matches!(stored[3], Part::Subtask(_)));
     }
 }

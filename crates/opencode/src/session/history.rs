@@ -12,10 +12,11 @@
 //! tool_calls + role=tool messages, etc.).
 
 use anyhow::Result;
+use base64::Engine;
 use serde_json::Value;
 
 use crate::id::SessionID;
-use crate::message::{Message, Part, ToolState};
+use crate::message::{FilePartSource, Message, Part, ToolState};
 use crate::provider::CompletionMessage;
 use crate::session::SessionStore;
 
@@ -57,14 +58,14 @@ pub async fn build_completion_messages(
 
         match &wp.info {
             Message::User(_) => {
-                let text = collect_text(&wp.parts);
-                if !text.is_empty() {
+                let (text, images) = collect_user_content(&wp.parts);
+                if !text.is_empty() || !images.is_empty() {
                     out.push(CompletionMessage {
                         role: "user".to_string(),
                         content: text,
                         tool_calls: None,
                         tool_call_id: None,
-                        images: Vec::new(),
+                        images,
                     });
                 }
             }
@@ -133,12 +134,98 @@ fn collect_text(parts: &[Part]) -> String {
     let mut chunks = Vec::new();
     for part in parts {
         if let Part::Text(t) = part {
-            if !t.text.is_empty() {
+            if t.ignored != Some(true) && !t.text.is_empty() {
                 chunks.push(t.text.clone());
             }
         }
     }
     chunks.join("\n")
+}
+
+fn collect_user_content(parts: &[Part]) -> (String, Vec<String>) {
+    let mut chunks = Vec::new();
+    let mut images = Vec::new();
+
+    for part in parts {
+        match part {
+            Part::Text(t) => {
+                if t.ignored != Some(true) && !t.text.is_empty() {
+                    chunks.push(t.text.clone());
+                }
+            }
+            Part::File(file) => {
+                if file.mime.starts_with("image/") {
+                    chunks.push(format!(
+                        "[Attached {}: {}]",
+                        file.mime,
+                        file.filename.as_deref().unwrap_or("file")
+                    ));
+                    images.push(file.url.clone());
+                } else if let Some(text) = file_text_content(file) {
+                    chunks.push(text);
+                } else {
+                    chunks.push(format!(
+                        "[Attached {}: {}]",
+                        file.mime,
+                        file.filename.as_deref().unwrap_or("file")
+                    ));
+                }
+            }
+            Part::Agent(agent) => {
+                chunks.push(format!(
+                    "Use the above message and context to generate a prompt and call the task tool with subagent: {}",
+                    agent.name
+                ));
+            }
+            Part::Subtask(task) => {
+                chunks.push(format!(
+                    "The following subtask was requested.\nDescription: {}\nAgent: {}\nPrompt: {}",
+                    task.description, task.agent, task.prompt
+                ));
+            }
+            Part::Compaction(_) => chunks.push("What did we do so far?".to_string()),
+            _ => {}
+        }
+    }
+
+    (chunks.join("\n"), images)
+}
+
+fn file_text_content(file: &crate::message::part::FilePart) -> Option<String> {
+    if let Some(source_text) = file_source_text(&file.source) {
+        return Some(source_text);
+    }
+    if file.mime != "text/plain" {
+        return None;
+    }
+    decode_text_data_url(&file.url)
+}
+
+fn file_source_text(source: &Option<FilePartSource>) -> Option<String> {
+    match source {
+        Some(FilePartSource::File { text, .. })
+        | Some(FilePartSource::Symbol { text, .. })
+        | Some(FilePartSource::Resource { text, .. }) => Some(text.value.clone()),
+        None => None,
+    }
+}
+
+fn decode_text_data_url(url: &str) -> Option<String> {
+    let after_data = url.strip_prefix("data:")?;
+    let (meta, payload) = after_data.split_once(',')?;
+    let lower = meta.to_ascii_lowercase();
+    if !lower.starts_with("text/plain") {
+        return None;
+    }
+    if lower.split(';').any(|part| part == "base64") {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .ok()?;
+        return String::from_utf8(bytes).ok();
+    }
+    urlencoding::decode(payload)
+        .ok()
+        .map(|text| text.into_owned())
 }
 
 /// Walk the assistant's parts and return:
@@ -541,5 +628,142 @@ mod tests {
         assert_eq!(history[3].role, "user");
         assert_eq!(history[3].images.len(), 1);
         assert_eq!(history[3].images[0], "data:image/png;base64,XYZ");
+    }
+
+    #[tokio::test]
+    async fn user_file_part_becomes_user_message_with_images() {
+        let (store, _tmp) = store_with_tmp_data_dir().await;
+        let session = store
+            .create("t", "p", &std::path::PathBuf::from("/tmp"))
+            .await
+            .unwrap();
+        let session_id = SessionID::parse(&session.id).unwrap();
+        let user_id = crate::id::MessageID::new();
+        let user = crate::message::UserMessage {
+            id: user_id,
+            session_id: session_id.clone(),
+            role: "user".to_string(),
+            time: crate::message::UserTime {
+                created: chrono::Utc::now().timestamp_millis(),
+            },
+            format: None,
+            summary: None,
+            agent: "build".to_string(),
+            model: crate::message::ModelRef {
+                provider_id: "anthropic".to_string(),
+                model_id: "m".to_string(),
+                variant: None,
+            },
+            system: None,
+            tools: None,
+        };
+        store
+            .save_message(&session_id, &crate::message::Message::User(user))
+            .await
+            .unwrap();
+        store
+            .save_part(&crate::message::Part::Text(
+                crate::message::part::TextPart {
+                    id: crate::id::PartID::new(),
+                    session_id: session_id.clone(),
+                    message_id: user_id,
+                    text: "describe this image".to_string(),
+                    synthetic: None,
+                    ignored: None,
+                    time: None,
+                    metadata: None,
+                },
+            ))
+            .await
+            .unwrap();
+        store
+            .save_part(&crate::message::Part::File(
+                crate::message::part::FilePart {
+                    id: crate::id::PartID::new(),
+                    session_id: session_id.clone(),
+                    message_id: user_id,
+                    mime: "image/png".to_string(),
+                    filename: Some("diagram.png".to_string()),
+                    url: "data:image/png;base64,ABC".to_string(),
+                    source: None,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let history = build_completion_messages(&store, &session_id)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1, "{:#?}", history);
+        assert_eq!(history[0].role, "user");
+        assert!(history[0].content.contains("describe this image"));
+        assert_eq!(history[0].images, vec!["data:image/png;base64,ABC"]);
+    }
+
+    #[tokio::test]
+    async fn user_agent_and_subtask_parts_are_visible_to_model() {
+        let (store, _tmp) = store_with_tmp_data_dir().await;
+        let session = store
+            .create("t", "p", &std::path::PathBuf::from("/tmp"))
+            .await
+            .unwrap();
+        let session_id = SessionID::parse(&session.id).unwrap();
+        let user_id = crate::id::MessageID::new();
+        let user = crate::message::UserMessage {
+            id: user_id,
+            session_id: session_id.clone(),
+            role: "user".to_string(),
+            time: crate::message::UserTime {
+                created: chrono::Utc::now().timestamp_millis(),
+            },
+            format: None,
+            summary: None,
+            agent: "build".to_string(),
+            model: crate::message::ModelRef {
+                provider_id: "anthropic".to_string(),
+                model_id: "m".to_string(),
+                variant: None,
+            },
+            system: None,
+            tools: None,
+        };
+        store
+            .save_message(&session_id, &crate::message::Message::User(user))
+            .await
+            .unwrap();
+        store
+            .save_part(&crate::message::Part::Agent(
+                crate::message::part::AgentPart {
+                    id: crate::id::PartID::new(),
+                    session_id: session_id.clone(),
+                    message_id: user_id,
+                    name: "reviewer".to_string(),
+                    source: None,
+                },
+            ))
+            .await
+            .unwrap();
+        store
+            .save_part(&crate::message::Part::Subtask(
+                crate::message::part::SubtaskPart {
+                    id: crate::id::PartID::new(),
+                    session_id: session_id.clone(),
+                    message_id: user_id,
+                    prompt: "inspect auth flow".to_string(),
+                    description: "Review auth".to_string(),
+                    agent: "reviewer".to_string(),
+                    model: None,
+                    command: Some("review".to_string()),
+                },
+            ))
+            .await
+            .unwrap();
+
+        let history = build_completion_messages(&store, &session_id)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1, "{:#?}", history);
+        assert!(history[0].content.contains("reviewer"));
+        assert!(history[0].content.contains("inspect auth flow"));
     }
 }

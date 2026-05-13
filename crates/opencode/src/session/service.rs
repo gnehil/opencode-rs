@@ -406,6 +406,26 @@ impl SessionStore {
         Ok(())
     }
 
+    pub async fn save_part(&self, part: &Part) -> Result<()> {
+        let (session_id, message_id, part_id) = part_storage_ids(part);
+        let now = next_monotonic_ms();
+        let data = serde_json::to_string(part)?;
+
+        sqlx::query(
+            "INSERT OR REPLACE INTO part (id, message_id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(part_id.to_string())
+        .bind(message_id.to_string())
+        .bind(session_id.to_string())
+        .bind(now)
+        .bind(now)
+        .bind(data)
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(())
+    }
+
     pub async fn get_messages_with_parts(&self, session_id: &SessionID) -> Result<Vec<WithParts>> {
         let messages = self.get_messages(session_id).await?;
         let parts_by_message = self.get_parts_by_session(session_id).await?;
@@ -659,6 +679,23 @@ impl SessionStore {
         .await?;
 
         self.get(session_id).await
+    }
+}
+
+fn part_storage_ids(part: &Part) -> (&SessionID, &MessageID, PartID) {
+    match part {
+        Part::Text(part) => (&part.session_id, &part.message_id, part.id),
+        Part::Subtask(part) => (&part.session_id, &part.message_id, part.id),
+        Part::Reasoning(part) => (&part.session_id, &part.message_id, part.id),
+        Part::File(part) => (&part.session_id, &part.message_id, part.id),
+        Part::Tool(part) => (&part.session_id, &part.message_id, part.id),
+        Part::StepStart(part) => (&part.session_id, &part.message_id, part.id),
+        Part::StepFinish(part) => (&part.session_id, &part.message_id, part.id),
+        Part::Snapshot(part) => (&part.session_id, &part.message_id, part.id),
+        Part::Patch(part) => (&part.session_id, &part.message_id, part.id),
+        Part::Agent(part) => (&part.session_id, &part.message_id, part.id),
+        Part::Retry(part) => (&part.session_id, &part.message_id, part.id),
+        Part::Compaction(part) => (&part.session_id, &part.message_id, part.id),
     }
 }
 

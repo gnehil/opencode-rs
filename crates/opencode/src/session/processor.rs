@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::bus::{Event, EventBus, MessageRole};
 use crate::id::{MessageID, SessionID};
-use crate::message::{AssistantMessage, Message, ModelRef, UserMessage, UserTime};
+use crate::message::{AssistantMessage, Message, ModelRef, Part, UserMessage, UserTime};
 use crate::message::{AssistantTime, CacheUsage, PathInfo, TokenUsage};
 use crate::provider::{CompletionMessage, CompletionRequest, Provider, ToolDefinition};
 use crate::session::SessionStore;
@@ -99,6 +99,19 @@ impl PromptProcessor {
         session_id: &SessionID,
         prompt: &str,
     ) -> anyhow::Result<Vec<ProcessEvent>> {
+        let user_message_id = MessageID::new();
+        let user_parts = vec![text_part(session_id, &user_message_id, prompt)];
+        self.process_stream_with_parts(session_id, prompt, user_message_id, user_parts)
+            .await
+    }
+
+    pub async fn process_stream_with_parts(
+        &self,
+        session_id: &SessionID,
+        prompt: &str,
+        user_message_id: MessageID,
+        user_parts: Vec<Part>,
+    ) -> anyhow::Result<Vec<ProcessEvent>> {
         let mut events = Vec::new();
         let mut accumulated_content = String::new();
         let mut total_input_tokens: u64 = 0;
@@ -117,7 +130,6 @@ impl PromptProcessor {
         // Persist the user turn exactly once. Subsequent provider calls in
         // the same `process_stream` invocation are tool-result iterations,
         // not new user messages — they replay the persisted history.
-        let user_message_id = MessageID::new();
         let now = chrono::Utc::now().timestamp_millis();
         let user_msg = UserMessage {
             id: user_message_id.clone(),
@@ -138,9 +150,15 @@ impl PromptProcessor {
         self.store
             .save_message(session_id, &Message::User(user_msg))
             .await?;
-        self.store
-            .save_text_part(session_id, &user_message_id, prompt)
-            .await?;
+        if user_parts.is_empty() {
+            self.store
+                .save_text_part(session_id, &user_message_id, prompt)
+                .await?;
+        } else {
+            for part in user_parts {
+                self.store.save_part(&part).await?;
+            }
+        }
         self.bus.publish(Event::message_create(
             session_id.to_string(),
             user_message_id.to_string(),
@@ -405,6 +423,19 @@ impl PromptProcessor {
             stop_sequences: None,
         })
     }
+}
+
+fn text_part(session_id: &SessionID, message_id: &MessageID, text: &str) -> Part {
+    Part::Text(crate::message::part::TextPart {
+        id: crate::id::PartID::new(),
+        session_id: session_id.clone(),
+        message_id: message_id.clone(),
+        text: text.to_string(),
+        synthetic: None,
+        ignored: None,
+        time: None,
+        metadata: None,
+    })
 }
 
 pub fn model_id_from_selection(selection: &str) -> Option<String> {

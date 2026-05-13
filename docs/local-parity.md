@@ -15,7 +15,7 @@ Legend:
 | Area | TS reference | Rust reference | Status | Next work |
 | --- | --- | --- | --- | --- |
 | Top-level commands | `packages/opencode/src/cli/cmd/*.ts` | `crates/opencode/src/cli/args.rs` | partial | Keep option/alias parity as implementation catches up |
-| `run` non-interactive | `cli/cmd/run.ts` | `cli/mod.rs`, `session/processor.rs` | partial | Align JSON event stream, file parts, command/shell prompt routes |
+| `run` non-interactive | `cli/cmd/run.ts` | `cli/mod.rs`, `session/processor.rs` | partial | Align JSON event stream and command/shell prompt route behavior |
 | `run --interactive` | `cli/cmd/run/runtime*.ts`, `footer*.tsx` | `tui/*`, `cli/local.rs` | partial | Split footer, permission/question prompt, scrollback, subagent frames |
 | `tui` | `cli/cmd/tui/*` | `tui/*` | partial | Worker/internal transport, session validation, model/agent pickers |
 | `attach` | `cli/cmd/tui/attach.ts` | `cli/local.rs` | partial | Launch real remote TUI instead of only validating/selecting session |
@@ -32,7 +32,7 @@ Legend:
 | Session list/create/get/update/delete | `server/.../groups/session.ts` | `server/handlers/session_handlers.rs` | partial | Request/response shape and workspace routing parity |
 | Session route compatibility | `SessionPaths` | `server/routes.rs` | partial | Keep adding canonical `/session/...` aliases before `/api/session` legacy paths |
 | Session messages | `SessionPaths.messages/message` | `server/handlers/message_handlers.rs` | partial | Broaden `MessageV2` shape tests and SDK compatibility checks |
-| Session prompt | `prompt`, `prompt_async`, `command`, `shell` | `message_handlers.rs`, `command/*` | partial | Richer file/agent/subtask prompt parts |
+| Session prompt | `prompt`, `prompt_async`, `command`, `shell` | `message_handlers.rs`, `command/*`, `session/history.rs` | partial | Subtask execution semantics and full command hook resolution |
 | Revert/unrevert | `SessionPaths.revert/unrevert` | `session/service.rs`, `session_handlers.rs` | partial | Full restore semantics after revert, not only clearing the marker |
 | Todo/diff/init | `SessionPaths.todo/diff/init` | mixed | missing | Local-only implementations |
 | Share/unshare | `SessionPaths.share` | none | skip | Cloud share scope |
@@ -55,8 +55,8 @@ Legend:
 
 ## Current priority queue
 
-1. Richer file/agent/subtask prompt part resolution and provider history support.
-2. Run JSON/file/command behavior against the server routes.
+1. Run JSON/file/command behavior against the server routes.
+2. Subtask command execution semantics and task-tool handoff parity.
 3. Remote TUI attach/control queue and TUI prompt execution.
 4. MCP needs_auth/reconnect and plugin hook runtime.
 5. Provider/model/auth dynamic loading and stored credential use beyond API keys.
