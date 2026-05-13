@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use diffy::Line;
 use serde::Deserialize;
 use serde_json::json;
 use std::path::{Component, Path, PathBuf};
@@ -214,6 +215,20 @@ pub async fn read_file(
     let content = std::fs::read_to_string(&path_buf)
         .map(|content| content.trim().to_string())
         .unwrap_or_default();
+    let root = root_canonical(&state.workspace_root);
+    let rel = relative_path(&root, &path_buf);
+    if root.join(".git").exists() {
+        if let Some(diff) = file_git_diff(&root, &rel) {
+            let original = git_show_head(&root, &rel).unwrap_or_default();
+            return Ok(Json(json!({
+                "type": "text",
+                "content": content,
+                "diff": diff,
+                "patch": structured_patch(&rel, &original, &content),
+            })));
+        }
+    }
+
     Ok(Json(json!({
         "type": "text",
         "content": content,
@@ -409,6 +424,72 @@ pub async fn git_status(
 
 fn parse_numstat(value: Option<&str>) -> usize {
     value.and_then(|value| value.parse().ok()).unwrap_or(0)
+}
+
+fn file_git_diff(root: &Path, rel: &str) -> Option<String> {
+    let unstaged = git_output(root, &["-c", "core.fsmonitor=false", "diff", "--", rel])?;
+    if !unstaged.trim().is_empty() {
+        return Some(unstaged);
+    }
+    let staged = git_output(
+        root,
+        &["-c", "core.fsmonitor=false", "diff", "--staged", "--", rel],
+    )?;
+    (!staged.trim().is_empty()).then_some(staged)
+}
+
+fn git_show_head(root: &Path, rel: &str) -> Option<String> {
+    let spec = format!("HEAD:{rel}");
+    git_output(root, &["show", spec.as_str()])
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+fn structured_patch(file: &str, original: &str, modified: &str) -> serde_json::Value {
+    let patch = diffy::create_patch(original, modified);
+    let hunks: Vec<_> = patch
+        .hunks()
+        .iter()
+        .map(|hunk| {
+            let old_range = hunk.old_range();
+            let new_range = hunk.new_range();
+            let lines: Vec<_> = hunk.lines().iter().map(patch_line).collect();
+            json!({
+                "oldStart": old_range.start(),
+                "oldLines": old_range.len(),
+                "newStart": new_range.start(),
+                "newLines": new_range.len(),
+                "lines": lines,
+            })
+        })
+        .collect();
+    json!({
+        "oldFileName": file,
+        "newFileName": file,
+        "hunks": hunks,
+    })
+}
+
+fn patch_line(line: &Line<'_, str>) -> String {
+    match line {
+        Line::Context(text) => format!(" {}", trim_patch_line(text)),
+        Line::Delete(text) => format!("-{}", trim_patch_line(text)),
+        Line::Insert(text) => format!("+{}", trim_patch_line(text)),
+    }
+}
+
+fn trim_patch_line(line: &str) -> &str {
+    line.trim_end_matches(['\r', '\n'])
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

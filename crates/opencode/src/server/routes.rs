@@ -436,6 +436,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_content_includes_git_diff_and_patch_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::fs::write(root.join("tracked.txt"), "before\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::fs::write(root.join("tracked.txt"), "before\nafter\n").unwrap();
+
+        let state = std::sync::Arc::new(
+            AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
+        );
+        let app = create_router_with_state(state);
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("GET")
+                .uri("/file/content?path=tracked.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content = response_json(response).await;
+        assert_eq!(content["type"], "text");
+        assert_eq!(content["content"], "before\nafter");
+        assert!(content["diff"].as_str().unwrap().contains("+after"));
+        assert_eq!(content["patch"]["oldFileName"], "tracked.txt");
+        assert_eq!(content["patch"]["newFileName"], "tracked.txt");
+        assert_eq!(content["patch"]["hunks"][0]["oldStart"], 1);
+        assert_eq!(content["patch"]["hunks"][0]["oldLines"], 1);
+        assert_eq!(content["patch"]["hunks"][0]["newStart"], 1);
+        assert_eq!(content["patch"]["hunks"][0]["newLines"], 2);
+        assert!(content["patch"]["hunks"][0]["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line == "+after"));
+    }
+
+    #[tokio::test]
     async fn canonical_session_local_routes_expose_todo_diff_and_init() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
