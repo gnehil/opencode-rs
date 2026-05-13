@@ -427,6 +427,147 @@ impl SessionStore {
         Ok(with_parts)
     }
 
+    pub async fn get_message_with_parts(
+        &self,
+        session_id: &SessionID,
+        message_id: &MessageID,
+    ) -> Result<Option<WithParts>> {
+        let Some(row) = sqlx::query_as::<_, MessageRow>(
+            "SELECT * FROM message WHERE session_id = ?1 AND id = ?2",
+        )
+        .bind(session_id.to_string())
+        .bind(message_id.to_string())
+        .fetch_optional(self.pool.as_ref())
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        let info = serde_json::from_str::<Message>(&row.data)?;
+        let part_rows = sqlx::query_as::<_, PartRow>(
+            "SELECT * FROM part WHERE session_id = ?1 AND message_id = ?2 ORDER BY time_created ASC, id ASC",
+        )
+        .bind(session_id.to_string())
+        .bind(message_id.to_string())
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        let parts = part_rows
+            .into_iter()
+            .filter_map(|row| serde_json::from_str::<Part>(&row.data).ok())
+            .collect();
+
+        Ok(Some(WithParts { info, parts }))
+    }
+
+    pub async fn delete_message(
+        &self,
+        session_id: &SessionID,
+        message_id: &MessageID,
+    ) -> Result<bool> {
+        sqlx::query("DELETE FROM part WHERE session_id = ?1 AND message_id = ?2")
+            .bind(session_id.to_string())
+            .bind(message_id.to_string())
+            .execute(self.pool.as_ref())
+            .await?;
+        let result = sqlx::query("DELETE FROM message WHERE session_id = ?1 AND id = ?2")
+            .bind(session_id.to_string())
+            .bind(message_id.to_string())
+            .execute(self.pool.as_ref())
+            .await?;
+        let deleted = result.rows_affected() > 0;
+        if deleted {
+            self.touch_session(session_id).await?;
+        }
+        Ok(deleted)
+    }
+
+    pub async fn delete_part(
+        &self,
+        session_id: &SessionID,
+        message_id: &MessageID,
+        part_id: &PartID,
+    ) -> Result<bool> {
+        let result =
+            sqlx::query("DELETE FROM part WHERE session_id = ?1 AND message_id = ?2 AND id = ?3")
+                .bind(session_id.to_string())
+                .bind(message_id.to_string())
+                .bind(part_id.to_string())
+                .execute(self.pool.as_ref())
+                .await?;
+        let deleted = result.rows_affected() > 0;
+        if deleted {
+            self.touch_session(session_id).await?;
+        }
+        Ok(deleted)
+    }
+
+    pub async fn update_part(
+        &self,
+        session_id: &SessionID,
+        message_id: &MessageID,
+        part_id: &PartID,
+        part: &Part,
+    ) -> Result<Option<Part>> {
+        let existing = sqlx::query_as::<_, PartRow>(
+            "SELECT * FROM part WHERE session_id = ?1 AND message_id = ?2 AND id = ?3",
+        )
+        .bind(session_id.to_string())
+        .bind(message_id.to_string())
+        .bind(part_id.to_string())
+        .fetch_optional(self.pool.as_ref())
+        .await?;
+        if existing.is_none() {
+            return Ok(None);
+        }
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let data = serde_json::to_string(part)?;
+        sqlx::query(
+            "UPDATE part SET data = ?1, time_updated = ?2
+             WHERE session_id = ?3 AND message_id = ?4 AND id = ?5",
+        )
+        .bind(data)
+        .bind(now)
+        .bind(session_id.to_string())
+        .bind(message_id.to_string())
+        .bind(part_id.to_string())
+        .execute(self.pool.as_ref())
+        .await?;
+        self.touch_session(session_id).await?;
+
+        Ok(Some(part.clone()))
+    }
+
+    pub async fn clear_revert(&self, session_id: &SessionID) -> Result<Option<SessionRow>> {
+        if self.get(session_id).await?.is_none() {
+            return Ok(None);
+        }
+
+        let now = chrono::Utc::now().timestamp_millis();
+        sqlx::query(
+            "UPDATE session
+             SET revert = NULL,
+                 time_updated = ?1
+             WHERE id = ?2",
+        )
+        .bind(now)
+        .bind(session_id.to_string())
+        .execute(self.pool.as_ref())
+        .await?;
+
+        self.get(session_id).await
+    }
+
+    async fn touch_session(&self, session_id: &SessionID) -> Result<()> {
+        let now = chrono::Utc::now().timestamp_millis();
+        sqlx::query("UPDATE session SET time_updated = ?1 WHERE id = ?2")
+            .bind(now)
+            .bind(session_id.to_string())
+            .execute(self.pool.as_ref())
+            .await?;
+        Ok(())
+    }
+
     pub async fn revert_to_message(
         &self,
         session_id: &SessionID,
@@ -525,7 +666,7 @@ impl SessionStore {
 mod tests {
     use super::*;
     use crate::id::MessageID;
-    use crate::message::{Message, ModelRef, UserMessage, UserTime};
+    use crate::message::{Message, ModelRef, Part, UserMessage, UserTime};
 
     fn user_message(session_id: &SessionID) -> (MessageID, Message) {
         let message_id = MessageID::new();
@@ -551,6 +692,82 @@ mod tests {
             Message::User(user) => user.id.to_string(),
             Message::Assistant(assistant) => assistant.id.to_string(),
         }
+    }
+
+    fn part_id(part: &Part) -> PartID {
+        match part {
+            Part::Text(part) => part.id,
+            Part::Subtask(part) => part.id,
+            Part::Reasoning(part) => part.id,
+            Part::File(part) => part.id,
+            Part::Tool(part) => part.id,
+            Part::StepStart(part) => part.id,
+            Part::StepFinish(part) => part.id,
+            Part::Snapshot(part) => part.id,
+            Part::Patch(part) => part.id,
+            Part::Agent(part) => part.id,
+            Part::Retry(part) => part.id,
+            Part::Compaction(part) => part.id,
+        }
+    }
+
+    #[tokio::test]
+    async fn message_and_part_mutation_apis_update_storage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(tmp.path().to_path_buf()).await.unwrap();
+        let session = store
+            .create("test", "default", &PathBuf::from("/tmp/project"))
+            .await
+            .unwrap();
+        let session_id = SessionID::parse(&session.id).unwrap();
+        let (msg_id, message) = user_message(&session_id);
+        store.save_message(&session_id, &message).await.unwrap();
+        store
+            .save_text_part(&session_id, &msg_id, "original")
+            .await
+            .unwrap();
+
+        let with_parts = store
+            .get_message_with_parts(&session_id, &msg_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message_id(&with_parts.info), msg_id.to_string());
+        assert_eq!(with_parts.parts.len(), 1);
+
+        let mut updated_part = with_parts.parts[0].clone();
+        let part_id = part_id(&updated_part);
+        match &mut updated_part {
+            Part::Text(text) => text.text = "updated".to_string(),
+            other => panic!("unexpected part type: {other:?}"),
+        }
+        let stored_part = store
+            .update_part(&session_id, &msg_id, &part_id, &updated_part)
+            .await
+            .unwrap()
+            .unwrap();
+        match stored_part {
+            Part::Text(text) => assert_eq!(text.text, "updated"),
+            other => panic!("unexpected part type: {other:?}"),
+        }
+
+        assert!(store
+            .delete_part(&session_id, &msg_id, &part_id)
+            .await
+            .unwrap());
+        let after_part_delete = store
+            .get_message_with_parts(&session_id, &msg_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(after_part_delete.parts.is_empty());
+
+        assert!(store.delete_message(&session_id, &msg_id).await.unwrap());
+        assert!(store
+            .get_message_with_parts(&session_id, &msg_id)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -612,5 +829,12 @@ mod tests {
                 "diff": null
             })
         );
+
+        let cleared = store
+            .clear_revert(&session_id)
+            .await
+            .unwrap()
+            .expect("session should exist");
+        assert!(cleared.revert.is_none());
     }
 }

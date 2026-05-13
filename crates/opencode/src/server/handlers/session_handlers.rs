@@ -79,11 +79,11 @@ impl AppState {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct CreateSessionBody {
-    pub title: String,
-    pub project_id: String,
-    pub directory: String,
+    pub title: Option<String>,
+    pub project_id: Option<String>,
+    pub directory: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -127,15 +127,17 @@ pub async fn list_sessions(
 
 pub async fn create_session(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<CreateSessionBody>,
+    body: Option<Json<CreateSessionBody>>,
 ) -> Result<Json<SessionResponse>, StatusCode> {
     let store = state.get_store().await;
+    let body = body.map(|Json(body)| body).unwrap_or_default();
+    let directory = body
+        .directory
+        .unwrap_or_else(|| state.workspace_root.to_string_lossy().to_string());
+    let project_id = body.project_id.unwrap_or_else(|| "default".to_string());
+    let title = body.title.unwrap_or_else(|| "New Session".to_string());
     let mut session = store
-        .create(
-            &body.title,
-            &body.project_id,
-            &std::path::PathBuf::from(&body.directory),
-        )
+        .create(&title, &project_id, &std::path::PathBuf::from(&directory))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let session_id =
@@ -341,6 +343,27 @@ pub async fn revert_message(
     let store = state.get_store().await;
     match store
         .revert_to_message(&session_id, &message_id, part_id.as_ref())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        Some(session) => {
+            state
+                .event_bus
+                .publish(crate::bus::Event::session_update(&id));
+            Ok(Json(SessionResponse::from(session)))
+        }
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+pub async fn unrevert_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionResponse>, StatusCode> {
+    let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let store = state.get_store().await;
+    match store
+        .clear_revert(&session_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     {

@@ -1,0 +1,62 @@
+# Local opencode parity matrix
+
+Scope: local CLI/runtime/API parity with the TypeScript opencode checkout at
+`/Users/gnehil/projects/opencode`. Cloud account, control-plane, cloud snapshot
+sync, and v2 API are intentionally out of scope.
+
+Legend:
+- `done`: implemented and covered by current Rust tests or compile checks
+- `partial`: usable, but behavior or UX is not yet equivalent
+- `missing`: TS local feature exists and Rust does not yet expose it
+- `skip`: intentionally excluded cloud/non-local surface
+
+## CLI
+
+| Area | TS reference | Rust reference | Status | Next work |
+| --- | --- | --- | --- | --- |
+| Top-level commands | `packages/opencode/src/cli/cmd/*.ts` | `crates/opencode/src/cli/args.rs` | partial | Keep option/alias parity as implementation catches up |
+| `run` non-interactive | `cli/cmd/run.ts` | `cli/mod.rs`, `session/processor.rs` | partial | Align JSON event stream, file parts, command/shell prompt routes |
+| `run --interactive` | `cli/cmd/run/runtime*.ts`, `footer*.tsx` | `tui/*`, `cli/local.rs` | partial | Split footer, permission/question prompt, scrollback, subagent frames |
+| `tui` | `cli/cmd/tui/*` | `tui/*` | partial | Worker/internal transport, session validation, model/agent pickers |
+| `attach` | `cli/cmd/tui/attach.ts` | `cli/local.rs` | partial | Launch real remote TUI instead of only validating/selecting session |
+| `debug` | `cli/cmd/debug/*` | `cli/local.rs` | partial | Scrap/debug snapshots beyond git-backed fallback |
+| `providers` | `cli/cmd/providers.ts` | `cli/provider_auth.rs`, `auth.rs`, `cli/mod.rs` | partial | Interactive provider selection and OAuth provider UX |
+| `mcp` | `cli/cmd/mcp.ts` | `cli/mcp_cli.rs`, `mcp/*` | partial | needs_auth status, reauth prompts, remote reconnect parity |
+| `github`/`pr` | `cli/cmd/github.ts`, `cli/cmd/pr.ts` | `cli/local_process.rs`, `cli/local.rs` | partial | Cross-repo PR remote setup, event simulation parity |
+| `account`/console cloud | `cli/cmd/account.ts` | `cli/local.rs` console stubs | skip | Cloud scope |
+
+## Server API
+
+| Area | TS reference | Rust reference | Status | Next work |
+| --- | --- | --- | --- | --- |
+| Session list/create/get/update/delete | `server/.../groups/session.ts` | `server/handlers/session_handlers.rs` | partial | Request/response shape and workspace routing parity |
+| Session route compatibility | `SessionPaths` | `server/routes.rs` | partial | Keep adding canonical `/session/...` aliases before `/api/session` legacy paths |
+| Session messages | `SessionPaths.messages/message` | `server/handlers/message_handlers.rs` | partial | Broaden `MessageV2` shape tests and SDK compatibility checks |
+| Session prompt | `prompt`, `prompt_async`, `command`, `shell` | `message_handlers.rs` | partial | Command template registry and richer file/agent/subtask prompt parts |
+| Revert/unrevert | `SessionPaths.revert/unrevert` | `session/service.rs`, `session_handlers.rs` | partial | Full restore semantics after revert, not only clearing the marker |
+| Todo/diff/init | `SessionPaths.todo/diff/init` | mixed | missing | Local-only implementations |
+| Share/unshare | `SessionPaths.share` | none | skip | Cloud share scope |
+| File/find API | `groups/file.ts` | `server/handlers/file_handlers.rs` | partial | Return TS-compatible arrays, add symbol search, fix `/find/file` query semantics |
+| SSE event API | `event.ts` | `server/handlers/event_handlers.rs` | partial | Use TS event envelope/initial `server.connected`/camelCase payloads |
+| TUI control | `groups/tui.ts`, `groups/control.ts` | `tui_handlers.rs` | partial | Real request queue/control loop |
+| Pty | `groups/pty.ts` | `pty/*` but no HTTP group | missing | Expose PTY API routes if required by local TUI |
+| Sync | `groups/sync.ts` | `workspace_handlers.rs` placeholders | skip | Cloud sync scope |
+
+## Runtime Modules
+
+| Area | TS reference | Rust reference | Status | Next work |
+| --- | --- | --- | --- | --- |
+| Providers/model auth | `provider/*`, `auth/index.ts` | `provider/*`, `auth.rs`, `cli/provider_auth.rs` | partial | Per-provider auth schema and live smoke tests |
+| Tools | `tool/*` | `tool/*` | partial | Validate behavior, output shape, permission integration per tool |
+| Permission ask | `permission/index.ts` | `permission/broker.rs`, `tool/context.rs` | done | Broaden HTTP/UI reply integration |
+| MCP runtime | `mcp/*` | `mcp/*`, `cli/mcp_cli.rs` | partial | OAuth state/status, unauthorized reconnect parity |
+| Plugin runtime | `cli/cmd/tui/plugin/*`, plugin hooks | `plugin/*` | partial | Hook execution and TUI plugin slots |
+| LSP | `lsp/*` | `lsp/*`, `tool/lsp.rs` | partial | Long-lived pool behavior and diagnostics shape |
+
+## Current priority queue
+
+1. Command template registry and richer prompt part resolution.
+2. Run JSON/file/command behavior against the server routes.
+3. Remote TUI attach/control queue and TUI prompt execution.
+4. MCP needs_auth/reconnect and plugin hook runtime.
+5. Provider/model/auth dynamic loading and stored credential use beyond API keys.

@@ -49,6 +49,10 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
             post(session_handlers::revert_message),
         )
         .route(
+            "/api/session/:id/unrevert",
+            post(session_handlers::unrevert_session),
+        )
+        .route(
             "/api/session/:id/abort",
             post(session_handlers::abort_session),
         )
@@ -57,12 +61,56 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
             get(message_handlers::list_messages),
         )
         .route("/api/session/:id/prompt", post(message_handlers::prompt))
+        .route(
+            "/api/session/:id/prompt_async",
+            post(message_handlers::prompt_async),
+        )
+        .route("/api/session/:id/command", post(message_handlers::command))
+        .route("/api/session/:id/shell", post(message_handlers::shell))
         // Aliases matching opencode's official server API shape.
         // `/session/:id/message` is the canonical send-and-wait route;
-        // `/session/:id/message/list` (GET) returns the persisted
-        // history. Same handlers, different paths.
+        // GET on the same path returns the persisted history.
+        .route(
+            "/session",
+            get(session_handlers::list_sessions).post(session_handlers::create_session),
+        )
+        .route("/session/status", get(session_handlers::session_status))
+        .route(
+            "/session/:id",
+            get(session_handlers::get_session)
+                .patch(session_handlers::update_session)
+                .delete(session_handlers::delete_session),
+        )
+        .route("/session/:id/fork", post(session_handlers::fork_session))
+        .route(
+            "/session/:id/children",
+            get(session_handlers::session_children),
+        )
+        .route(
+            "/session/:id/revert",
+            post(session_handlers::revert_message),
+        )
+        .route(
+            "/session/:id/unrevert",
+            post(session_handlers::unrevert_session),
+        )
+        .route("/session/:id/abort", post(session_handlers::abort_session))
         .route("/session/:id/message", post(message_handlers::prompt))
         .route("/session/:id/message", get(message_handlers::list_messages))
+        .route(
+            "/session/:id/prompt_async",
+            post(message_handlers::prompt_async),
+        )
+        .route("/session/:id/command", post(message_handlers::command))
+        .route("/session/:id/shell", post(message_handlers::shell))
+        .route(
+            "/session/:id/message/:message_id",
+            get(message_handlers::get_message).delete(message_handlers::delete_message),
+        )
+        .route(
+            "/session/:id/message/:message_id/part/:part_id",
+            delete(message_handlers::delete_part).patch(message_handlers::update_part),
+        )
         .route("/event", get(event_handlers::sse_events))
         .route("/config", get(config_handlers::get_config))
         .route("/config", patch(config_handlers::update_config))
@@ -130,4 +178,113 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/sync/replay", post(workspace_handlers::sync_replay))
         .with_state(app_state)
         .layer(cors_layer())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::{Request, StatusCode};
+    use tower::Service;
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    async fn send(app: Router, request: Request<Body>) -> axum::response::Response {
+        let mut app = app;
+        Service::call(&mut app, request).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn canonical_session_routes_accept_local_message_flows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = std::sync::Arc::new(
+            AppState::new(tmp.path().join("data")).with_workspace_root(tmp.path().to_path_buf()),
+        );
+        let app = create_router_with_state(state);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/session")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let created = response_json(response).await;
+        let session_id = created["id"].as_str().unwrap();
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/session/{session_id}/message"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "noReply": true,
+                        "parts": [{ "type": "text", "text": "hello" }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let prompt = response_json(response).await;
+        assert_eq!(prompt["completed"], true);
+        assert_eq!(prompt["parts"][0]["text"], "hello");
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/session/{session_id}/prompt_async"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "noReply": true,
+                        "parts": [{ "type": "text", "text": "async" }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/session/{session_id}/shell"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "command": "printf ok" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let shell = response_json(response).await;
+        assert_eq!(shell["info"]["role"], "assistant");
+        assert_eq!(shell["parts"][0]["tool"], "bash");
+        assert_eq!(shell["parts"][0]["state"]["output"], "ok");
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/session/{session_id}/unrevert"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }
