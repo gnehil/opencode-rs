@@ -6,8 +6,8 @@ use axum::{
 use crate::server::handlers::session_handlers::AppState;
 use crate::server::handlers::{
     agent_handlers, config_handlers, event_handlers, file_handlers, global_handlers,
-    instance_handlers, mcp_handlers, message_handlers, permission_handlers, session_handlers,
-    tui_handlers, workspace_handlers,
+    instance_handlers, mcp_handlers, message_handlers, permission_handlers, pty_handlers,
+    session_handlers, tui_handlers, workspace_handlers,
 };
 use crate::server::middleware::cors_layer;
 
@@ -131,6 +131,17 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/find", get(file_handlers::find_text))
         .route("/find/file", get(file_handlers::find_file))
         .route("/find/symbol", get(file_handlers::find_symbol))
+        .route("/pty/shells", get(pty_handlers::pty_shells))
+        .route(
+            "/pty",
+            get(pty_handlers::pty_list).post(pty_handlers::pty_create),
+        )
+        .route(
+            "/pty/:id",
+            get(pty_handlers::pty_get)
+                .put(pty_handlers::pty_update)
+                .delete(pty_handlers::pty_remove),
+        )
         .route(
             "/mcp",
             get(mcp_handlers::mcp_status).post(mcp_handlers::mcp_add),
@@ -497,6 +508,120 @@ mod tests {
             .unwrap()
             .iter()
             .any(|line| line == "+after"));
+    }
+
+    #[tokio::test]
+    async fn pty_routes_expose_local_session_lifecycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let state = std::sync::Arc::new(
+            AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
+        );
+        let app = create_router_with_state(state);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/pty")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!([]));
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/pty/shells")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response_json(response).await.is_array());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/pty")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "command": "/bin/sleep",
+                        "args": ["1"],
+                        "cwd": root,
+                        "title": "Test terminal"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let created = response_json(response).await;
+        let pty_id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(created["title"], "Test terminal");
+        assert_eq!(created["command"], "/bin/sleep");
+        assert_eq!(created["args"], serde_json::json!(["1"]));
+        assert_eq!(created["cwd"], root.to_string_lossy().as_ref());
+        assert_eq!(created["status"], "running");
+        assert!(created["pid"].as_u64().unwrap() > 0);
+        assert!(created.get("exit_code").is_none());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri(format!("/pty/{pty_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await["id"], pty_id);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/pty/{pty_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "title": "Updated terminal", "size": { "rows": 30, "cols": 100 } })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await["title"], "Updated terminal");
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/pty/{pty_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!(true));
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("GET")
+                .uri(format!("/pty/{pty_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

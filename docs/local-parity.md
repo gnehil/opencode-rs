@@ -39,7 +39,7 @@ Legend:
 | File/find API | `groups/file.ts` | `server/handlers/file_handlers.rs` | partial | Replace `/find/symbol` empty fallback with LSP-backed search |
 | SSE event API | `event.ts` | `server/handlers/event_handlers.rs` | partial | Align remaining Rust-only event type names/properties with TS bus schemas |
 | TUI control | `groups/tui.ts`, `groups/control.ts` | `tui_handlers.rs` | partial | Real request queue/control loop |
-| Pty | `groups/pty.ts` | `pty/*` but no HTTP group | missing | Expose PTY API routes if required by local TUI |
+| Pty | `groups/pty.ts` | `pty/*`, `server/handlers/pty_handlers.rs` | partial | Add WebSocket `connect` and short-lived connect tickets |
 | Sync | `groups/sync.ts` | `workspace_handlers.rs` placeholders | skip | Cloud sync scope |
 
 ## Runtime Modules

@@ -19,6 +19,7 @@ pub struct AppState {
     pub workspace_root: std::path::PathBuf,
     pub event_bus: EventBus,
     pub permission_broker: crate::permission::PermissionBroker,
+    pub pty_service: std::sync::Arc<crate::pty::PtyService>,
     pub mcp_manager: std::sync::Arc<tokio::sync::RwLock<crate::mcp::McpManager>>,
     pub plugin_manager: std::sync::Arc<crate::plugin::PluginManager>,
     pub default_agent: Option<String>,
@@ -35,10 +36,12 @@ impl AppState {
         let workspace_root = std::env::current_dir()
             .and_then(|p| p.canonicalize())
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let event_bus = EventBus::new();
         Self {
             data_dir,
             workspace_root,
-            event_bus: EventBus::new(),
+            pty_service: std::sync::Arc::new(crate::pty::PtyService::new(event_bus.clone())),
+            event_bus,
             permission_broker: crate::permission::PermissionBroker::new(),
             mcp_manager: std::sync::Arc::new(tokio::sync::RwLock::new(
                 crate::mcp::McpManager::new(),
