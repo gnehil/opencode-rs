@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
+use reqwest::header::HeaderMap;
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{CallToolRequestParam, ClientInfo, ReadResourceRequestParam, ServerInfo};
 use rmcp::service::{Peer, RoleClient, ServiceExt};
@@ -109,9 +110,17 @@ impl McpClient {
     }
 
     pub async fn connect_http(url: String) -> Result<Self> {
+        Self::connect_http_with_headers(url, HeaderMap::new()).await
+    }
+
+    pub async fn connect_http_with_headers(url: String, headers: HeaderMap) -> Result<Self> {
         debug!("Connecting to MCP server via HTTP: {}", url);
 
-        let transport = SseTransport::start(&url)
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .context("Failed to build MCP HTTP client")?;
+        let transport = SseTransport::start_with_client(&url, client)
             .await
             .context("Failed to connect to MCP server via SSE")?;
 

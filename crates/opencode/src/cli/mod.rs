@@ -277,7 +277,7 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
     );
 
     let store = Arc::new(store);
-    let mcp_tools = load_mcp_tools_from_project(&project_path).await;
+    let mcp_tools = load_mcp_tools_from_project(&project_path, &data_dir).await;
     let mut processor = PromptProcessor::new(store.clone(), provider)
         .with_tools(crate::tool::registry_with(mcp_tools))
         .with_agent(agent_name);
@@ -1177,6 +1177,7 @@ fn open_browser(url: &str) {
 
 async fn load_mcp_tools_from_project(
     project_path: &std::path::Path,
+    data_dir: &std::path::Path,
 ) -> Vec<Arc<dyn crate::tool::Tool>> {
     let config = match crate::config::load_project_config(project_path) {
         Ok(Some(config)) => config,
@@ -1187,7 +1188,8 @@ async fn load_mcp_tools_from_project(
         }
     };
 
-    let mut manager = crate::mcp::McpManager::new();
+    let auth_store = Arc::new(crate::mcp::McpAuthStore::new(data_dir.to_path_buf()));
+    let mut manager = crate::mcp::McpManager::new().with_auth_store(auth_store);
     manager.start_configured(&config).await;
     manager.runtime_tools().await
 }

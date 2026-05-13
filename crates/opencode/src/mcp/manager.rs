@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use serde::Serialize;
 use tracing::{debug, warn};
 
 use crate::config::{Config, McpConfigEntry, McpServerConfig};
 use crate::mcp::client::McpClient;
+use crate::mcp::oauth::McpAuthStore;
 use crate::mcp::tool::{McpRuntimeTool, McpTool};
 use crate::tool::Tool;
 
@@ -24,6 +26,7 @@ pub struct McpManager {
     clients: HashMap<String, Arc<McpClient>>,
     configs: HashMap<String, McpServerConfig>,
     status: HashMap<String, McpServerStatus>,
+    auth_store: Option<Arc<McpAuthStore>>,
 }
 
 impl McpManager {
@@ -32,7 +35,13 @@ impl McpManager {
             clients: HashMap::new(),
             configs: HashMap::new(),
             status: HashMap::new(),
+            auth_store: None,
         }
+    }
+
+    pub fn with_auth_store(mut self, auth_store: Arc<McpAuthStore>) -> Self {
+        self.auth_store = Some(auth_store);
+        self
     }
 
     pub async fn start_configured(&mut self, config: &Config) {
@@ -85,7 +94,8 @@ impl McpManager {
         self.configs.insert(name.to_string(), config.clone());
 
         let client = if let Some(url) = &config.url {
-            McpClient::connect_http(url.clone()).await
+            let headers = http_headers_for_config(name, config, self.auth_store.clone()).await?;
+            McpClient::connect_http_with_headers(url.clone(), headers).await
         } else if let Some((command, args)) = config.command_and_args() {
             let env = config.env.clone().unwrap_or_default();
             McpClient::connect_stdio(command, args, env).await
@@ -195,5 +205,93 @@ impl McpManager {
         if let Some(_client) = self.clients.remove(name) {
             debug!("Removed MCP client '{}'", name);
         }
+    }
+}
+
+async fn http_headers_for_config(
+    name: &str,
+    config: &McpServerConfig,
+    auth_store: Option<Arc<McpAuthStore>>,
+) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    if let Some(config_headers) = &config.headers {
+        for (key, value) in config_headers {
+            headers.insert(
+                HeaderName::from_bytes(key.as_bytes())
+                    .with_context(|| format!("Invalid MCP HTTP header name: {key}"))?,
+                HeaderValue::from_str(value)
+                    .with_context(|| format!("Invalid MCP HTTP header value for {key}"))?,
+            );
+        }
+    }
+    let Some(store) = auth_store else {
+        return Ok(headers);
+    };
+    let Some(url) = config.url.as_deref() else {
+        return Ok(headers);
+    };
+    store.load().await?;
+    if let Some(tokens) = store
+        .get_for_url(name, url)
+        .await
+        .and_then(|entry| entry.tokens)
+    {
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", tokens.access_token))
+                .context("Invalid MCP OAuth access token")?,
+        );
+    }
+    Ok(headers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::{McpAuthStore, OAuthTokens};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn http_headers_include_config_headers_and_saved_bearer_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let auth_store = Arc::new(McpAuthStore::new(tmp.path().join("data")));
+        auth_store
+            .update_tokens(
+                "remote",
+                OAuthTokens {
+                    access_token: "token-123".to_string(),
+                    refresh_token: None,
+                    expires_at: None,
+                    scope: None,
+                },
+                Some("https://example.com/mcp"),
+            )
+            .await
+            .unwrap();
+        let config: McpServerConfig = serde_json::from_value(json!({
+            "type": "remote",
+            "url": "https://example.com/mcp",
+            "headers": {
+                "x-api-key": "key-123"
+            }
+        }))
+        .unwrap();
+
+        let headers = http_headers_for_config("remote", &config, Some(auth_store))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            headers.get("x-api-key").unwrap().to_str().unwrap(),
+            "key-123"
+        );
+        assert_eq!(
+            headers
+                .get(reqwest::header::AUTHORIZATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer token-123"
+        );
     }
 }

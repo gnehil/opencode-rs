@@ -1027,14 +1027,14 @@ fn handle_debug_snapshot(subcommand: args::DebugSnapshotSubcommand) -> Result<()
 pub(crate) async fn handle_mcp(subcommand: args::McpSubcommand, data_dir: PathBuf) -> Result<()> {
     match subcommand {
         args::McpSubcommand::List => {
-            let (manager, config) = start_mcp_from_project().await?;
+            let (manager, config) = start_mcp_from_project(&data_dir).await?;
             print_mcp_status(&manager);
             if config.mcp.is_none() {
                 println!("No MCP servers configured.");
             }
         }
         args::McpSubcommand::Debug(args) => {
-            let (manager, _) = start_mcp_from_project().await?;
+            let (manager, _) = start_mcp_from_project(&data_dir).await?;
             let Some(client) = manager.get_client(&args.name) else {
                 anyhow::bail!("MCP server '{}' is not connected", args.name);
             };
@@ -1144,10 +1144,11 @@ pub(crate) async fn handle_mcp(subcommand: args::McpSubcommand, data_dir: PathBu
     Ok(())
 }
 
-async fn start_mcp_from_project() -> Result<(McpManager, crate::config::Config)> {
+async fn start_mcp_from_project(data_dir: &Path) -> Result<(McpManager, crate::config::Config)> {
     let cwd = std::env::current_dir()?;
     let config = crate::config::load_project_config(&cwd)?.unwrap_or_default();
-    let mut manager = McpManager::new();
+    let auth_store = std::sync::Arc::new(McpAuthStore::new(data_dir.to_path_buf()));
+    let mut manager = McpManager::new().with_auth_store(auth_store);
     manager.start_configured(&config).await;
     Ok((manager, config))
 }

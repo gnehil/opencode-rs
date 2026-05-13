@@ -40,6 +40,7 @@ impl AppState {
             .and_then(|p| p.canonicalize())
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let event_bus = EventBus::new();
+        let mcp_auth_store = std::sync::Arc::new(crate::mcp::McpAuthStore::new(data_dir.clone()));
         Self {
             data_dir: data_dir.clone(),
             workspace_root,
@@ -49,9 +50,9 @@ impl AppState {
             event_bus,
             permission_broker: crate::permission::PermissionBroker::new(),
             mcp_manager: std::sync::Arc::new(tokio::sync::RwLock::new(
-                crate::mcp::McpManager::new(),
+                crate::mcp::McpManager::new().with_auth_store(mcp_auth_store.clone()),
             )),
-            mcp_auth_store: std::sync::Arc::new(crate::mcp::McpAuthStore::new(data_dir.clone())),
+            mcp_auth_store,
             plugin_manager: std::sync::Arc::new(crate::plugin::PluginManager::new()),
             default_agent: None,
             default_model: None,
