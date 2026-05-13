@@ -280,6 +280,8 @@ mod tests {
             session_id: crate::id::SessionID::new(),
             working_dir: std::path::PathBuf::from("/tmp"),
             permission_rules: crate::permission::Ruleset::default(),
+            event_bus: None,
+            permission_broker: None,
         }
     }
 

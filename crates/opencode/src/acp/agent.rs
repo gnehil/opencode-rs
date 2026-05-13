@@ -11,7 +11,6 @@ use crate::acp::types::*;
 use crate::bus::{EventBus, Event};
 use crate::session::SessionStore;
 use crate::provider::{Provider, ProviderID};
-use crate::permission::{PermissionRequest, Reply as PermissionReply};
 
 pub struct ACPAgent {
     session_manager: Arc<ACPSessionManager>,
@@ -1017,6 +1016,8 @@ impl ACPAgent {
                         session_id: session_id.clone(),
                         working_dir: working_dir.clone(),
                         permission_rules: permission_rules.clone(),
+                        event_bus: Some(self.event_bus.clone()),
+                        permission_broker: None,
                     };
                     match tool.execute(params.clone(), ctx).await {
                         Ok(r) => ToolPartResult::Completed {

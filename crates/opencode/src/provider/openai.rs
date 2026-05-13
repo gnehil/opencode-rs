@@ -105,16 +105,37 @@ struct OpenAIUsage {
 
 pub struct OpenAIProvider {
     client: Client,
-    api_key: String,
+    name: String,
+    api_key: Option<String>,
+    api_url: String,
     models: Vec<ModelInfo>,
 }
 
 impl OpenAIProvider {
     pub fn new(api_key: String, models: Option<Vec<ModelInfo>>) -> Self {
+        Self::new_with_base_url(Some(api_key), None, models)
+    }
+
+    pub fn new_with_base_url(
+        api_key: Option<String>,
+        base_url: Option<String>,
+        models: Option<Vec<ModelInfo>>,
+    ) -> Self {
+        Self::new_with_name("openai", api_key, base_url, models)
+    }
+
+    pub fn new_with_name(
+        name: impl Into<String>,
+        api_key: Option<String>,
+        base_url: Option<String>,
+        models: Option<Vec<ModelInfo>>,
+    ) -> Self {
         let models = models.unwrap_or_else(Self::default_models);
         Self {
             client: Client::new(),
+            name: name.into(),
             api_key,
+            api_url: chat_completions_url(base_url),
             models,
         }
     }
@@ -268,19 +289,32 @@ impl OpenAIProvider {
     }
 }
 
+fn chat_completions_url(base_url: Option<String>) -> String {
+    let Some(base_url) = base_url else {
+        return API_URL.to_string();
+    };
+    let base_url = base_url.trim().trim_end_matches('/');
+    if base_url.ends_with("/chat/completions") {
+        base_url.to_string()
+    } else {
+        format!("{}/chat/completions", base_url)
+    }
+}
+
 #[async_trait]
 impl Provider for OpenAIProvider {
     fn name(&self) -> &str {
-        "openai"
+        &self.name
     }
 
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let openai_req = self.build_request(&request, false);
 
-        let response = self
-            .client
-            .post(API_URL)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+        let mut builder = self.client.post(&self.api_url);
+        if let Some(api_key) = self.api_key.as_ref().filter(|key| !key.is_empty()) {
+            builder = builder.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = builder
             .header("Content-Type", "application/json")
             .json(&openai_req)
             .send()
@@ -328,14 +362,18 @@ impl Provider for OpenAIProvider {
         let openai_req = self.build_request(&request, true);
         let client = self.client.clone();
         let api_key = self.api_key.clone();
+        let api_url = self.api_url.clone();
 
         let stream = async_stream::try_stream! {
-            let response = client
-                .post(API_URL)
-                .header("Authorization", format!("Bearer {}", api_key))
+            let mut builder = client
+                .post(api_url)
                 .header("Content-Type", "application/json")
                 .header("Accept", "text/event-stream")
-                .json(&openai_req)
+                .json(&openai_req);
+            if let Some(api_key) = api_key.as_ref().filter(|key| !key.is_empty()) {
+                builder = builder.header("Authorization", format!("Bearer {}", api_key));
+            }
+            let response = builder
                 .send()
                 .await?;
 

@@ -17,6 +17,10 @@ pub struct AppState {
     /// canonicalized under this root. Defaults to the process cwd.
     pub workspace_root: std::path::PathBuf,
     pub event_bus: EventBus,
+    pub permission_broker: crate::permission::PermissionBroker,
+    pub mcp_manager: std::sync::Arc<tokio::sync::RwLock<crate::mcp::McpManager>>,
+    pub default_agent: Option<String>,
+    pub default_model: Option<String>,
     /// Provider available to HTTP `/prompt`. Optional because servers
     /// that only handle session CRUD (no model dispatch) shouldn't
     /// require credentials to start.
@@ -32,6 +36,12 @@ impl AppState {
             data_dir,
             workspace_root,
             event_bus: EventBus::new(),
+            permission_broker: crate::permission::PermissionBroker::new(),
+            mcp_manager: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::mcp::McpManager::new(),
+            )),
+            default_agent: None,
+            default_model: None,
             provider: None,
         }
     }
@@ -46,6 +56,17 @@ impl AppState {
         provider: std::sync::Arc<dyn crate::provider::Provider>,
     ) -> Self {
         self.provider = Some(provider);
+        self
+    }
+
+    pub fn with_config_defaults(mut self, config: &crate::config::Config) -> Self {
+        self.default_agent = config.default_agent.clone();
+        self.default_model = self
+            .default_agent
+            .as_deref()
+            .and_then(|agent| config.agent.as_ref().and_then(|agents| agents.get(agent)))
+            .and_then(|agent| agent.model.clone())
+            .or_else(|| config.model.clone());
         self
     }
 
@@ -100,10 +121,25 @@ pub async fn create_session(
     Json(body): Json<CreateSessionBody>,
 ) -> Result<Json<SessionResponse>, StatusCode> {
     let store = state.get_store().await;
-    let session = store
+    let mut session = store
         .create(&body.title, &body.project_id, &std::path::PathBuf::from(&body.directory))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let session_id = SessionID::parse(&session.id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Some(agent) = &state.default_agent {
+        store
+            .set_agent(&session_id, agent)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        session.agent = Some(agent.clone());
+    }
+    if let Some(model) = &state.default_model {
+        store
+            .set_model(&session_id, model)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        session.model = Some(model.clone());
+    }
     state
         .event_bus
         .publish(crate::bus::Event::session_create(&session.id));
@@ -303,4 +339,3 @@ pub async fn session_status(
         "archived": archived,
     })))
 }
-

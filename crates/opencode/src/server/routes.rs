@@ -13,7 +13,11 @@ use crate::server::handlers::session_handlers::AppState;
 
 pub fn create_router(data_dir: std::path::PathBuf) -> Router {
     let app_state = std::sync::Arc::new(AppState::new(data_dir));
-    
+
+    create_router_with_state(app_state)
+}
+
+pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(|| async { "OK" }))
         .route("/global/health", get(global_handlers::health))
@@ -51,7 +55,9 @@ pub fn create_router(data_dir: std::path::PathBuf) -> Router {
         .route("/file/status", get(file_handlers::git_status))
         .route("/find", get(file_handlers::find_text))
         .route("/find/file", get(file_handlers::list_files))
-        .route("/mcp", get(mcp_handlers::mcp_status))
+        .route("/mcp", get(mcp_handlers::mcp_status).post(mcp_handlers::mcp_add))
+        .route("/mcp/:name/connect", post(mcp_handlers::mcp_connect))
+        .route("/mcp/:name/disconnect", post(mcp_handlers::mcp_disconnect))
         .route("/mcp/resources", get(mcp_handlers::mcp_list_resources))
         .route("/agent", get(agent_handlers::list_agents))
         .route("/agent/default", get(agent_handlers::get_default_agent))

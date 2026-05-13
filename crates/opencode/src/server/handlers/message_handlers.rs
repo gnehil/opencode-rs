@@ -88,9 +88,29 @@ pub async fn prompt(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let processor = crate::session::PromptProcessor::new(store.clone(), provider)
+    let mcp_tools = {
+        let manager = state.mcp_manager.read().await;
+        manager.runtime_tools().await
+    };
+
+    let agent_name = session
+        .agent
+        .clone()
+        .or_else(|| state.default_agent.clone())
+        .unwrap_or_else(|| crate::agent::DEFAULT_AGENT_NAME.to_string());
+    let model_selection = session
+        .model
+        .clone()
+        .or_else(|| state.default_model.clone());
+
+    let mut processor = crate::session::PromptProcessor::new(store.clone(), provider)
         .with_bus(state.event_bus.clone())
-        .with_agent(session.agent.clone().unwrap_or_else(|| "build".to_string()));
+        .with_permission_broker(state.permission_broker.clone())
+        .with_tools(crate::tool::registry_with(mcp_tools))
+        .with_agent(agent_name);
+    if let Some(model) = &model_selection {
+        processor = processor.with_model_selection(model);
+    }
 
     let events = processor
         .process_stream(&session_id, &req.message)

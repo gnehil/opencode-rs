@@ -19,13 +19,17 @@ pub struct XAIProvider {
 }
 
 impl XAIProvider {
+    pub fn new(api_key: String) -> Self {
+        Self {
+            client: Client::new(),
+            api_key,
+        }
+    }
+
     pub fn from_env() -> ProviderResult<Self> {
         let api_key = std::env::var("XAI_API_KEY")
             .map_err(|_| ProviderError::MissingApiKey)?;
-        Ok(Self {
-            client: Client::new(),
-            api_key,
-        })
+        Ok(Self::new(api_key))
     }
 
     fn build_messages(&self, request: &CompletionRequest) -> Vec<XAIMessage> {

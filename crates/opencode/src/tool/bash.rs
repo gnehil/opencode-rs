@@ -57,10 +57,10 @@ impl Tool for BashTool {
             // segment (the common case) just checks the whole string.
             let segments = crate::permission::split_commands(&params.command);
             if segments.is_empty() {
-                ctx.check_permission("bash", &params.command)?;
+                ctx.check_permission("bash", &params.command).await?;
             } else {
                 for segment in &segments {
-                    ctx.check_permission("bash", segment)?;
+                    ctx.check_permission("bash", segment).await?;
                 }
             }
 
@@ -193,6 +193,8 @@ mod tests {
             session_id: crate::id::SessionID::new(),
             working_dir: PathBuf::from("/tmp"),
             permission_rules: rules,
+            event_bus: None,
+            permission_broker: None,
         }
     }
 

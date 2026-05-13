@@ -5,7 +5,7 @@ use crate::message::{Message, UserMessage, AssistantMessage, UserTime, ModelRef}
 use crate::message::{AssistantTime, TokenUsage, CacheUsage, PathInfo};
 use crate::provider::{CompletionMessage, CompletionRequest, Provider, ToolDefinition};
 use crate::session::SessionStore;
-use crate::tool::{Tool, ToolContext, BashTool, ReadTool, WriteTool, EditTool, GlobTool, GrepTool};
+use crate::tool::{Tool, ToolContext};
 use crate::bus::{EventBus, Event, MessageRole};
 
 pub struct PromptProcessor {
@@ -13,8 +13,10 @@ pub struct PromptProcessor {
     provider: Arc<dyn Provider>,
     tools: Vec<Arc<dyn Tool>>,
     bus: EventBus,
+    permission_broker: Option<crate::permission::PermissionBroker>,
     max_iterations: usize,
     agent_name: String,
+    model_id: Option<String>,
 }
 
 pub enum ProcessEvent {
@@ -32,8 +34,10 @@ impl PromptProcessor {
             provider,
             tools: crate::tool::default_registry(),
             bus: EventBus::new(),
+            permission_broker: None,
             max_iterations: 10,
             agent_name: "build".to_string(),
+            model_id: None,
         }
     }
 
@@ -47,8 +51,33 @@ impl PromptProcessor {
         self
     }
 
+    pub fn with_tools(mut self, tools: Vec<Arc<dyn Tool>>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    pub fn with_model(mut self, model_id: impl Into<String>) -> Self {
+        self.model_id = Some(model_id.into());
+        self
+    }
+
+    pub fn with_model_selection(self, selection: &str) -> Self {
+        match model_id_from_selection(selection) {
+            Some(model_id) => self.with_model(model_id),
+            None => self,
+        }
+    }
+
     pub fn with_bus(mut self, bus: EventBus) -> Self {
         self.bus = bus;
+        self
+    }
+
+    pub fn with_permission_broker(
+        mut self,
+        broker: crate::permission::PermissionBroker,
+    ) -> Self {
+        self.permission_broker = Some(broker);
         self
     }
 
@@ -73,9 +102,9 @@ impl PromptProcessor {
         let mut accumulated_content = String::new();
         let mut total_input_tokens: u64 = 0;
 
-        let model_id = self.provider.default_model()
+        let model_id = self.model_id.clone().or_else(|| self.provider.default_model()
             .and_then(|m| m.id.clone())
-            .map(|m| m.to_string())
+            .map(|m| m.to_string()))
             .unwrap_or_else(|| "claude-3-5-sonnet-20241022".to_string());
 
         // Persist the user turn exactly once. Subsequent provider calls in
@@ -90,7 +119,7 @@ impl PromptProcessor {
             time: UserTime { created: now },
             format: None,
             summary: None,
-            agent: "build".to_string(),
+            agent: self.agent_name.clone(),
             model: ModelRef {
                 provider_id: self.provider.name().to_string(),
                 model_id: model_id.clone(),
@@ -155,7 +184,7 @@ impl PromptProcessor {
                 model_id: model_id.clone(),
                 provider_id: self.provider.name().to_string(),
                 mode: "default".to_string(),
-                agent: "build".to_string(),
+                agent: self.agent_name.clone(),
                 path: PathInfo { cwd: cwd.clone(), root: "/".to_string() },
                 summary: None,
                 cost: 0.0,
@@ -253,6 +282,8 @@ impl PromptProcessor {
                         permission_rules: crate::agent::get_agent(&self.agent_name)
                             .map(|a| a.permission)
                             .unwrap_or_default(),
+                        event_bus: Some(self.bus.clone()),
+                        permission_broker: self.permission_broker.clone(),
                     };
                     match tool.execute(params.clone(), ctx).await {
                         Ok(tool_result) => ToolPartResult::Completed {
@@ -342,5 +373,71 @@ impl PromptProcessor {
             top_p: None,
             stop_sequences: None,
         })
+    }
+}
+
+pub fn model_id_from_selection(selection: &str) -> Option<String> {
+    let raw = selection.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some((_, model_id)) = raw.split_once('/') {
+        let model_id = model_id.trim();
+        return (!model_id.is_empty()).then(|| model_id.to_string());
+    }
+
+    let lower = raw.to_ascii_lowercase();
+    let provider_only = matches!(
+        lower.as_str(),
+        "alibaba"
+            | "anthropic"
+            | "azure"
+            | "bedrock"
+            | "cerebras"
+            | "cohere"
+            | "copilot"
+            | "deepinfra"
+            | "deepseek"
+            | "fireworks"
+            | "gitlab"
+            | "google"
+            | "groq"
+            | "lmstudio"
+            | "mistral"
+            | "ollama"
+            | "openai"
+            | "openrouter"
+            | "perplexity"
+            | "together"
+            | "togetherai"
+            | "venice"
+            | "vercel"
+            | "vertex"
+            | "xai"
+    );
+    (!provider_only).then(|| raw.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_id_from_selection;
+
+    #[test]
+    fn model_id_from_selection_strips_provider_prefix() {
+        assert_eq!(
+            model_id_from_selection("openai/gpt-4o").as_deref(),
+            Some("gpt-4o")
+        );
+        assert_eq!(
+            model_id_from_selection("openrouter/anthropic/claude-3.5-sonnet").as_deref(),
+            Some("anthropic/claude-3.5-sonnet")
+        );
+    }
+
+    #[test]
+    fn model_id_from_selection_ignores_provider_only_values() {
+        assert_eq!(model_id_from_selection("openai"), None);
+        assert_eq!(model_id_from_selection("anthropic"), None);
+        assert_eq!(model_id_from_selection("claude-3-5-sonnet"), Some("claude-3-5-sonnet".to_string()));
     }
 }

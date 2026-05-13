@@ -45,7 +45,7 @@ impl Tool for WriteTool {
             let params: WriteParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid write parameters: {}", e))?;
 
-            ctx.check_permission("edit", &params.file_path)?;
+            ctx.check_permission("edit", &params.file_path).await?;
 
             let path = Path::new(&params.file_path);
 

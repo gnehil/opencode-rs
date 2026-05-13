@@ -108,3 +108,9 @@ pub fn default_registry() -> Vec<Arc<dyn Tool>> {
         Arc::new(InteractiveBashTool),
     ]
 }
+
+pub fn registry_with(mut extra: Vec<Arc<dyn Tool>>) -> Vec<Arc<dyn Tool>> {
+    let mut tools = default_registry();
+    tools.append(&mut extra);
+    tools
+}

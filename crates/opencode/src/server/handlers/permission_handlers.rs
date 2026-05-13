@@ -1,10 +1,11 @@
 use axum::{
-    extract::{Path, State, Query},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
-use serde::{Deserialize};
+use serde::Deserialize;
 use serde_json::json;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use super::session_handlers::AppState;
@@ -15,11 +16,15 @@ pub struct PermissionQuery {
 }
 
 pub async fn list_permissions(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Query(query): Query<PermissionQuery>,
 ) -> Json<serde_json::Value> {
+    let pending = state
+        .permission_broker
+        .pending(query.session_id.as_deref())
+        .await;
     Json(json!({
-        "pending": [],
+        "pending": pending,
         "session_id": query.session_id
     }))
 }
@@ -31,27 +36,44 @@ pub struct PermissionReplyBody {
 }
 
 pub async fn reply_permission(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(request_id): Path<String>,
     Json(body): Json<PermissionReplyBody>,
-) -> Json<serde_json::Value> {
-    Json(json!({
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let reply = match body.action.as_str() {
+        "allow" => crate::permission::Reply::Once,
+        other => crate::permission::Reply::from_str(other).map_err(|_| StatusCode::BAD_REQUEST)?,
+    };
+
+    if !state.permission_broker.reply(&request_id, reply).await {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok(Json(json!({
         "success": true,
         "request_id": request_id,
         "action": body.action,
         "pattern": body.pattern
-    }))
+    })))
 }
 
 pub async fn reject_permission(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(request_id): Path<String>,
-) -> Json<serde_json::Value> {
-    Json(json!({
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !state
+        .permission_broker
+        .reply(&request_id, crate::permission::Reply::Reject)
+        .await
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok(Json(json!({
         "success": true,
         "request_id": request_id,
         "rejected": true
-    }))
+    })))
 }
 
 #[derive(Deserialize)]

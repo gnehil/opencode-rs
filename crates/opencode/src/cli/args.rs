@@ -23,10 +23,6 @@ pub struct Cli {
     #[arg(long)]
     pub pure: bool,
 
-    /// Show help
-    #[arg(short = 'h', long, global = true)]
-    pub help: bool,
-
     /// Print version number
     #[arg(short = 'v', long, global = true)]
     pub version: bool,
