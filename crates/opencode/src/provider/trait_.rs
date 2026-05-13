@@ -2,9 +2,9 @@ use std::pin::Pin;
 
 use futures::Stream;
 
+use super::model::ModelInfo;
 use super::request::CompletionRequest;
 use super::response::{CompletionResponse, StreamEvent};
-use super::model::ModelInfo;
 
 pub type ProviderResult<T> = Result<T, ProviderError>;
 pub type EventStream = Pin<Box<dyn Stream<Item = ProviderResult<StreamEvent>> + Send + 'static>>;
@@ -32,7 +32,10 @@ pub enum ProviderError {
 
 impl ProviderError {
     pub fn api(status: u16, message: impl Into<String>) -> Self {
-        Self::Api { status, message: message.into() }
+        Self::Api {
+            status,
+            message: message.into(),
+        }
     }
 
     pub fn stream(message: impl Into<String>) -> Self {

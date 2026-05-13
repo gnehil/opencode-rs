@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct QuestionOption {
@@ -25,7 +25,9 @@ pub struct QuestionPrompt {
     pub custom: Option<bool>,
 }
 
-fn default_custom() -> Option<bool> { Some(true) }
+fn default_custom() -> Option<bool> {
+    Some(true)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct QuestionParams {
@@ -104,7 +106,8 @@ impl Tool for QuestionTool {
             let params: QuestionParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid question parameters: {}", e))?;
 
-            let formatted = params.questions
+            let formatted = params
+                .questions
                 .iter()
                 .enumerate()
                 .map(|(i, q)| format!("Question {}: {}", i + 1, q.question))

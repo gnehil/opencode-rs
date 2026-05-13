@@ -53,9 +53,13 @@ pub async fn hover(
         .await
         .ok();
 
-
     let Some(resp) = result else {
-        return Ok(format!("No hover info for {}:{}:{}", file_path.display(), line + 1, character + 1));
+        return Ok(format!(
+            "No hover info for {}:{}:{}",
+            file_path.display(),
+            line + 1,
+            character + 1
+        ));
     };
     Ok(extract_markup(&resp.contents))
 }
@@ -168,10 +172,7 @@ pub async fn workspace_symbols(
     let live = prepare(seed_file, workspace_root).await?;
     let client = &live.client;
     let result: Result<Value, _> = client
-        .request(
-            "workspace/symbol",
-            serde_json::json!({ "query": query }),
-        )
+        .request("workspace/symbol", serde_json::json!({ "query": query }))
         .await;
     Ok(parse_symbols(result.unwrap_or(Value::Null)))
 }
@@ -202,7 +203,10 @@ pub async fn rename(
             }),
         )
         .await;
-    Ok(format_workspace_edit(&result.unwrap_or(Value::Null), new_name))
+    Ok(format_workspace_edit(
+        &result.unwrap_or(Value::Null),
+        new_name,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -273,16 +277,29 @@ fn parse_symbols(v: Value) -> Vec<SymbolSummary> {
         // DocumentSymbol (modern textDocument/documentSymbol):
         //   { name, kind, range, selectionRange, children? }
         if let Some(loc) = item.get("location") {
-            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let kind = item.get("kind").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let uri = loc.get("uri").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let uri = loc
+                .get("uri")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let line = loc
                 .get("range")
                 .and_then(|r| r.get("start"))
                 .and_then(|s| s.get("line"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32;
-            out.push(SymbolSummary { name, kind, line, uri });
+            out.push(SymbolSummary {
+                name,
+                kind,
+                line,
+                uri,
+            });
             continue;
         }
         // DocumentSymbol shape (recurses into children).
@@ -292,7 +309,11 @@ fn parse_symbols(v: Value) -> Vec<SymbolSummary> {
 }
 
 fn flatten_document_symbol(item: &Value, current_uri: &str, out: &mut Vec<SymbolSummary>) {
-    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let name = item
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let kind = item.get("kind").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let line = item
         .get("selectionRange")
@@ -319,7 +340,10 @@ fn flatten_document_symbol(item: &Value, current_uri: &str, out: &mut Vec<Symbol
 /// (with its diff display, permission checks, etc.).
 fn format_workspace_edit(v: &Value, new_name: &str) -> String {
     if v.is_null() {
-        return format!("Server declined rename to '{}' (no edits returned)", new_name);
+        return format!(
+            "Server declined rename to '{}' (no edits returned)",
+            new_name
+        );
     }
 
     let mut lines: Vec<String> = Vec::new();
@@ -343,7 +367,11 @@ fn format_workspace_edit(v: &Value, new_name: &str) -> String {
                 .and_then(|td| td.get("uri"))
                 .and_then(|u| u.as_str())
                 .unwrap_or("");
-            let edits = doc.get("edits").and_then(|e| e.as_array()).map(|a| a.len()).unwrap_or(0);
+            let edits = doc
+                .get("edits")
+                .and_then(|e| e.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
             total_edits += edits;
             let path = uri.strip_prefix("file://").unwrap_or(uri);
             lines.push(format!("  {} ({} edits)", path, edits));
@@ -488,7 +516,8 @@ mod tests {
         let loc: Location = serde_json::from_value(serde_json::json!({
             "uri": "file:///workspace/foo.rs",
             "range": {"start": {"line": 9, "character": 4}, "end": {"line": 9, "character": 8}}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(loc.format(), "/workspace/foo.rs:10:5");
     }
 
@@ -555,7 +584,10 @@ mod tests {
             line: 41,
             uri: "file:///repo/src/processor.rs".to_string(),
         };
-        assert_eq!(s.format(), "/repo/src/processor.rs:42 [function] process_stream");
+        assert_eq!(
+            s.format(),
+            "/repo/src/processor.rs:42 [function] process_stream"
+        );
     }
 
     #[test]

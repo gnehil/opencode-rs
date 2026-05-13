@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use reqwest::Client;
 use lazy_static::lazy_static;
+use reqwest::Client;
 
 use super::id::ModelID;
 use super::model::ModelInfo;
@@ -9,28 +9,26 @@ use super::response::{CompletionResponse, StreamEvent, TokenUsage, ToolCall};
 use super::trait_::{EventStream, Provider, ProviderError, ProviderResult};
 
 lazy_static! {
-    static ref MODELS: Vec<ModelInfo> = vec![
-        ModelInfo {
-            id: Some(ModelID::new("gemini-2.0-flash-exp")),
-            name: Some("Gemini 2.0 Flash (Vertex)".to_string()),
-            family: Some("gemini".to_string()),
-            reasoning: Some(false),
-            tool_call: Some(true),
-            attachment: Some(true),
-            temperature: Some(true),
-            interleaved: None,
-            cost: None,
-            limit: None,
-            modalities: None,
-            experimental: None,
-            release_date: None,
-            status: Some("active".to_string()),
-            provider: None,
-            options: None,
-            headers: None,
-            variants: None,
-        },
-    ];
+    static ref MODELS: Vec<ModelInfo> = vec![ModelInfo {
+        id: Some(ModelID::new("gemini-2.0-flash-exp")),
+        name: Some("Gemini 2.0 Flash (Vertex)".to_string()),
+        family: Some("gemini".to_string()),
+        reasoning: Some(false),
+        tool_call: Some(true),
+        attachment: Some(true),
+        temperature: Some(true),
+        interleaved: None,
+        cost: None,
+        limit: None,
+        modalities: None,
+        experimental: None,
+        release_date: None,
+        status: Some("active".to_string()),
+        provider: None,
+        options: None,
+        headers: None,
+        variants: None,
+    },];
 }
 
 pub struct VertexProvider {
@@ -42,25 +40,37 @@ pub struct VertexProvider {
 
 impl VertexProvider {
     pub fn new(project_id: String, location: String, access_token: String) -> Self {
-        Self { client: Client::new(), project_id, location, access_token }
+        Self {
+            client: Client::new(),
+            project_id,
+            location,
+            access_token,
+        }
     }
 
     pub fn from_env() -> ProviderResult<Self> {
         let project_id = std::env::var("GOOGLE_PROJECT_ID")
             .or_else(|_| std::env::var("GCP_PROJECT_ID"))
             .map_err(|_| ProviderError::MissingApiKey)?;
-        let location = std::env::var("GOOGLE_LOCATION").unwrap_or_else(|_| "us-central1".to_string());
-        let access_token = std::env::var("GOOGLE_ACCESS_TOKEN")
-            .map_err(|_| ProviderError::MissingApiKey)?;
+        let location =
+            std::env::var("GOOGLE_LOCATION").unwrap_or_else(|_| "us-central1".to_string());
+        let access_token =
+            std::env::var("GOOGLE_ACCESS_TOKEN").map_err(|_| ProviderError::MissingApiKey)?;
         Ok(Self::new(project_id, location, access_token))
     }
 }
 
 #[async_trait]
 impl Provider for VertexProvider {
-    fn name(&self) -> &str { "google-vertex" }
-    fn default_model(&self) -> Option<&ModelInfo> { MODELS.first() }
-    fn models(&self) -> &[ModelInfo] { &MODELS }
+    fn name(&self) -> &str {
+        "google-vertex"
+    }
+    fn default_model(&self) -> Option<&ModelInfo> {
+        MODELS.first()
+    }
+    fn models(&self) -> &[ModelInfo] {
+        &MODELS
+    }
 
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let model = request.model.to_string();
@@ -72,7 +82,8 @@ impl Provider for VertexProvider {
         let contents = convert_messages_gemini(&request.messages);
         let body = build_gemini_body(&request, contents);
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.access_token))
             .header("Content-Type", "application/json")
@@ -81,16 +92,31 @@ impl Provider for VertexProvider {
             .await
             .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
-        let data: serde_json::Value = response.json().await.map_err(|e| ProviderError::api(0, e.to_string()))?;
+        let data: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
         let content = data["candidates"][0]["content"]["parts"][0]["text"]
-            .as_str().unwrap_or("").to_string();
+            .as_str()
+            .unwrap_or("")
+            .to_string();
 
         Ok(CompletionResponse {
             content,
             tool_calls: vec![],
-            usage: TokenUsage { input: 0, output: 0, cache_read: None, cache_write: None },
-            stop_reason: Some(data["candidates"][0]["finishReason"].as_str().unwrap_or("STOP").to_string()),
+            usage: TokenUsage {
+                input: 0,
+                output: 0,
+                cache_read: None,
+                cache_write: None,
+            },
+            stop_reason: Some(
+                data["candidates"][0]["finishReason"]
+                    .as_str()
+                    .unwrap_or("STOP")
+                    .to_string(),
+            ),
             model: model.clone(),
         })
     }
@@ -215,9 +241,15 @@ fn convert_messages_gemini(messages: &[CompletionMessage]) -> Vec<serde_json::Va
             // assistant tool_calls -> Gemini functionCall parts.
             if let Some(tcs) = &msg.tool_calls {
                 for tc in tcs {
-                    let func = tc.get("function").cloned().unwrap_or(serde_json::Value::Null);
+                    let func = tc
+                        .get("function")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
                     let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    let args_raw = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
+                    let args_raw = func
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}");
                     let args: serde_json::Value =
                         serde_json::from_str(args_raw).unwrap_or(serde_json::json!({}));
                     parts.push(serde_json::json!({
@@ -243,13 +275,18 @@ fn convert_messages_gemini(messages: &[CompletionMessage]) -> Vec<serde_json::Va
             }
         }
 
-        if parts.is_empty() { continue; }
+        if parts.is_empty() {
+            continue;
+        }
         out.push(serde_json::json!({ "role": role, "parts": parts }));
     }
     out
 }
 
-fn build_gemini_body(request: &CompletionRequest, contents: Vec<serde_json::Value>) -> serde_json::Value {
+fn build_gemini_body(
+    request: &CompletionRequest,
+    contents: Vec<serde_json::Value>,
+) -> serde_json::Value {
     let mut body = serde_json::json!({
         "contents": contents,
         "generationConfig": { "maxOutputTokens": request.max_tokens.unwrap_or(4096) }
@@ -300,11 +337,7 @@ mod tests {
 
     #[test]
     fn https_image_becomes_file_data() {
-        let out = convert_messages_gemini(&[msg(
-            "user",
-            "",
-            vec!["https://example.com/a.png"],
-        )]);
+        let out = convert_messages_gemini(&[msg("user", "", vec!["https://example.com/a.png"])]);
         let parts = out[0]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0]["fileData"]["fileUri"], "https://example.com/a.png");
@@ -346,6 +379,9 @@ mod tests {
             stop_sequences: None,
         };
         let body = build_gemini_body(&req, convert_messages_gemini(&req.messages));
-        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "you are an agent");
+        assert_eq!(
+            body["systemInstruction"]["parts"][0]["text"],
+            "you are an agent"
+        );
     }
 }

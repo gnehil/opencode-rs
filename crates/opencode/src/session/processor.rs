@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use crate::id::{SessionID, MessageID};
-use crate::message::{Message, UserMessage, AssistantMessage, UserTime, ModelRef};
-use crate::message::{AssistantTime, TokenUsage, CacheUsage, PathInfo};
+use crate::bus::{Event, EventBus, MessageRole};
+use crate::id::{MessageID, SessionID};
+use crate::message::{AssistantMessage, Message, ModelRef, UserMessage, UserTime};
+use crate::message::{AssistantTime, CacheUsage, PathInfo, TokenUsage};
 use crate::provider::{CompletionMessage, CompletionRequest, Provider, ToolDefinition};
 use crate::session::SessionStore;
 use crate::tool::{Tool, ToolContext};
-use crate::bus::{EventBus, Event, MessageRole};
 
 pub struct PromptProcessor {
     store: Arc<SessionStore>,
@@ -73,10 +73,7 @@ impl PromptProcessor {
         self
     }
 
-    pub fn with_permission_broker(
-        mut self,
-        broker: crate::permission::PermissionBroker,
-    ) -> Self {
+    pub fn with_permission_broker(mut self, broker: crate::permission::PermissionBroker) -> Self {
         self.permission_broker = Some(broker);
         self
     }
@@ -87,24 +84,34 @@ impl PromptProcessor {
 
     pub async fn process(&self, session_id: &SessionID, prompt: &str) -> anyhow::Result<String> {
         let events = self.process_stream(session_id, prompt).await?;
-        
+
         for event in &events {
             if let ProcessEvent::Done(text) = event {
                 return Ok(text.clone());
             }
         }
-        
+
         Ok("No response generated".to_string())
     }
 
-    pub async fn process_stream(&self, session_id: &SessionID, prompt: &str) -> anyhow::Result<Vec<ProcessEvent>> {
+    pub async fn process_stream(
+        &self,
+        session_id: &SessionID,
+        prompt: &str,
+    ) -> anyhow::Result<Vec<ProcessEvent>> {
         let mut events = Vec::new();
         let mut accumulated_content = String::new();
         let mut total_input_tokens: u64 = 0;
 
-        let model_id = self.model_id.clone().or_else(|| self.provider.default_model()
-            .and_then(|m| m.id.clone())
-            .map(|m| m.to_string()))
+        let model_id = self
+            .model_id
+            .clone()
+            .or_else(|| {
+                self.provider
+                    .default_model()
+                    .and_then(|m| m.id.clone())
+                    .map(|m| m.to_string())
+            })
             .unwrap_or_else(|| "claude-3-5-sonnet-20241022".to_string());
 
         // Persist the user turn exactly once. Subsequent provider calls in
@@ -128,8 +135,12 @@ impl PromptProcessor {
             system: None,
             tools: None,
         };
-        self.store.save_message(session_id, &Message::User(user_msg)).await?;
-        self.store.save_text_part(session_id, &user_message_id, prompt).await?;
+        self.store
+            .save_message(session_id, &Message::User(user_msg))
+            .await?;
+        self.store
+            .save_text_part(session_id, &user_message_id, prompt)
+            .await?;
         self.bus.publish(Event::message_create(
             session_id.to_string(),
             user_message_id.to_string(),
@@ -144,10 +155,8 @@ impl PromptProcessor {
             // Rebuild the full conversation from persisted state every
             // iteration so each turn sees the canonical view (the model's
             // own prior tool_use calls + our tool_result responses).
-            let history = crate::session::build_completion_messages(
-                self.store.as_ref(),
-                session_id,
-            ).await?;
+            let history =
+                crate::session::build_completion_messages(self.store.as_ref(), session_id).await?;
 
             let request = self.build_request_from_history(&model_id, history)?;
 
@@ -156,7 +165,9 @@ impl PromptProcessor {
                 request,
                 crate::session::retry::DEFAULT_MAX_ATTEMPTS,
                 std::time::Duration::from_millis(crate::session::retry::DEFAULT_BASE_DELAY_MS),
-            ).await {
+            )
+            .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     events.push(ProcessEvent::Error(e.to_string()));
@@ -178,14 +189,20 @@ impl PromptProcessor {
                 id: assistant_message_id.clone(),
                 session_id: session_id.clone(),
                 role: "assistant".to_string(),
-                time: AssistantTime { created: turn_time, completed: Some(turn_time) },
+                time: AssistantTime {
+                    created: turn_time,
+                    completed: Some(turn_time),
+                },
                 error: None,
                 parent_id: user_message_id.to_string(),
                 model_id: model_id.clone(),
                 provider_id: self.provider.name().to_string(),
                 mode: "default".to_string(),
                 agent: self.agent_name.clone(),
-                path: PathInfo { cwd: cwd.clone(), root: "/".to_string() },
+                path: PathInfo {
+                    cwd: cwd.clone(),
+                    root: "/".to_string(),
+                },
                 summary: None,
                 cost: 0.0,
                 tokens: TokenUsage {
@@ -202,9 +219,13 @@ impl PromptProcessor {
                 variant: None,
                 finish: None,
             };
-            self.store.save_message(session_id, &Message::Assistant(assistant_msg)).await?;
+            self.store
+                .save_message(session_id, &Message::Assistant(assistant_msg))
+                .await?;
             if !response.content.is_empty() {
-                self.store.save_text_part(session_id, &assistant_message_id, &response.content).await?;
+                self.store
+                    .save_text_part(session_id, &assistant_message_id, &response.content)
+                    .await?;
             }
             self.bus.publish(Event::message_create(
                 session_id.to_string(),
@@ -224,7 +245,8 @@ impl PromptProcessor {
                 &assistant_message_id,
                 &response.tool_calls,
                 &mut events,
-            ).await?;
+            )
+            .await?;
 
             // Auto-compact before the next iteration if cumulative input
             // is approaching the model's context ceiling.
@@ -235,7 +257,9 @@ impl PromptProcessor {
                         session_id,
                         &self.provider,
                         &model_id,
-                    ).await {
+                    )
+                    .await
+                    {
                         tracing::warn!("compaction failed (continuing without): {}", e);
                     }
                 }
@@ -265,7 +289,10 @@ impl PromptProcessor {
                 tool_call.name.clone(),
                 params.clone(),
             ));
-            events.push(ProcessEvent::ToolStart(tool_call.name.clone(), params.clone()));
+            events.push(ProcessEvent::ToolStart(
+                tool_call.name.clone(),
+                params.clone(),
+            ));
 
             let tool = self.tools.iter().find(|t| t.name() == tool_call.name);
 
@@ -290,7 +317,9 @@ impl PromptProcessor {
                             output: tool_result.output,
                             attachments: tool_result.attachments.unwrap_or_default(),
                         },
-                        Err(e) => ToolPartResult::Error { error: e.to_string() },
+                        Err(e) => ToolPartResult::Error {
+                            error: e.to_string(),
+                        },
                     }
                 }
                 None => ToolPartResult::Error {
@@ -308,12 +337,13 @@ impl PromptProcessor {
                     &tool_call.id,
                     &params,
                     match &outcome {
-                        ToolPartResult::Completed { output, attachments } => {
-                            ToolPartResult::Completed {
-                                output: output.clone(),
-                                attachments: attachments.clone(),
-                            }
-                        }
+                        ToolPartResult::Completed {
+                            output,
+                            attachments,
+                        } => ToolPartResult::Completed {
+                            output: output.clone(),
+                            attachments: attachments.clone(),
+                        },
                         ToolPartResult::Error { error } => ToolPartResult::Error {
                             error: error.clone(),
                         },
@@ -348,20 +378,21 @@ impl PromptProcessor {
         model_id: &str,
         messages: Vec<CompletionMessage>,
     ) -> anyhow::Result<CompletionRequest> {
-        let tools: Vec<ToolDefinition> = self.tools.iter().map(|t| ToolDefinition {
-            name: t.name().to_string(),
-            description: t.description().to_string(),
-            parameters: t.parameters_schema(),
-        }).collect();
+        let tools: Vec<ToolDefinition> = self
+            .tools
+            .iter()
+            .map(|t| ToolDefinition {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                parameters: t.parameters_schema(),
+            })
+            .collect();
 
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        let system = crate::acp::agent::build_system_prompt_for_agent(
-            &cwd,
-            &self.tools,
-            &self.agent_name,
-        );
+        let system =
+            crate::acp::agent::build_system_prompt_for_agent(&cwd, &self.tools, &self.agent_name);
 
         Ok(CompletionRequest {
             model: crate::provider::ModelID::new(model_id),
@@ -438,6 +469,9 @@ mod tests {
     fn model_id_from_selection_ignores_provider_only_values() {
         assert_eq!(model_id_from_selection("openai"), None);
         assert_eq!(model_id_from_selection("anthropic"), None);
-        assert_eq!(model_id_from_selection("claude-3-5-sonnet"), Some("claude-3-5-sonnet".to_string()));
+        assert_eq!(
+            model_id_from_selection("claude-3-5-sonnet"),
+            Some("claude-3-5-sonnet".to_string())
+        );
     }
 }

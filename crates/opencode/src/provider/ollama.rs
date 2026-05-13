@@ -1,7 +1,7 @@
 use async_trait::async_trait;
+use lazy_static::lazy_static;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use lazy_static::lazy_static;
 
 use super::id::ModelID;
 use super::model::ModelInfo;
@@ -111,7 +111,11 @@ impl Provider for OllamaProvider {
 
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let model = request.model.to_string();
-        let messages: Vec<serde_json::Value> = request.messages.iter().map(crate::provider::openai_compat_message_json).collect();
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(crate::provider::openai_compat_message_json)
+            .collect();
 
         let body = serde_json::json!({
             "model": model,
@@ -119,7 +123,8 @@ impl Provider for OllamaProvider {
             "stream": false,
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(&self.base_url)
             .header("Content-Type", "application/json")
             .json(&body)

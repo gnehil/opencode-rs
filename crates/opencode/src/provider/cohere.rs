@@ -1,7 +1,7 @@
 use async_trait::async_trait;
+use lazy_static::lazy_static;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use lazy_static::lazy_static;
 
 use super::id::ModelID;
 use super::model::ModelInfo;
@@ -70,8 +70,7 @@ impl CohereProvider {
     }
 
     pub fn from_env() -> ProviderResult<Self> {
-        let api_key = std::env::var("COHERE_API_KEY")
-            .map_err(|_| ProviderError::MissingApiKey)?;
+        let api_key = std::env::var("COHERE_API_KEY").map_err(|_| ProviderError::MissingApiKey)?;
         Ok(Self::new(api_key))
     }
 }
@@ -92,7 +91,11 @@ impl Provider for CohereProvider {
 
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let model = request.model.to_string();
-        let messages: Vec<serde_json::Value> = request.messages.iter().map(crate::provider::openai_compat_message_json).collect();
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(crate::provider::openai_compat_message_json)
+            .collect();
 
         let body = serde_json::json!({
             "model": model,
@@ -100,7 +103,8 @@ impl Provider for CohereProvider {
             "max_tokens": request.max_tokens.unwrap_or(4096),
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(API_URL)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
@@ -114,17 +118,16 @@ impl Provider for CohereProvider {
             .await
             .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
-        let content = data["text"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let content = data["text"].as_str().unwrap_or("").to_string();
 
         Ok(CompletionResponse {
             content,
             tool_calls: vec![],
             usage: TokenUsage {
                 input: data["meta"]["tokens"]["input_tokens"].as_u64().unwrap_or(0),
-                output: data["meta"]["tokens"]["output_tokens"].as_u64().unwrap_or(0),
+                output: data["meta"]["tokens"]["output_tokens"]
+                    .as_u64()
+                    .unwrap_or(0),
                 cache_read: None,
                 cache_write: None,
             },

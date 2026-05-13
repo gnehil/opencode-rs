@@ -96,7 +96,9 @@ impl LspClient {
         if spec.command.len() > 1 {
             cmd.args(&spec.command[1..]);
         }
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         let mut child = cmd
             .spawn()
@@ -196,9 +198,7 @@ impl LspClient {
     async fn write(&self, body: &Value) -> Result<()> {
         let bytes = serde_json::to_vec(body).context("serialize LSP message")?;
         let mut guard = self.stdin.lock().await;
-        let stdin = guard
-            .as_mut()
-            .ok_or_else(|| anyhow!("LSP client closed"))?;
+        let stdin = guard.as_mut().ok_or_else(|| anyhow!("LSP client closed"))?;
         write_message(stdin, &bytes).context("write LSP message")?;
         Ok(())
     }
@@ -393,7 +393,9 @@ mod tests {
     /// stdin/stdout open until we kill it.
     fn client_around_cat() -> Option<LspClient> {
         let mut cmd = Command::new("cat");
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let mut child = cmd.spawn().ok()?;
         let stdin = child.stdin.take()?;
         let stdout = child.stdout.take()?;
@@ -425,7 +427,9 @@ mod tests {
 
     #[tokio::test]
     async fn is_alive_becomes_false_after_child_exits() {
-        let Some(client) = client_around_cat() else { return; };
+        let Some(client) = client_around_cat() else {
+            return;
+        };
         // Closing stdin makes `cat` exit on EOF.
         {
             let mut guard = client.stdin.lock().await;
@@ -438,7 +442,9 @@ mod tests {
 
     #[tokio::test]
     async fn is_alive_is_false_after_shutdown_takes_handles() {
-        let Some(client) = client_around_cat() else { return; };
+        let Some(client) = client_around_cat() else {
+            return;
+        };
         // Simulate shutdown's effect on the struct without running
         // the full async shutdown sequence (which would send LSP
         // messages cat doesn't speak): take stdin + child.

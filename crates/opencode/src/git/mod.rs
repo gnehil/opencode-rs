@@ -1,7 +1,7 @@
-pub mod status;
-pub mod diff;
 pub mod branch;
+pub mod diff;
+pub mod status;
 
-pub use status::git_status;
-pub use diff::git_diff;
 pub use branch::current_branch;
+pub use diff::git_diff;
+pub use status::git_status;

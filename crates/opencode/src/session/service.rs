@@ -1,14 +1,14 @@
 use anyhow::Result;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::collections::HashMap;
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use crate::id::SessionID;
-use crate::storage::{SessionRow, MessageRow, PartRow, init_db};
-use crate::message::{Message, WithParts, Part};
+use crate::id::{MessageID, PartID, SessionID};
+use crate::message::{Message, Part, WithParts};
+use crate::storage::{init_db, MessageRow, PartRow, SessionRow};
 
 /// Argument for `save_tool_part` — the outcome side of a tool call we want
 /// to persist as a `ToolPart` of the assistant message.
@@ -20,7 +20,9 @@ pub enum ToolPartResult {
         /// next history rebuild can surface them as vision input.
         attachments: Vec<crate::message::part::FilePart>,
     },
-    Error { error: String },
+    Error {
+        error: String,
+    },
 }
 
 /// Process-wide monotonic clock for persistence timestamps.
@@ -58,7 +60,12 @@ impl SessionStore {
         })
     }
 
-    pub async fn create(&self, title: &str, project_id: &str, directory: &PathBuf) -> Result<SessionRow> {
+    pub async fn create(
+        &self,
+        title: &str,
+        project_id: &str,
+        directory: &PathBuf,
+    ) -> Result<SessionRow> {
         let session_id = SessionID::new();
         let now = chrono::Utc::now().timestamp_millis();
         let session_id_str = session_id.to_string();
@@ -129,12 +136,10 @@ impl SessionStore {
     }
 
     pub async fn get(&self, session_id: &SessionID) -> Result<Option<SessionRow>> {
-        let row = sqlx::query_as::<_, SessionRow>(
-            "SELECT * FROM session WHERE id = ?1"
-        )
-        .bind(session_id.to_string())
-        .fetch_optional(self.pool.as_ref())
-        .await?;
+        let row = sqlx::query_as::<_, SessionRow>("SELECT * FROM session WHERE id = ?1")
+            .bind(session_id.to_string())
+            .fetch_optional(self.pool.as_ref())
+            .await?;
 
         Ok(row)
     }
@@ -149,7 +154,7 @@ impl SessionStore {
             .await?
         } else {
             sqlx::query_as::<_, SessionRow>(
-                "SELECT * FROM session WHERE time_archived IS NULL ORDER BY time_updated DESC"
+                "SELECT * FROM session WHERE time_archived IS NULL ORDER BY time_updated DESC",
             )
             .fetch_all(self.pool.as_ref())
             .await?
@@ -161,14 +166,12 @@ impl SessionStore {
     pub async fn update_title(&self, session_id: &SessionID, title: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp_millis();
 
-        sqlx::query(
-            "UPDATE session SET title = ?1, time_updated = ?2 WHERE id = ?3"
-        )
-        .bind(title)
-        .bind(now)
-        .bind(session_id.to_string())
-        .execute(self.pool.as_ref())
-        .await?;
+        sqlx::query("UPDATE session SET title = ?1, time_updated = ?2 WHERE id = ?3")
+            .bind(title)
+            .bind(now)
+            .bind(session_id.to_string())
+            .execute(self.pool.as_ref())
+            .await?;
 
         Ok(())
     }
@@ -176,25 +179,21 @@ impl SessionStore {
     pub async fn archive(&self, session_id: &SessionID) -> Result<()> {
         let now = chrono::Utc::now().timestamp_millis();
 
-        sqlx::query(
-            "UPDATE session SET time_archived = ?1, time_updated = ?2 WHERE id = ?3"
-        )
-        .bind(now)
-        .bind(now)
-        .bind(session_id.to_string())
-        .execute(self.pool.as_ref())
-        .await?;
+        sqlx::query("UPDATE session SET time_archived = ?1, time_updated = ?2 WHERE id = ?3")
+            .bind(now)
+            .bind(now)
+            .bind(session_id.to_string())
+            .execute(self.pool.as_ref())
+            .await?;
 
         Ok(())
     }
 
     pub async fn delete(&self, session_id: &SessionID) -> Result<()> {
-        sqlx::query(
-            "DELETE FROM session WHERE id = ?1"
-        )
-        .bind(session_id.to_string())
-        .execute(self.pool.as_ref())
-        .await?;
+        sqlx::query("DELETE FROM session WHERE id = ?1")
+            .bind(session_id.to_string())
+            .execute(self.pool.as_ref())
+            .await?;
 
         Ok(())
     }
@@ -202,49 +201,43 @@ impl SessionStore {
     pub async fn set_agent(&self, session_id: &SessionID, agent: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp_millis();
 
-        sqlx::query(
-            "UPDATE session SET agent = ?1, time_updated = ?2 WHERE id = ?3"
-        )
-        .bind(agent)
-        .bind(now)
-        .bind(session_id.to_string())
-        .execute(self.pool.as_ref())
-        .await?;
+        sqlx::query("UPDATE session SET agent = ?1, time_updated = ?2 WHERE id = ?3")
+            .bind(agent)
+            .bind(now)
+            .bind(session_id.to_string())
+            .execute(self.pool.as_ref())
+            .await?;
 
         Ok(())
     }
 
     pub async fn set_time_compacting(&self, session_id: &SessionID, ts: i64) -> Result<()> {
         let now = chrono::Utc::now().timestamp_millis();
-        sqlx::query(
-            "UPDATE session SET time_compacting = ?1, time_updated = ?2 WHERE id = ?3",
-        )
-        .bind(ts)
-        .bind(now)
-        .bind(session_id.to_string())
-        .execute(self.pool.as_ref())
-        .await?;
+        sqlx::query("UPDATE session SET time_compacting = ?1, time_updated = ?2 WHERE id = ?3")
+            .bind(ts)
+            .bind(now)
+            .bind(session_id.to_string())
+            .execute(self.pool.as_ref())
+            .await?;
         Ok(())
     }
 
     pub async fn set_model(&self, session_id: &SessionID, model: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp_millis();
 
-        sqlx::query(
-            "UPDATE session SET model = ?1, time_updated = ?2 WHERE id = ?3"
-        )
-        .bind(model)
-        .bind(now)
-        .bind(session_id.to_string())
-        .execute(self.pool.as_ref())
-        .await?;
+        sqlx::query("UPDATE session SET model = ?1, time_updated = ?2 WHERE id = ?3")
+            .bind(model)
+            .bind(now)
+            .bind(session_id.to_string())
+            .execute(self.pool.as_ref())
+            .await?;
 
         Ok(())
     }
 
     pub async fn get_messages(&self, session_id: &SessionID) -> Result<Vec<Message>> {
         let rows = sqlx::query_as::<_, MessageRow>(
-            "SELECT * FROM message WHERE session_id = ?1 ORDER BY time_created ASC, id ASC"
+            "SELECT * FROM message WHERE session_id = ?1 ORDER BY time_created ASC, id ASC",
         )
         .bind(session_id.to_string())
         .fetch_all(self.pool.as_ref())
@@ -258,9 +251,12 @@ impl SessionStore {
         Ok(messages)
     }
 
-    pub async fn get_parts_by_session(&self, session_id: &SessionID) -> Result<HashMap<String, Vec<Part>>> {
+    pub async fn get_parts_by_session(
+        &self,
+        session_id: &SessionID,
+    ) -> Result<HashMap<String, Vec<Part>>> {
         let rows = sqlx::query_as::<_, PartRow>(
-            "SELECT * FROM part WHERE session_id = ?1 ORDER BY time_created ASC, id ASC"
+            "SELECT * FROM part WHERE session_id = ?1 ORDER BY time_created ASC, id ASC",
         )
         .bind(session_id.to_string())
         .fetch_all(self.pool.as_ref())
@@ -314,14 +310,16 @@ impl SessionStore {
         let part_id = crate::id::PartID::new();
         let now = next_monotonic_ms();
 
-        let input_map: std::collections::HashMap<String, serde_json::Value> =
-            match input {
-                serde_json::Value::Object(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-                _ => std::collections::HashMap::new(),
-            };
+        let input_map: std::collections::HashMap<String, serde_json::Value> = match input {
+            serde_json::Value::Object(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            _ => std::collections::HashMap::new(),
+        };
 
         let state = match result {
-            ToolPartResult::Completed { output, attachments } => ToolState::Completed(crate::message::tool_state::ToolStateCompleted {
+            ToolPartResult::Completed {
+                output,
+                attachments,
+            } => ToolState::Completed(crate::message::tool_state::ToolStateCompleted {
                 input: input_map,
                 output,
                 title: tool_name.to_string(),
@@ -331,18 +329,24 @@ impl SessionStore {
                     end: now,
                     compacted: None,
                 },
-                attachments: if attachments.is_empty() { None } else { Some(attachments) },
-            }),
-            ToolPartResult::Error { error } => ToolState::Error(crate::message::tool_state::ToolStateError {
-                input: input_map,
-                error,
-                metadata: None,
-                time: crate::message::tool_state::ToolStateEndedTime {
-                    start: now,
-                    end: now,
-                    compacted: None,
+                attachments: if attachments.is_empty() {
+                    None
+                } else {
+                    Some(attachments)
                 },
             }),
+            ToolPartResult::Error { error } => {
+                ToolState::Error(crate::message::tool_state::ToolStateError {
+                    input: input_map,
+                    error,
+                    metadata: None,
+                    time: crate::message::tool_state::ToolStateEndedTime {
+                        start: now,
+                        end: now,
+                        compacted: None,
+                    },
+                })
+            }
         };
 
         let tool_part = crate::message::part::ToolPart {
@@ -421,5 +425,192 @@ impl SessionStore {
             .collect();
 
         Ok(with_parts)
+    }
+
+    pub async fn revert_to_message(
+        &self,
+        session_id: &SessionID,
+        message_id: &MessageID,
+        part_id: Option<&PartID>,
+    ) -> Result<Option<SessionRow>> {
+        let Some(target) = sqlx::query_as::<_, MessageRow>(
+            "SELECT * FROM message WHERE session_id = ?1 AND id = ?2",
+        )
+        .bind(session_id.to_string())
+        .bind(message_id.to_string())
+        .fetch_optional(self.pool.as_ref())
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        if let Some(part_id) = part_id {
+            let part = sqlx::query_as::<_, PartRow>(
+                "SELECT * FROM part WHERE session_id = ?1 AND message_id = ?2 AND id = ?3",
+            )
+            .bind(session_id.to_string())
+            .bind(message_id.to_string())
+            .bind(part_id.to_string())
+            .fetch_optional(self.pool.as_ref())
+            .await?;
+            if part.is_none() {
+                return Ok(None);
+            }
+        }
+
+        if let Some(part_id) = part_id {
+            let target_part = sqlx::query_as::<_, PartRow>(
+                "SELECT * FROM part WHERE session_id = ?1 AND message_id = ?2 AND id = ?3",
+            )
+            .bind(session_id.to_string())
+            .bind(message_id.to_string())
+            .bind(part_id.to_string())
+            .fetch_one(self.pool.as_ref())
+            .await?;
+
+            sqlx::query(
+                "DELETE FROM part
+                 WHERE session_id = ?1
+                   AND message_id = ?2
+                   AND (time_created > ?3 OR (time_created = ?3 AND id >= ?4))",
+            )
+            .bind(session_id.to_string())
+            .bind(message_id.to_string())
+            .bind(target_part.time_created)
+            .bind(part_id.to_string())
+            .execute(self.pool.as_ref())
+            .await?;
+        }
+
+        sqlx::query(
+            "DELETE FROM message
+             WHERE session_id = ?1
+               AND (time_created > ?2 OR (time_created = ?2 AND id > ?3))",
+        )
+        .bind(session_id.to_string())
+        .bind(target.time_created)
+        .bind(message_id.to_string())
+        .execute(self.pool.as_ref())
+        .await?;
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let revert = serde_json::to_string(&crate::session::SessionRevert {
+            message_id: message_id.to_string(),
+            part_id: part_id.map(|id| id.to_string()),
+            snapshot: None,
+            diff: None,
+        })?;
+
+        sqlx::query(
+            "UPDATE session
+             SET revert = ?1,
+                 summary_additions = NULL,
+                 summary_deletions = NULL,
+                 summary_files = NULL,
+                 summary_diffs = NULL,
+                 time_updated = ?2
+             WHERE id = ?3",
+        )
+        .bind(revert)
+        .bind(now)
+        .bind(session_id.to_string())
+        .execute(self.pool.as_ref())
+        .await?;
+
+        self.get(session_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::id::MessageID;
+    use crate::message::{Message, ModelRef, UserMessage, UserTime};
+
+    fn user_message(session_id: &SessionID) -> (MessageID, Message) {
+        let message_id = MessageID::new();
+        (
+            message_id,
+            Message::User(UserMessage {
+                id: message_id,
+                session_id: session_id.clone(),
+                time: UserTime { created: 0 },
+                agent: "build".to_string(),
+                model: ModelRef {
+                    provider_id: "test".to_string(),
+                    model_id: "test-model".to_string(),
+                    variant: None,
+                },
+                ..Default::default()
+            }),
+        )
+    }
+
+    fn message_id(message: &Message) -> String {
+        match message {
+            Message::User(user) => user.id.to_string(),
+            Message::Assistant(assistant) => assistant.id.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn revert_to_message_deletes_later_messages_and_parts_and_updates_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(tmp.path().to_path_buf()).await.unwrap();
+        let session = store
+            .create("revert", "project", &tmp.path().to_path_buf())
+            .await
+            .unwrap();
+        let session_id = SessionID::parse(&session.id).unwrap();
+
+        let (first_id, first) = user_message(&session_id);
+        let (target_id, target) = user_message(&session_id);
+        let (third_id, third) = user_message(&session_id);
+
+        store.save_message(&session_id, &first).await.unwrap();
+        store
+            .save_text_part(&session_id, &first_id, "first")
+            .await
+            .unwrap();
+        store.save_message(&session_id, &target).await.unwrap();
+        store
+            .save_text_part(&session_id, &target_id, "target")
+            .await
+            .unwrap();
+        store.save_message(&session_id, &third).await.unwrap();
+        store
+            .save_text_part(&session_id, &third_id, "third")
+            .await
+            .unwrap();
+
+        let before = store.get(&session_id).await.unwrap().unwrap();
+        let updated = store
+            .revert_to_message(&session_id, &target_id, None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let messages = store.get_messages(&session_id).await.unwrap();
+        let remaining_ids = messages.iter().map(message_id).collect::<Vec<_>>();
+        assert_eq!(
+            remaining_ids,
+            vec![message_id(&first), target_id.to_string()]
+        );
+
+        let parts = store.get_parts_by_session(&session_id).await.unwrap();
+        assert!(parts.contains_key(&target_id.to_string()));
+        assert!(!parts.contains_key(&third_id.to_string()));
+        assert!(updated.time_updated >= before.time_updated);
+        let revert: serde_json::Value =
+            serde_json::from_str(updated.revert.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            revert,
+            serde_json::json!({
+                "messageID": target_id.to_string(),
+                "partID": null,
+                "snapshot": null,
+                "diff": null
+            })
+        );
     }
 }

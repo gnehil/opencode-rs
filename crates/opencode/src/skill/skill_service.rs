@@ -1,8 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 
 const SKILL_FILE_NAME: &str = "SKILL.md";
 
@@ -44,7 +44,8 @@ impl SkillService {
             self.scan_skill_dir(&dir, &mut skills).await?;
         }
 
-        self.scan_skill_dir(&project_path.join(".opencode"), &mut skills).await?;
+        self.scan_skill_dir(&project_path.join(".opencode"), &mut skills)
+            .await?;
 
         if let Some(config) = self.load_project_config(project_path) {
             if let Some(paths) = config.skills.paths {
@@ -68,7 +69,9 @@ impl SkillService {
     fn add_builtin_skills(&self, skills: &mut HashMap<String, SkillInfo>) {
         let customize_skill = SkillInfo {
             name: "customize-opencode".to_string(),
-            description: Some("Learn how to customize opencode configuration for your project".to_string()),
+            description: Some(
+                "Learn how to customize opencode configuration for your project".to_string(),
+            ),
             location: PathBuf::from("builtin://customize-opencode"),
             content: include_str!("customize-opencode.md").to_string(),
         };
@@ -93,7 +96,11 @@ impl SkillService {
         dirs
     }
 
-    async fn scan_skill_dir(&self, dir: &PathBuf, skills: &mut HashMap<String, SkillInfo>) -> anyhow::Result<()> {
+    async fn scan_skill_dir(
+        &self,
+        dir: &PathBuf,
+        skills: &mut HashMap<String, SkillInfo>,
+    ) -> anyhow::Result<()> {
         if !dir.exists() {
             return Ok(());
         }
@@ -111,7 +118,11 @@ impl SkillService {
 
         for entry in walker {
             let path = entry.path();
-            if path.file_name().map(|n| n == SKILL_FILE_NAME).unwrap_or(false) {
+            if path
+                .file_name()
+                .map(|n| n == SKILL_FILE_NAME)
+                .unwrap_or(false)
+            {
                 if let Some(skill) = self.parse_skill_file(&path.to_path_buf()) {
                     skills.insert(skill.name.clone(), skill);
                 }
@@ -186,7 +197,8 @@ impl SkillService {
             output.push_str("</available_skills>");
             output
         } else {
-            skills.iter()
+            skills
+                .iter()
                 .map(|s| format!("**{}**: {}", s.name, s.description.as_deref().unwrap_or("")))
                 .collect::<Vec<_>>()
                 .join("\n")

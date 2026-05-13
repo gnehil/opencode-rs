@@ -1,10 +1,10 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use tokio::sync::{mpsc, RwLock};
-use serde::{Deserialize, Serialize};
-use portable_pty::{PtyPair, PtySize as PortablePtySize, CommandBuilder, PtySystem, Child};
 use anyhow::Result;
+use portable_pty::{Child, CommandBuilder, PtyPair, PtySize as PortablePtySize, PtySystem};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
 
 const BUFFER_LIMIT: usize = 1024 * 1024 * 2;
 
@@ -110,10 +110,14 @@ impl PtyService {
             }
         });
         let args = input.args.clone().unwrap_or_default();
-        let cwd = input.cwd.clone().unwrap_or_else(|| std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string()));
-        let title = input.title.clone()
+        let cwd = input.cwd.clone().unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".to_string())
+        });
+        let title = input
+            .title
+            .clone()
             .unwrap_or_else(|| format!("Terminal {}", &id.0[id.0.len().saturating_sub(4)..]));
 
         let pty_system: Box<dyn PtySystem + Send> = portable_pty::native_pty_system();
@@ -171,21 +175,25 @@ impl PtyService {
 
         {
             let mut sessions = self.sessions.write().await;
-            sessions.insert(id.0.clone(), PtySession {
-                info: info.clone(),
-                buffer: buffer.clone(),
-                buffer_cursor: buffer_cursor.clone(),
-                cursor: cursor.clone(),
-                pair: pair_arc.clone(),
-                child: child_arc.clone(),
-                writer: writer_arc.clone(),
-                output_tx: output_tx.clone(),
-                killed: killed.clone(),
-                exited: exited.clone(),
-            });
+            sessions.insert(
+                id.0.clone(),
+                PtySession {
+                    info: info.clone(),
+                    buffer: buffer.clone(),
+                    buffer_cursor: buffer_cursor.clone(),
+                    cursor: cursor.clone(),
+                    pair: pair_arc.clone(),
+                    child: child_arc.clone(),
+                    writer: writer_arc.clone(),
+                    output_tx: output_tx.clone(),
+                    killed: killed.clone(),
+                    exited: exited.clone(),
+                },
+            );
         }
 
-        self.event_bus.publish(crate::bus::Event::session_create(&id.0));
+        self.event_bus
+            .publish(crate::bus::Event::session_create(&id.0));
 
         // Reader: portable-pty's reader is blocking, so run it on a dedicated
         // OS thread. Use only sync primitives + blocking_send to avoid
@@ -289,7 +297,8 @@ impl PtyService {
                     });
                 }
             }
-            self.event_bus.publish(crate::bus::Event::session_update(&id.0));
+            self.event_bus
+                .publish(crate::bus::Event::session_update(&id.0));
             return Some(session.info.clone());
         }
         None
@@ -302,7 +311,8 @@ impl PtyService {
             if let Some(c) = session.child.lock().unwrap().as_mut() {
                 let _ = c.kill();
             }
-            self.event_bus.publish(crate::bus::Event::session_delete(&id.0));
+            self.event_bus
+                .publish(crate::bus::Event::session_delete(&id.0));
         }
         Ok(())
     }

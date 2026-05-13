@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 #[derive(Debug, Deserialize)]
 pub struct PlanToolParams {
@@ -69,7 +69,7 @@ impl Tool for PlanTool {
                 json!({
                     "goal": params.goal,
                     "plan_created": true,
-                })
+                }),
             ))
         })
     }

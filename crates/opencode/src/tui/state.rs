@@ -70,7 +70,10 @@ impl AppState {
     }
 
     pub fn add_message(&mut self, session_id: SessionID, message: Message) {
-        self.messages.entry(session_id).or_insert_with(Vec::new).push(message);
+        self.messages
+            .entry(session_id)
+            .or_insert_with(Vec::new)
+            .push(message);
     }
 
     pub fn selected_session(&self) -> Option<&SessionID> {

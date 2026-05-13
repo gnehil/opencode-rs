@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 const OPERATIONS: &[&str] = &[
     "diagnostics",
@@ -134,30 +134,65 @@ impl Tool for LspTool {
                     // (matches editor convention); LSP is 0-indexed.
                     let line = params.line.unwrap_or(1).saturating_sub(1) as u32;
                     let character = params.character.unwrap_or(0) as u32;
-                    crate::lsp::ops::hover(&file_path, &ctx.working_dir, line, character).await
+                    crate::lsp::ops::hover(&file_path, &ctx.working_dir, line, character)
+                        .await
                         .unwrap_or_else(|e| format!("hover failed: {}", e))
                 }
                 "goToDefinition" => {
                     let line = params.line.unwrap_or(1).saturating_sub(1) as u32;
                     let character = params.character.unwrap_or(0) as u32;
-                    match crate::lsp::ops::goto_definition(&file_path, &ctx.working_dir, line, character).await {
-                        Ok(locs) if locs.is_empty() => format!("No definition found for {}:{}:{}", file_path.display(), line + 1, character + 1),
-                        Ok(locs) => locs.iter().map(|l| l.format()).collect::<Vec<_>>().join("\n"),
+                    match crate::lsp::ops::goto_definition(
+                        &file_path,
+                        &ctx.working_dir,
+                        line,
+                        character,
+                    )
+                    .await
+                    {
+                        Ok(locs) if locs.is_empty() => format!(
+                            "No definition found for {}:{}:{}",
+                            file_path.display(),
+                            line + 1,
+                            character + 1
+                        ),
+                        Ok(locs) => locs
+                            .iter()
+                            .map(|l| l.format())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
                         Err(e) => format!("goToDefinition failed: {}", e),
                     }
                 }
                 "findReferences" => {
                     let line = params.line.unwrap_or(1).saturating_sub(1) as u32;
                     let character = params.character.unwrap_or(0) as u32;
-                    match crate::lsp::ops::find_references(&file_path, &ctx.working_dir, line, character).await {
-                        Ok(locs) if locs.is_empty() => format!("No references found for {}:{}:{}", file_path.display(), line + 1, character + 1),
-                        Ok(locs) => locs.iter().map(|l| l.format()).collect::<Vec<_>>().join("\n"),
+                    match crate::lsp::ops::find_references(
+                        &file_path,
+                        &ctx.working_dir,
+                        line,
+                        character,
+                    )
+                    .await
+                    {
+                        Ok(locs) if locs.is_empty() => format!(
+                            "No references found for {}:{}:{}",
+                            file_path.display(),
+                            line + 1,
+                            character + 1
+                        ),
+                        Ok(locs) => locs
+                            .iter()
+                            .map(|l| l.format())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
                         Err(e) => format!("findReferences failed: {}", e),
                     }
                 }
                 "documentSymbol" => {
                     match crate::lsp::ops::document_symbols(&file_path, &ctx.working_dir).await {
-                        Ok(syms) if syms.is_empty() => format!("No symbols in {}", file_path.display()),
+                        Ok(syms) if syms.is_empty() => {
+                            format!("No symbols in {}", file_path.display())
+                        }
                         Ok(syms) => {
                             // documentSymbol responses don't carry uri
                             // — set it to the request file so format()
@@ -191,7 +226,11 @@ impl Tool for LspTool {
                             Ok(syms) if syms.is_empty() => {
                                 format!("No workspace symbols match '{}'", query)
                             }
-                            Ok(syms) => syms.iter().map(|s| s.format()).collect::<Vec<_>>().join("\n"),
+                            Ok(syms) => syms
+                                .iter()
+                                .map(|s| s.format())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
                             Err(e) => format!("workspaceSymbol failed: {}", e),
                         }
                     }
@@ -312,7 +351,11 @@ async fn try_lsp_diagnostics(
     }
 }
 
-fn get_rust_diagnostics(file_path: &PathBuf, working_dir: &PathBuf, severity: Option<&str>) -> Result<String> {
+fn get_rust_diagnostics(
+    file_path: &PathBuf,
+    working_dir: &PathBuf,
+    severity: Option<&str>,
+) -> Result<String> {
     // Use `cargo check --message-format=json` instead of `--short`. JSON
     // gives us structured per-diagnostic info (level, file, line/column,
     // code, primary message) so we can filter by both file and severity
@@ -320,11 +363,7 @@ fn get_rust_diagnostics(file_path: &PathBuf, working_dir: &PathBuf, severity: Op
     // approach was the bug that made e.g. a *path* containing "error"
     // count as an error.
     let output = Command::new("cargo")
-        .args([
-            "check",
-            "--message-format=json",
-            "--quiet",
-        ])
+        .args(["check", "--message-format=json", "--quiet"])
         .current_dir(working_dir)
         .output()?;
 
@@ -345,10 +384,7 @@ fn get_rust_diagnostics(file_path: &PathBuf, working_dir: &PathBuf, severity: Op
     );
 
     if diagnostics.is_empty() {
-        Ok(format!(
-            "No Rust diagnostics for {}",
-            file_path.display()
-        ))
+        Ok(format!("No Rust diagnostics for {}", file_path.display()))
     } else {
         Ok(diagnostics.join("\n"))
     }
@@ -433,7 +469,10 @@ pub fn parse_cargo_diagnostics(
 
         // Find the primary span (cargo marks at most one). Fall back to
         // the first span if none is flagged primary.
-        let primary = msg.spans.iter().find(|s| s.is_primary)
+        let primary = msg
+            .spans
+            .iter()
+            .find(|s| s.is_primary)
             .or_else(|| msg.spans.first());
         let Some(span) = primary else { continue };
 
@@ -449,7 +488,11 @@ pub fn parse_cargo_diagnostics(
             }
         }
 
-        let code = msg.code.as_ref().map(|c| format!(" [{}]", c.code)).unwrap_or_default();
+        let code = msg
+            .code
+            .as_ref()
+            .map(|c| format!(" [{}]", c.code))
+            .unwrap_or_default();
         out.push(format!(
             "{}:{}:{} [{}]{}: {}",
             span_path.display(),
@@ -463,31 +506,34 @@ pub fn parse_cargo_diagnostics(
     out
 }
 
-fn get_js_diagnostics(file_path: &PathBuf, working_dir: &PathBuf, severity: Option<&str>) -> Result<String> {
+fn get_js_diagnostics(
+    file_path: &PathBuf,
+    working_dir: &PathBuf,
+    severity: Option<&str>,
+) -> Result<String> {
     let tsc_output = Command::new("npx")
         .args(["tsc", "--noEmit", "--pretty", "false"])
         .current_dir(working_dir)
         .output();
-    
+
     match tsc_output {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let combined = format!("{}{}", stdout, stderr);
-            
+
             let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let diagnostics: Vec<String> = combined.lines()
+            let diagnostics: Vec<String> = combined
+                .lines()
                 .filter(|line| line.contains(file_name))
-                .filter(|line| {
-                    match severity {
-                        Some("error") => line.contains("error"),
-                        Some("warning") => line.contains("warning"),
-                        _ => true,
-                    }
+                .filter(|line| match severity {
+                    Some("error") => line.contains("error"),
+                    Some("warning") => line.contains("warning"),
+                    _ => true,
                 })
                 .map(|line| line.to_string())
                 .collect();
-            
+
             if diagnostics.is_empty() {
                 Ok("No TypeScript diagnostics found".to_string())
             } else {
@@ -498,27 +544,33 @@ fn get_js_diagnostics(file_path: &PathBuf, working_dir: &PathBuf, severity: Opti
     }
 }
 
-fn get_python_diagnostics(file_path: &PathBuf, working_dir: &PathBuf, severity: Option<&str>) -> Result<String> {
+fn get_python_diagnostics(
+    file_path: &PathBuf,
+    working_dir: &PathBuf,
+    severity: Option<&str>,
+) -> Result<String> {
     let pylint_output = Command::new("pylint")
-        .args([file_path.to_str().unwrap_or_default(), "--output-format=text"])
+        .args([
+            file_path.to_str().unwrap_or_default(),
+            "--output-format=text",
+        ])
         .current_dir(working_dir)
         .output();
-    
+
     match pylint_output {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            
-            let diagnostics: Vec<String> = stdout.lines()
-                .filter(|line| {
-                    match severity {
-                        Some("error") => line.contains("E") || line.contains("F"),
-                        Some("warning") => line.contains("W"),
-                        _ => true,
-                    }
+
+            let diagnostics: Vec<String> = stdout
+                .lines()
+                .filter(|line| match severity {
+                    Some("error") => line.contains("E") || line.contains("F"),
+                    Some("warning") => line.contains("W"),
+                    _ => true,
                 })
                 .map(|line| line.to_string())
                 .collect();
-            
+
             if diagnostics.is_empty() {
                 Ok("No Python diagnostics found".to_string())
             } else {
@@ -530,7 +582,7 @@ fn get_python_diagnostics(file_path: &PathBuf, working_dir: &PathBuf, severity: 
                 .args([file_path.to_str().unwrap_or_default()])
                 .current_dir(working_dir)
                 .output();
-            
+
             match pyflakes_output {
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -540,7 +592,9 @@ fn get_python_diagnostics(file_path: &PathBuf, working_dir: &PathBuf, severity: 
                         Ok(stdout.to_string())
                     }
                 }
-                Err(_) => Ok("Python linter not available - install pylint or pyflakes".to_string()),
+                Err(_) => {
+                    Ok("Python linter not available - install pylint or pyflakes".to_string())
+                }
             }
         }
     }

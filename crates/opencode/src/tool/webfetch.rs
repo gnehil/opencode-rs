@@ -1,11 +1,11 @@
+use crate::id::{MessageID, PartID, SessionID};
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::json;
-use crate::id::{PartID, SessionID, MessageID};
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 const DEFAULT_TIMEOUT: u64 = 30;
@@ -113,7 +113,8 @@ impl Tool for WebFetchTool {
 
             let mime = content_type.split(';').next().unwrap_or("").trim();
             if mime.starts_with("image/") {
-                let base64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body);
+                let base64 =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body);
                 let file_part = crate::message::part::FilePart {
                     id: PartID::new(),
                     session_id: SessionID::new(),
@@ -123,18 +124,17 @@ impl Tool for WebFetchTool {
                     url: format!("data:{};base64,{}", mime, base64),
                     source: None,
                 };
-                return Ok(ToolResult::with_attachments("Image fetched successfully", vec![file_part]));
+                return Ok(ToolResult::with_attachments(
+                    "Image fetched successfully",
+                    vec![file_part],
+                ));
             }
 
             let text = String::from_utf8_lossy(&body).to_string();
 
             let output = match params.format.as_str() {
-                "markdown" if content_type.contains("text/html") => {
-                    html_to_markdown(&text)
-                }
-                "text" if content_type.contains("text/html") => {
-                    extract_text_from_html(&text)
-                }
+                "markdown" if content_type.contains("text/html") => html_to_markdown(&text),
+                "text" if content_type.contains("text/html") => extract_text_from_html(&text),
                 _ => text,
             };
 
@@ -152,41 +152,51 @@ impl Tool for WebFetchTool {
 
 fn html_to_markdown(html: &str) -> String {
     let mut result = html.to_string();
-    
+
     let script_re = regex::Regex::new(r"<script[^>]*>.*?</script>").unwrap();
     let style_re = regex::Regex::new(r"<style[^>]*>.*?</style>").unwrap();
     result = script_re.replace_all(&result, "").to_string();
     result = style_re.replace_all(&result, "").to_string();
-    
+
     let h1_re = regex::Regex::new(r"<h1[^>]*>(.*?)</h1>").unwrap();
     let h2_re = regex::Regex::new(r"<h2[^>]*>(.*?)</h2>").unwrap();
     let h3_re = regex::Regex::new(r"<h3[^>]*>(.*?)</h3>").unwrap();
     result = h1_re.replace_all(&result, "# $1").to_string();
     result = h2_re.replace_all(&result, "## $1").to_string();
     result = h3_re.replace_all(&result, "### $1").to_string();
-    
+
     let link_re = regex::Regex::new(r#"<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>"#).unwrap();
     result = link_re.replace_all(&result, "[$2]($1)").to_string();
-    
+
     let bold_re = regex::Regex::new(r"<(b|strong)[^>]*>(.*?)</(b|strong)>").unwrap();
     let italic_re = regex::Regex::new(r"<(i|em)[^>]*>(.*?)</(i|em)>").unwrap();
     result = bold_re.replace_all(&result, "**$2**").to_string();
     result = italic_re.replace_all(&result, "*$2*").to_string();
-    
+
     let tag_re = regex::Regex::new(r"<[^>]+>").unwrap();
     result = tag_re.replace_all(&result, "").to_string();
-    
-    result.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+
+    result
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn extract_text_from_html(html: &str) -> String {
     let mut result = html.to_string();
-    
+
     let remove_re = regex::Regex::new(r"<(script|style|noscript|iframe|object|embed)[^>]*>.*?</(script|style|noscript|iframe|object|embed)>").unwrap();
     result = remove_re.replace_all(&result, "").to_string();
-    
+
     let tag_re = regex::Regex::new(r"<[^>]+>").unwrap();
     result = tag_re.replace_all(&result, "").to_string();
-    
-    result.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+
+    result
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }

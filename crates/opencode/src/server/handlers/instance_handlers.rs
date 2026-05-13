@@ -1,8 +1,4 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -17,9 +13,20 @@ pub async fn lsp_status(State(_state): State<Arc<AppState>>) -> Json<serde_json:
 
 pub async fn tool_list(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let tools = [
-        "bash", "read", "write", "edit", "glob", "grep", "task",
-        "webfetch", "websearch", "lsp_diagnostics", "lsp_goto_definition",
-        "lsp_find_references", "lsp_rename", "lsp_symbols"
+        "bash",
+        "read",
+        "write",
+        "edit",
+        "glob",
+        "grep",
+        "task",
+        "webfetch",
+        "websearch",
+        "lsp_diagnostics",
+        "lsp_goto_definition",
+        "lsp_find_references",
+        "lsp_rename",
+        "lsp_symbols",
     ];
 
     Json(json!({

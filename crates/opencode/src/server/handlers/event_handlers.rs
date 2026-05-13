@@ -1,14 +1,14 @@
+use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::extract::{State, Query};
 use futures::stream::Stream;
+use serde::Deserialize;
 use std::convert::Infallible;
 use std::sync::Arc;
-use serde::Deserialize;
 use tokio::sync::broadcast;
 
-use crate::bus::EventBus;
-use crate::bus::event::Event as BusEvent;
 use super::session_handlers::AppState;
+use crate::bus::event::Event as BusEvent;
+use crate::bus::EventBus;
 
 #[derive(Deserialize)]
 pub struct EventQuery {

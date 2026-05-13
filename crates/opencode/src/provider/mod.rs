@@ -21,14 +21,14 @@ mod modalities;
 mod model;
 mod ollama;
 mod openai;
-mod openrouter;
 pub mod openai_sse;
+mod openrouter;
 mod options;
 mod perplexity;
-mod togetherai;
-mod trait_;
 mod request;
 mod response;
+mod togetherai;
+mod trait_;
 mod venice;
 mod vercel;
 mod vertex;
@@ -62,10 +62,10 @@ pub use openai::OpenAIProvider;
 pub use openrouter::OpenRouterProvider;
 pub use options::{ProviderOptions, Timeout};
 pub use perplexity::PerplexityProvider;
-pub use togetherai::TogetherAIProvider;
-pub use trait_::{EventStream, Provider, ProviderError, ProviderResult};
 pub use request::{CompletionMessage, CompletionRequest, ToolDefinition};
 pub use response::{CompletionResponse, StreamEvent, TokenUsage, ToolCall};
+pub use togetherai::TogetherAIProvider;
+pub use trait_::{EventStream, Provider, ProviderError, ProviderResult};
 pub use venice::VeniceProvider;
 pub use vercel::VercelProvider;
 pub use vertex::VertexProvider;
@@ -84,13 +84,19 @@ pub use xai::XAIProvider;
 /// — falling back to text-only content is acceptable behavior.
 pub fn openai_compat_message_json(msg: &CompletionMessage) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
-    obj.insert("role".to_string(), serde_json::Value::String(msg.role.clone()));
+    obj.insert(
+        "role".to_string(),
+        serde_json::Value::String(msg.role.clone()),
+    );
     let content = openai::openai_content_value(msg);
     if !content.is_null() {
         obj.insert("content".to_string(), content);
     }
     if let Some(tc) = &msg.tool_calls {
-        obj.insert("tool_calls".to_string(), serde_json::Value::Array(tc.clone()));
+        obj.insert(
+            "tool_calls".to_string(),
+            serde_json::Value::Array(tc.clone()),
+        );
     }
     if let Some(id) = &msg.tool_call_id {
         obj.insert(

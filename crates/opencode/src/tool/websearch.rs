@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 #[derive(Debug, Deserialize)]
 pub struct WebSearchParams {
@@ -17,7 +17,9 @@ pub struct WebSearchParams {
     pub search_type: Option<String>,
 }
 
-fn default_num_results() -> usize { 8 }
+fn default_num_results() -> usize {
+    8
+}
 
 pub struct WebSearchTool;
 
@@ -68,7 +70,7 @@ impl Tool for WebSearchTool {
                 .map_err(|e| anyhow::anyhow!("Invalid websearch parameters: {}", e))?;
 
             let api_key = std::env::var("EXA_API_KEY").ok();
-            
+
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(25))
                 .build()?;
@@ -78,7 +80,7 @@ impl Tool for WebSearchTool {
                 "type": params.search_type.unwrap_or_else(|| "auto".to_string()),
                 "numResults": params.numResults,
             });
-            
+
             if let Some(livecrawl) = &params.livecrawl {
                 body["livecrawl"] = json!(livecrawl);
             }
@@ -97,23 +99,24 @@ impl Tool for WebSearchTool {
 
             let results: serde_json::Value = response.json().await?;
 
-            let output = if let Some(results_arr) = results.get("results").and_then(|r| r.as_array()) {
-                let mut text = String::new();
-                for (i, result) in results_arr.iter().enumerate() {
-                    let title = result.get("title").and_then(|t| t.as_str()).unwrap_or("");
-                    let url = result.get("url").and_then(|u| u.as_str()).unwrap_or("");
-                    let content = result.get("text").and_then(|c| c.as_str()).unwrap_or("");
-                    
-                    text.push_str(&format!("{}. {}\n{}\n{}\n\n", i + 1, title, url, content));
-                }
-                if text.is_empty() {
-                    "No search results found.".to_string()
+            let output =
+                if let Some(results_arr) = results.get("results").and_then(|r| r.as_array()) {
+                    let mut text = String::new();
+                    for (i, result) in results_arr.iter().enumerate() {
+                        let title = result.get("title").and_then(|t| t.as_str()).unwrap_or("");
+                        let url = result.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                        let content = result.get("text").and_then(|c| c.as_str()).unwrap_or("");
+
+                        text.push_str(&format!("{}. {}\n{}\n{}\n\n", i + 1, title, url, content));
+                    }
+                    if text.is_empty() {
+                        "No search results found.".to_string()
+                    } else {
+                        text
+                    }
                 } else {
-                    text
-                }
-            } else {
-                "No search results found. Please try a different query.".to_string()
-            };
+                    "No search results found. Please try a different query.".to_string()
+                };
 
             Ok(ToolResult::with_metadata(
                 output,

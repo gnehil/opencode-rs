@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 #[derive(Debug, Deserialize)]
 pub struct RepoCloneParams {
@@ -20,7 +20,9 @@ pub struct RepoCloneParams {
 pub struct RepoCloneTool;
 
 impl Tool for RepoCloneTool {
-    fn name(&self) -> &str { "repo_clone" }
+    fn name(&self) -> &str {
+        "repo_clone"
+    }
 
     fn description(&self) -> &str {
         "Clone a repository from URL into the managed cache for dependency inspection."
@@ -50,7 +52,11 @@ impl Tool for RepoCloneTool {
 
             let target_path = params.path.unwrap_or_else(|| {
                 let repo_name = params.url.split('/').last().unwrap_or("repo");
-                format!("{}/{}", ctx.working_dir.display(), repo_name.replace(".git", ""))
+                format!(
+                    "{}/{}",
+                    ctx.working_dir.display(),
+                    repo_name.replace(".git", "")
+                )
             });
 
             let depth_str = params.depth.map(|d| d.to_string());
@@ -62,16 +68,14 @@ impl Tool for RepoCloneTool {
                 args.extend(["--depth", d]);
             }
 
-            let output = std::process::Command::new("git")
-                .args(&args)
-                .output();
+            let output = std::process::Command::new("git").args(&args).output();
 
             match output {
                 Ok(o) => {
                     if o.status.success() {
                         Ok(ToolResult::with_metadata(
                             format!("Cloned {} to {}", params.url, target_path),
-                            json!({ "url": params.url, "path": target_path, "success": true })
+                            json!({ "url": params.url, "path": target_path, "success": true }),
                         ))
                     } else {
                         let stderr = String::from_utf8_lossy(&o.stderr);
@@ -94,7 +98,9 @@ pub struct RepoOverviewParams {
 pub struct RepoOverviewTool;
 
 impl Tool for RepoOverviewTool {
-    fn name(&self) -> &str { "repo_overview" }
+    fn name(&self) -> &str {
+        "repo_overview"
+    }
 
     fn description(&self) -> &str {
         "Generate an overview analysis of a repository structure and content."
@@ -133,7 +139,9 @@ impl Tool for RepoOverviewTool {
 
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with('.') { continue; }
+                    if name.starts_with('.') {
+                        continue;
+                    }
                     if entry.path().is_dir() {
                         dirs.push(name);
                     } else {
@@ -141,8 +149,16 @@ impl Tool for RepoOverviewTool {
                     }
                 }
 
-                overview.push_str(&format!("## Directories ({})\n{}\n\n", dirs.len(), dirs.join(", ")));
-                overview.push_str(&format!("## Root Files ({})\n{}\n\n", files.len(), files.join(", ")));
+                overview.push_str(&format!(
+                    "## Directories ({})\n{}\n\n",
+                    dirs.len(),
+                    dirs.join(", ")
+                ));
+                overview.push_str(&format!(
+                    "## Root Files ({})\n{}\n\n",
+                    files.len(),
+                    files.join(", ")
+                ));
             }
 
             if let Ok(output) = std::process::Command::new("git")

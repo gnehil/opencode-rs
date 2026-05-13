@@ -13,12 +13,12 @@ use ratatui::{
     Terminal,
 };
 
-use crate::tui::state::{AppState, StateStore};
+use crate::id::SessionID;
+use crate::message::{Message, WithParts};
 use crate::tui::components::{Chat, HelpOverlay, PromptInput, Sidebar, StatusBar, Toast};
 use crate::tui::event::TuiEvent;
 use crate::tui::keymap::KeyMap;
-use crate::id::SessionID;
-use crate::message::{Message, WithParts};
+use crate::tui::state::{AppState, StateStore};
 
 pub struct App {
     state: StateStore,
@@ -67,7 +67,10 @@ impl App {
         res
     }
 
-    fn run_loop<B: ratatui::backend::Backend>(&mut self, terminal: &mut Terminal<B>) -> anyhow::Result<()> {
+    fn run_loop<B: ratatui::backend::Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+    ) -> anyhow::Result<()> {
         loop {
             terminal.draw(|f| self.render(f))?;
 
@@ -98,24 +101,29 @@ impl App {
                 let text = self.prompt.submit();
                 if !text.is_empty() {
                     self.toast.show(format!("Sending: {}", text));
-                    self.state.write().set_toast(Some(format!("Processing: {}", text)));
+                    self.state
+                        .write()
+                        .set_toast(Some(format!("Processing: {}", text)));
                     self.status_bar.set_status(format!("Processing: {}", text));
-                    
+
                     if let Some(chat) = &mut self.chat {
                         let session_id = chat.session_id.clone();
-                        let user_msg = crate::message::Message::User(crate::message::UserMessage::default());
+                        let user_msg =
+                            crate::message::Message::User(crate::message::UserMessage::default());
                         let with_parts = WithParts {
                             info: user_msg.clone(),
-                            parts: vec![crate::message::Part::Text(crate::message::part::TextPart {
-                                id: crate::id::PartID::new(),
-                                session_id: session_id.clone(),
-                                message_id: crate::id::MessageID::new(),
-                                text: text.clone(),
-                                synthetic: None,
-                                ignored: None,
-                                time: None,
-                                metadata: None,
-                            })],
+                            parts: vec![crate::message::Part::Text(
+                                crate::message::part::TextPart {
+                                    id: crate::id::PartID::new(),
+                                    session_id: session_id.clone(),
+                                    message_id: crate::id::MessageID::new(),
+                                    text: text.clone(),
+                                    synthetic: None,
+                                    ignored: None,
+                                    time: None,
+                                    metadata: None,
+                                },
+                            )],
                         };
                         chat.add_message(with_parts);
                         self.state.write().add_message(session_id, user_msg);
@@ -173,11 +181,14 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(0)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(3),
-            ].as_ref())
+            .constraints(
+                [
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(3),
+                ]
+                .as_ref(),
+            )
             .split(size);
 
         self.status_bar.render(f, chunks[0]);
@@ -185,10 +196,7 @@ impl App {
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .margin(0)
-            .constraints([
-                Constraint::Percentage(20),
-                Constraint::Percentage(80),
-            ].as_ref())
+            .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
             .split(chunks[1]);
 
         let state = self.state.read();
@@ -231,9 +239,12 @@ impl App {
 
     pub fn select_session(&mut self, session_id: SessionID) {
         self.chat = Some(Chat::new(session_id.clone()));
-        self.state.write().set_selected_session(Some(session_id.clone()));
-        self.status_bar.set_status(format!("Session: {}", session_id));
-        
+        self.state
+            .write()
+            .set_selected_session(Some(session_id.clone()));
+        self.status_bar
+            .set_status(format!("Session: {}", session_id));
+
         self.toast.show(format!("Session selected: {}", session_id));
     }
 

@@ -27,7 +27,11 @@ pub fn usable_context(model: &ModelInfo) -> u64 {
     let context = limit.context as i64;
     let output = limit.output as i64;
     let usable = context - output - 1024;
-    if usable <= 0 { 0 } else { usable as u64 }
+    if usable <= 0 {
+        0
+    } else {
+        usable as u64
+    }
 }
 
 /// Should the orchestrator compact before the next turn?
@@ -92,10 +96,24 @@ mod tests {
     #[test]
     fn unknown_limit_never_compacts() {
         let model = ModelInfo {
-            id: None, name: None, family: None, reasoning: None, tool_call: None,
-            attachment: None, temperature: None, interleaved: None, cost: None,
-            limit: None, modalities: None, experimental: None, release_date: None,
-            status: None, provider: None, options: None, headers: None, variants: None,
+            id: None,
+            name: None,
+            family: None,
+            reasoning: None,
+            tool_call: None,
+            attachment: None,
+            temperature: None,
+            interleaved: None,
+            cost: None,
+            limit: None,
+            modalities: None,
+            experimental: None,
+            release_date: None,
+            status: None,
+            provider: None,
+            options: None,
+            headers: None,
+            variants: None,
         };
         assert!(!should_compact(1_000_000_000, &model));
     }

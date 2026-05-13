@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     Json,
 };
@@ -28,19 +28,40 @@ pub async fn global_dispose(State(_state): State<Arc<AppState>>) -> Json<serde_j
 }
 
 pub async fn set_auth(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let info = parse_auth_info(body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let store = crate::auth::AuthStore::new(state.data_dir());
+    store
+        .load()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    store
+        .set(provider.trim(), info)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({
         "success": true,
-        "provider": body.get("provider").unwrap_or(&json!("unknown"))
+        "provider": provider
     })))
 }
 
 pub async fn remove_auth(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    Ok(Json(json!({ "success": true })))
+    let store = crate::auth::AuthStore::new(state.data_dir());
+    store
+        .load()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    store
+        .remove(provider.trim())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "success": true, "provider": provider })))
 }
 
 pub async fn log_entry(
@@ -52,4 +73,30 @@ pub async fn log_entry(
         "level": body.get("level").unwrap_or(&json!("info")),
         "message": body.get("message").unwrap_or(&json!(""))
     }))
+}
+
+fn parse_auth_info(body: serde_json::Value) -> anyhow::Result<crate::auth::AuthInfo> {
+    if body.get("type").is_some() {
+        return Ok(serde_json::from_value(body)?);
+    }
+    if let Some(key) = body.get("key").and_then(|value| value.as_str()) {
+        if let Some(token) = body.get("token").and_then(|value| value.as_str()) {
+            return Ok(crate::auth::AuthInfo::wellknown(key, token));
+        }
+        return Ok(crate::auth::AuthInfo::api(key));
+    }
+    let access = body
+        .get("access")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("auth body must include type or key"))?;
+    let refresh = body
+        .get("refresh")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    Ok(crate::auth::AuthInfo::Oauth {
+        refresh: refresh.to_string(),
+        access: access.to_string(),
+        expires: body.get("expires").and_then(|value| value.as_i64()),
+        extra: std::collections::HashMap::new(),
+    })
 }

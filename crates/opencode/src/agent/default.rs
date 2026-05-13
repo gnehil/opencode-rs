@@ -43,7 +43,9 @@ fn opts() -> HashMap<String, serde_json::Value> {
 pub fn build_agent() -> AgentInfo {
     AgentInfo {
         name: "build".to_string(),
-        description: Some("The default agent. Executes tools based on configured permissions.".to_string()),
+        description: Some(
+            "The default agent. Executes tools based on configured permissions.".to_string(),
+        ),
         mode: AgentMode::Primary,
         native: Some(true),
         hidden: None,

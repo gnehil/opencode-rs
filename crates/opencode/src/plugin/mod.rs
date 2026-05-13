@@ -1,7 +1,7 @@
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
-use async_trait::async_trait;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginMeta {
@@ -31,7 +31,11 @@ pub struct Hooks {
     pub on_event: Option<HookFn<EventInput, EventOutput>>,
 }
 
-pub type HookFn<I, O> = Arc<dyn Fn(I) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<O>> + Send>> + Send + Sync>;
+pub type HookFn<I, O> = Arc<
+    dyn Fn(I) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<O>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Debug, Clone)]
 pub struct SessionCreateInput {
@@ -161,9 +165,9 @@ pub struct EventOutput {}
 #[async_trait]
 pub trait Plugin: Send + Sync {
     fn meta(&self) -> PluginMeta;
-    
+
     async fn initialize(&self, config: PluginConfig) -> anyhow::Result<Hooks>;
-    
+
     async fn shutdown(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -182,14 +186,21 @@ impl PluginManager {
         }
     }
 
-    pub async fn register(&mut self, plugin: Arc<dyn Plugin>, config: PluginConfig) -> anyhow::Result<()> {
+    pub async fn register(
+        &mut self,
+        plugin: Arc<dyn Plugin>,
+        config: PluginConfig,
+    ) -> anyhow::Result<()> {
         let hooks = plugin.initialize(config).await?;
         self.plugins.push(plugin);
         self.hooks.push(hooks);
         Ok(())
     }
 
-    pub async fn trigger_session_create(&self, input: SessionCreateInput) -> anyhow::Result<SessionCreateOutput> {
+    pub async fn trigger_session_create(
+        &self,
+        input: SessionCreateInput,
+    ) -> anyhow::Result<SessionCreateOutput> {
         let mut output = SessionCreateOutput {
             session_id: input.session_id.clone(),
         };
@@ -201,7 +212,10 @@ impl PluginManager {
         Ok(output)
     }
 
-    pub async fn trigger_session_prompt(&self, input: SessionPromptInput) -> anyhow::Result<SessionPromptOutput> {
+    pub async fn trigger_session_prompt(
+        &self,
+        input: SessionPromptInput,
+    ) -> anyhow::Result<SessionPromptOutput> {
         let mut output = SessionPromptOutput {
             session_id: input.session_id.clone(),
             response: String::new(),
@@ -214,7 +228,10 @@ impl PluginManager {
         Ok(output)
     }
 
-    pub async fn trigger_tool_start(&self, input: ToolStartInput) -> anyhow::Result<ToolStartOutput> {
+    pub async fn trigger_tool_start(
+        &self,
+        input: ToolStartInput,
+    ) -> anyhow::Result<ToolStartOutput> {
         let mut output = ToolStartOutput {
             approved: true,
             modified_input: None,
@@ -230,7 +247,10 @@ impl PluginManager {
         Ok(output)
     }
 
-    pub async fn trigger_tool_complete(&self, input: ToolCompleteInput) -> anyhow::Result<ToolCompleteOutput> {
+    pub async fn trigger_tool_complete(
+        &self,
+        input: ToolCompleteInput,
+    ) -> anyhow::Result<ToolCompleteOutput> {
         let mut output = ToolCompleteOutput {
             modified_output: None,
         };
@@ -242,7 +262,10 @@ impl PluginManager {
         Ok(output)
     }
 
-    pub async fn trigger_permission(&self, input: PermissionInput) -> anyhow::Result<PermissionOutput> {
+    pub async fn trigger_permission(
+        &self,
+        input: PermissionInput,
+    ) -> anyhow::Result<PermissionOutput> {
         let mut output = PermissionOutput {
             approved: true,
             remember: false,

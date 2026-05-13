@@ -3,10 +3,10 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::id::ModelID;
-use super::model::ModelInfo;
 use super::cost::ModelCost;
+use super::id::ModelID;
 use super::limit::ModelLimit;
+use super::model::ModelInfo;
 use super::request::{CompletionRequest, ToolDefinition};
 use super::response::{CompletionResponse, StreamEvent, TokenUsage, ToolCall};
 use super::trait_::{EventStream, Provider, ProviderError, ProviderResult};
@@ -27,18 +27,21 @@ impl XAIProvider {
     }
 
     pub fn from_env() -> ProviderResult<Self> {
-        let api_key = std::env::var("XAI_API_KEY")
-            .map_err(|_| ProviderError::MissingApiKey)?;
+        let api_key = std::env::var("XAI_API_KEY").map_err(|_| ProviderError::MissingApiKey)?;
         Ok(Self::new(api_key))
     }
 
     fn build_messages(&self, request: &CompletionRequest) -> Vec<XAIMessage> {
-        request.messages.iter().map(|msg| XAIMessage {
-            role: msg.role.clone(),
-            content: msg.content.clone(),
-            tool_calls: msg.tool_calls.clone(),
-            tool_call_id: msg.tool_call_id.clone(),
-        }).collect()
+        request
+            .messages
+            .iter()
+            .map(|msg| XAIMessage {
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                tool_calls: msg.tool_calls.clone(),
+                tool_call_id: msg.tool_call_id.clone(),
+            })
+            .collect()
     }
 
     fn build_request(&self, request: &CompletionRequest, stream: bool) -> XAIRequest {
@@ -47,7 +50,11 @@ impl XAIProvider {
             messages: self.build_messages(request),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
-            tools: if request.tools.is_empty() { None } else { Some(request.tools.clone()) },
+            tools: if request.tools.is_empty() {
+                None
+            } else {
+                Some(request.tools.clone())
+            },
             stream: if stream { Some(true) } else { None },
         }
     }
@@ -133,8 +140,18 @@ lazy_static! {
             temperature: None,
             tool_call: None,
             interleaved: None,
-            cost: Some(ModelCost { input: 5.0, output: 15.0, cache_read: None, cache_write: None, context_over_200k: None }),
-            limit: Some(ModelLimit { context: 131072.0, input: None, output: 8192.0 }),
+            cost: Some(ModelCost {
+                input: 5.0,
+                output: 15.0,
+                cache_read: None,
+                cache_write: None,
+                context_over_200k: None
+            }),
+            limit: Some(ModelLimit {
+                context: 131072.0,
+                input: None,
+                output: 8192.0
+            }),
             modalities: None,
             experimental: None,
             status: None,
@@ -153,8 +170,18 @@ lazy_static! {
             temperature: None,
             tool_call: None,
             interleaved: None,
-            cost: Some(ModelCost { input: 2.0, output: 10.0, cache_read: None, cache_write: None, context_over_200k: None }),
-            limit: Some(ModelLimit { context: 131072.0, input: None, output: 8192.0 }),
+            cost: Some(ModelCost {
+                input: 2.0,
+                output: 10.0,
+                cache_read: None,
+                cache_write: None,
+                context_over_200k: None
+            }),
+            limit: Some(ModelLimit {
+                context: 131072.0,
+                input: None,
+                output: 8192.0
+            }),
             modalities: None,
             experimental: None,
             status: None,
@@ -175,7 +202,8 @@ impl Provider for XAIProvider {
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let xai_req = self.build_request(&request, false);
 
-        let response = self.client
+        let response = self
+            .client
             .post(API_URL)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
@@ -191,25 +219,37 @@ impl Provider for XAIProvider {
 
         let xai_resp: XAIResponse = response.json().await?;
 
-        let content = xai_resp.choices
+        let content = xai_resp
+            .choices
             .first()
             .and_then(|c| c.message.content.clone())
             .unwrap_or_default();
 
-        let tool_calls: Vec<ToolCall> = xai_resp.choices
+        let tool_calls: Vec<ToolCall> = xai_resp
+            .choices
             .first()
             .and_then(|c| c.message.tool_calls.as_ref())
-            .map(|tc| tc.iter().map(|t| ToolCall {
-                id: t.id.clone(),
-                name: t.function.name.clone(),
-                arguments: t.function.arguments.clone(),
-            }).collect())
+            .map(|tc| {
+                tc.iter()
+                    .map(|t| ToolCall {
+                        id: t.id.clone(),
+                        name: t.function.name.clone(),
+                        arguments: t.function.arguments.clone(),
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
         Ok(CompletionResponse {
             content,
             tool_calls,
-            stop_reason: Some(xai_resp.choices.first().map(|c| c.finish_reason.clone()).unwrap_or_default()),
+            stop_reason: Some(
+                xai_resp
+                    .choices
+                    .first()
+                    .map(|c| c.finish_reason.clone())
+                    .unwrap_or_default(),
+            ),
             usage: TokenUsage {
                 input: xai_resp.usage.prompt_tokens,
                 output: xai_resp.usage.completion_tokens,
@@ -331,7 +371,8 @@ impl XAIProvider {
         let delta_content = choice.and_then(|c| c.delta.content.clone());
         let finish_reason = choice.and_then(|c| c.finish_reason.clone());
 
-        let tool_call = choice.and_then(|c| c.delta.tool_calls.as_ref())
+        let tool_call = choice
+            .and_then(|c| c.delta.tool_calls.as_ref())
             .and_then(|tc| tc.first())
             .and_then(|t| {
                 Some(ToolCall {
@@ -342,7 +383,12 @@ impl XAIProvider {
             });
 
         Ok(StreamEvent {
-            event_type: if finish_reason.is_some() { "message_stop" } else { "content_block_delta" }.to_string(),
+            event_type: if finish_reason.is_some() {
+                "message_stop"
+            } else {
+                "content_block_delta"
+            }
+            .to_string(),
             delta: delta_content,
             tool_call,
             stop_reason: finish_reason,

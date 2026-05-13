@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -12,7 +12,7 @@ impl ProtectedFiles {
     pub fn new() -> Self {
         let mut patterns = Vec::new();
         patterns.extend(Self::default_protected_patterns());
-        
+
         Self {
             protected: Arc::new(RwLock::new(HashSet::new())),
             patterns,
@@ -72,12 +72,12 @@ impl ProtectedFiles {
         }
 
         let path_str = path.to_string_lossy();
-        let filename = path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         for pattern in &self.patterns {
-            if glob_match::glob_match(pattern, filename) || glob_match::glob_match(pattern, &path_str) {
+            if glob_match::glob_match(pattern, filename)
+                || glob_match::glob_match(pattern, &path_str)
+            {
                 return true;
             }
         }

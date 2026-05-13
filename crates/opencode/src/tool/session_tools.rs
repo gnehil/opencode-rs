@@ -4,8 +4,8 @@ use serde_json::json;
 use std::sync::Arc;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 use crate::session::SessionStore;
 
 #[derive(Debug, Deserialize)]
@@ -61,13 +61,15 @@ impl Tool for SessionListTool {
             let data_dir = std::env::var("OPENCODE_DATA_DIR")
                 .ok()
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| dirs::data_local_dir()
-                    .map(|p| p.join("opencode"))
-                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")));
+                .unwrap_or_else(|| {
+                    dirs::data_local_dir()
+                        .map(|p| p.join("opencode"))
+                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode"))
+                });
 
             let store = Arc::new(SessionStore::new(data_dir).await?);
             let sessions = store.list(None).await?;
-            
+
             let limit = params.limit.unwrap_or(50);
             let session_list: Vec<String> = sessions
                 .iter()
@@ -77,7 +79,7 @@ impl Tool for SessionListTool {
 
             Ok(ToolResult::with_metadata(
                 session_list.join("\n"),
-                json!({ "count": sessions.len(), "limit": limit })
+                json!({ "count": sessions.len(), "limit": limit }),
             ))
         })
     }
@@ -124,20 +126,26 @@ impl Tool for SessionInfoTool {
             let data_dir = std::env::var("OPENCODE_DATA_DIR")
                 .ok()
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| dirs::data_local_dir()
-                    .map(|p| p.join("opencode"))
-                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")));
+                .unwrap_or_else(|| {
+                    dirs::data_local_dir()
+                        .map(|p| p.join("opencode"))
+                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode"))
+                });
 
             let store = Arc::new(SessionStore::new(data_dir).await?);
             let session_id = crate::id::SessionID::parse(&params.session_id)
                 .map_err(|e| anyhow::anyhow!("Invalid session ID: {}", e))?;
-            
-            let session = store.get(&session_id).await?
+
+            let session = store
+                .get(&session_id)
+                .await?
                 .ok_or_else(|| anyhow::anyhow!("Session not found: {}", params.session_id))?;
 
             Ok(ToolResult::with_metadata(
-                format!("Session: {}\nTitle: {}\nCreated: {}\nMessages: TBD",
-                    session.id, session.title, session.time_created),
+                format!(
+                    "Session: {}\nTitle: {}\nCreated: {}\nMessages: TBD",
+                    session.id, session.title, session.time_created
+                ),
                 json!({
                     "session_id": session.id,
                     "title": session.title,
@@ -145,7 +153,7 @@ impl Tool for SessionInfoTool {
                     "time_updated": session.time_updated,
                     "agent": session.agent,
                     "model": session.model,
-                })
+                }),
             ))
         })
     }
@@ -210,16 +218,18 @@ impl Tool for SessionReadTool {
             let data_dir = std::env::var("OPENCODE_DATA_DIR")
                 .ok()
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| dirs::data_local_dir()
-                    .map(|p| p.join("opencode"))
-                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")));
+                .unwrap_or_else(|| {
+                    dirs::data_local_dir()
+                        .map(|p| p.join("opencode"))
+                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode"))
+                });
 
             let store = Arc::new(SessionStore::new(data_dir).await?);
             let session_id = crate::id::SessionID::parse(&params.session_id)
                 .map_err(|e| anyhow::anyhow!("Invalid session ID: {}", e))?;
-            
+
             let with_parts = store.get_messages_with_parts(&session_id).await?;
-            
+
             let limit = params.limit.unwrap_or(100);
             let messages: Vec<String> = with_parts
                 .iter()
@@ -229,7 +239,9 @@ impl Tool for SessionReadTool {
                         crate::message::Message::User(_) => "user",
                         crate::message::Message::Assistant(_) => "assistant",
                     };
-                    let content = wp.parts.iter()
+                    let content = wp
+                        .parts
+                        .iter()
                         .filter_map(|p| match p {
                             crate::message::Part::Text(t) => Some(t.text.clone()),
                             _ => None,
@@ -242,7 +254,7 @@ impl Tool for SessionReadTool {
 
             Ok(ToolResult::with_metadata(
                 messages.join("\n---\n"),
-                json!({ "message_count": with_parts.len(), "limit": limit })
+                json!({ "message_count": with_parts.len(), "limit": limit }),
             ))
         })
     }
@@ -307,13 +319,15 @@ impl Tool for SessionSearchTool {
             let data_dir = std::env::var("OPENCODE_DATA_DIR")
                 .ok()
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| dirs::data_local_dir()
-                    .map(|p| p.join("opencode"))
-                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")));
+                .unwrap_or_else(|| {
+                    dirs::data_local_dir()
+                        .map(|p| p.join("opencode"))
+                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode"))
+                });
 
             let store = Arc::new(SessionStore::new(data_dir).await?);
             let sessions = store.list(None).await?;
-            
+
             let query_lower = params.query.to_lowercase();
             let limit = params.limit.unwrap_or(20);
             let mut matches: Vec<String> = Vec::new();
@@ -327,9 +341,9 @@ impl Tool for SessionSearchTool {
 
                 let session_id = crate::id::SessionID::parse(&session.id)
                     .map_err(|e| anyhow::anyhow!("Invalid session ID: {}", e))?;
-                
+
                 let with_parts = store.get_messages_with_parts(&session_id).await?;
-                
+
                 for wp in with_parts.iter() {
                     for part in wp.parts.iter() {
                         if let crate::message::Part::Text(t) = part {
@@ -338,18 +352,18 @@ impl Tool for SessionSearchTool {
                             } else {
                                 t.text.to_lowercase()
                             };
-                            
+
                             if text.contains(&query_lower) {
                                 matches.push(format!(
                                     "[ses_{}] {}...",
                                     session.id.chars().take(8).collect::<String>(),
                                     t.text.chars().take(100).collect::<String>()
                                 ));
-                                
+
                                 if matches.len() >= limit {
                                     return Ok(ToolResult::with_metadata(
                                         matches.join("\n"),
-                                        json!({ "count": matches.len(), "limit": limit })
+                                        json!({ "count": matches.len(), "limit": limit }),
                                     ));
                                 }
                             }
@@ -360,7 +374,7 @@ impl Tool for SessionSearchTool {
 
             Ok(ToolResult::with_metadata(
                 matches.join("\n"),
-                json!({ "count": matches.len(), "limit": limit })
+                json!({ "count": matches.len(), "limit": limit }),
             ))
         })
     }

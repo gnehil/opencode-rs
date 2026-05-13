@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TodoItem {
@@ -59,7 +59,11 @@ impl Tool for TodoWriteTool {
             let params: TodoWriteParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid todowrite parameters: {}", e))?;
 
-            let active_count = params.todos.iter().filter(|t| t.status != "completed").count();
+            let active_count = params
+                .todos
+                .iter()
+                .filter(|t| t.status != "completed")
+                .count();
 
             Ok(ToolResult::with_metadata(
                 serde_json::to_string_pretty(&params.todos)?,

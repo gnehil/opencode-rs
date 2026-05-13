@@ -7,8 +7,8 @@ use serde_json::json;
 use walkdir::WalkDir;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::{GrepParams, Tool};
+use super::result::ToolResult;
 
 const LIMIT: usize = 100;
 const MAX_LINE_LENGTH: usize = 2000;
@@ -65,13 +65,16 @@ impl Tool for GrepTool {
                 return Err(anyhow::anyhow!("pattern is required"));
             }
 
-            let re =
-                Regex::new(&params.pattern).map_err(|e| anyhow::anyhow!("Invalid regex pattern: {}", e))?;
+            let re = Regex::new(&params.pattern)
+                .map_err(|e| anyhow::anyhow!("Invalid regex pattern: {}", e))?;
 
             let search_dir = params.path.unwrap_or_else(|| ctx.working_dir.clone());
             let path = Path::new(&search_dir);
             if !path.exists() {
-                return Err(anyhow::anyhow!("Search path not found: {}", search_dir.display()));
+                return Err(anyhow::anyhow!(
+                    "Search path not found: {}",
+                    search_dir.display()
+                ));
             }
 
             let mut matches: Vec<MatchEntry> = Vec::new();

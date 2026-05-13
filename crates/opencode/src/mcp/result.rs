@@ -35,14 +35,10 @@ impl McpContent {
                 };
                 let (mime_type, text, blob) = match &raw_embedded.resource {
                     rmcp::model::ResourceContents::TextResourceContents {
-                        mime_type,
-                        text,
-                        ..
+                        mime_type, text, ..
                     } => (mime_type.clone(), Some(text.clone()), None),
                     rmcp::model::ResourceContents::BlobResourceContents {
-                        mime_type,
-                        blob,
-                        ..
+                        mime_type, blob, ..
                     } => (mime_type.clone(), None, Some(blob.clone())),
                 };
                 McpContent::Resource {

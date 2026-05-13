@@ -3,10 +3,10 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::id::ModelID;
-use super::model::ModelInfo;
 use super::cost::ModelCost;
+use super::id::ModelID;
 use super::limit::ModelLimit;
+use super::model::ModelInfo;
 use super::request::{CompletionRequest, ToolDefinition};
 use super::response::{CompletionResponse, StreamEvent, TokenUsage, ToolCall};
 use super::trait_::{EventStream, Provider, ProviderError, ProviderResult};
@@ -25,19 +25,28 @@ impl GoogleProvider {
     }
 
     pub fn from_env() -> ProviderResult<Self> {
-        let api_key = std::env::var("GOOGLE_API_KEY")
-            .map_err(|_| ProviderError::MissingApiKey)?;
+        let api_key = std::env::var("GOOGLE_API_KEY").map_err(|_| ProviderError::MissingApiKey)?;
         Ok(Self::new(api_key))
     }
 
     fn build_contents(&self, request: &CompletionRequest) -> Vec<GoogleContent> {
-        request.messages.iter().map(|msg| {
-            let role = if msg.role == "assistant" { "model".to_string() } else { msg.role.clone() };
-            GoogleContent {
-                role,
-                parts: vec![GooglePart { text: msg.content.clone() }],
-            }
-        }).collect()
+        request
+            .messages
+            .iter()
+            .map(|msg| {
+                let role = if msg.role == "assistant" {
+                    "model".to_string()
+                } else {
+                    msg.role.clone()
+                };
+                GoogleContent {
+                    role,
+                    parts: vec![GooglePart {
+                        text: msg.content.clone(),
+                    }],
+                }
+            })
+            .collect()
     }
 
     fn build_request(&self, request: &CompletionRequest) -> GoogleRequest {
@@ -48,14 +57,22 @@ impl GoogleProvider {
                 temperature: request.temperature,
                 top_p: request.top_p,
             }),
-            tools: if request.tools.is_empty() { None } else { 
-                Some(request.tools.iter().map(|t| GoogleTool {
-                    function_declarations: vec![GoogleFunctionDecl {
-                        name: t.name.clone(),
-                        description: t.description.clone(),
-                        parameters: t.parameters.clone(),
-                    }]
-                }).collect())
+            tools: if request.tools.is_empty() {
+                None
+            } else {
+                Some(
+                    request
+                        .tools
+                        .iter()
+                        .map(|t| GoogleTool {
+                            function_declarations: vec![GoogleFunctionDecl {
+                                name: t.name.clone(),
+                                description: t.description.clone(),
+                                parameters: t.parameters.clone(),
+                            }],
+                        })
+                        .collect(),
+                )
             },
         }
     }
@@ -153,8 +170,18 @@ lazy_static! {
             temperature: None,
             tool_call: None,
             interleaved: None,
-            cost: Some(ModelCost { input: 0.0, output: 0.0, cache_read: None, cache_write: None, context_over_200k: None }),
-            limit: Some(ModelLimit { context: 8192.0, input: None, output: 8192.0 }),
+            cost: Some(ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: None,
+                cache_write: None,
+                context_over_200k: None
+            }),
+            limit: Some(ModelLimit {
+                context: 8192.0,
+                input: None,
+                output: 8192.0
+            }),
             modalities: None,
             experimental: None,
             status: None,
@@ -173,8 +200,18 @@ lazy_static! {
             temperature: None,
             tool_call: None,
             interleaved: None,
-            cost: Some(ModelCost { input: 1.25, output: 5.0, cache_read: None, cache_write: None, context_over_200k: None }),
-            limit: Some(ModelLimit { context: 8192.0, input: None, output: 8192.0 }),
+            cost: Some(ModelCost {
+                input: 1.25,
+                output: 5.0,
+                cache_read: None,
+                cache_write: None,
+                context_over_200k: None
+            }),
+            limit: Some(ModelLimit {
+                context: 8192.0,
+                input: None,
+                output: 8192.0
+            }),
             modalities: None,
             experimental: None,
             status: None,
@@ -193,8 +230,18 @@ lazy_static! {
             temperature: None,
             tool_call: None,
             interleaved: None,
-            cost: Some(ModelCost { input: 0.075, output: 0.3, cache_read: None, cache_write: None, context_over_200k: None }),
-            limit: Some(ModelLimit { context: 8192.0, input: None, output: 8192.0 }),
+            cost: Some(ModelCost {
+                input: 0.075,
+                output: 0.3,
+                cache_read: None,
+                cache_write: None,
+                context_over_200k: None
+            }),
+            limit: Some(ModelLimit {
+                context: 8192.0,
+                input: None,
+                output: 8192.0
+            }),
             modalities: None,
             experimental: None,
             status: None,
@@ -221,7 +268,8 @@ impl Provider for GoogleProvider {
 
         let google_req = self.build_request(&request);
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&google_req)
@@ -243,30 +291,44 @@ impl Provider for GoogleProvider {
             .unwrap_or_default();
 
         let tool_calls: Vec<ToolCall> = candidate
-            .and_then(|c| c.content.parts.iter().find_map(|p| p.function_call.as_ref()))
-            .map(|fc| vec![ToolCall {
-                id: uuid::Uuid::new_v4().to_string(),
-                name: fc.name.clone(),
-                arguments: serde_json::to_string(&fc.args).unwrap_or_default(),
-            }])
+            .and_then(|c| {
+                c.content
+                    .parts
+                    .iter()
+                    .find_map(|p| p.function_call.as_ref())
+            })
+            .map(|fc| {
+                vec![ToolCall {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: fc.name.clone(),
+                    arguments: serde_json::to_string(&fc.args).unwrap_or_default(),
+                }]
+            })
             .unwrap_or_default();
 
-        let usage = google_resp.usage_metadata.map(|u| TokenUsage {
-            input: u.prompt_token_count,
-            output: u.candidates_token_count,
-            cache_read: None,
-            cache_write: None,
-        }).unwrap_or_else(|| TokenUsage {
-            input: 0,
-            output: 0,
-            cache_read: None,
-            cache_write: None,
-        });
+        let usage = google_resp
+            .usage_metadata
+            .map(|u| TokenUsage {
+                input: u.prompt_token_count,
+                output: u.candidates_token_count,
+                cache_read: None,
+                cache_write: None,
+            })
+            .unwrap_or_else(|| TokenUsage {
+                input: 0,
+                output: 0,
+                cache_read: None,
+                cache_write: None,
+            });
 
         Ok(CompletionResponse {
             content,
             tool_calls,
-            stop_reason: Some(candidate.map(|c| c.finish_reason.clone()).unwrap_or_default()),
+            stop_reason: Some(
+                candidate
+                    .map(|c| c.finish_reason.clone())
+                    .unwrap_or_default(),
+            ),
             usage,
             model,
         })
@@ -417,17 +479,20 @@ impl GoogleProvider {
         }
 
         if let Some(finish_reason) = candidate.and_then(|c| c.finish_reason.clone()) {
-            let usage = response.usage_metadata.map(|u| TokenUsage {
-                input: u.prompt_token_count.unwrap_or(0),
-                output: u.candidates_token_count.unwrap_or(0),
-                cache_read: None,
-                cache_write: None,
-            }).unwrap_or_else(|| TokenUsage {
-                input: 0,
-                output: 0,
-                cache_read: None,
-                cache_write: None,
-            });
+            let usage = response
+                .usage_metadata
+                .map(|u| TokenUsage {
+                    input: u.prompt_token_count.unwrap_or(0),
+                    output: u.candidates_token_count.unwrap_or(0),
+                    cache_read: None,
+                    cache_write: None,
+                })
+                .unwrap_or_else(|| TokenUsage {
+                    input: 0,
+                    output: 0,
+                    cache_read: None,
+                    cache_write: None,
+                });
             return Some(StreamEvent::message_stop(finish_reason, usage));
         }
 

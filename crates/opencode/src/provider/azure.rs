@@ -19,12 +19,12 @@ pub struct AzureProvider {
 
 impl AzureProvider {
     pub fn from_env() -> ProviderResult<Self> {
-        let api_key = std::env::var("AZURE_OPENAI_API_KEY")
-            .map_err(|_| ProviderError::MissingApiKey)?;
+        let api_key =
+            std::env::var("AZURE_OPENAI_API_KEY").map_err(|_| ProviderError::MissingApiKey)?;
         let endpoint = std::env::var("AZURE_OPENAI_ENDPOINT")
             .unwrap_or_else(|_| "https://your-resource.openai.azure.com".to_string());
-        let deployment = std::env::var("AZURE_OPENAI_DEPLOYMENT")
-            .unwrap_or_else(|_| "gpt-4o".to_string());
+        let deployment =
+            std::env::var("AZURE_OPENAI_DEPLOYMENT").unwrap_or_else(|_| "gpt-4o".to_string());
         let api_version = std::env::var("AZURE_OPENAI_API_VERSION")
             .unwrap_or_else(|_| "2024-02-15-preview".to_string());
 
@@ -38,12 +38,16 @@ impl AzureProvider {
     }
 
     fn build_messages(&self, request: &CompletionRequest) -> Vec<AzureMessage> {
-        request.messages.iter().map(|msg| AzureMessage {
-            role: msg.role.clone(),
-            content: msg.content.clone(),
-            tool_calls: msg.tool_calls.clone(),
-            tool_call_id: msg.tool_call_id.clone(),
-        }).collect()
+        request
+            .messages
+            .iter()
+            .map(|msg| AzureMessage {
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                tool_calls: msg.tool_calls.clone(),
+                tool_call_id: msg.tool_call_id.clone(),
+            })
+            .collect()
     }
 
     fn build_request(&self, request: &CompletionRequest, stream: bool) -> AzureRequest {
@@ -51,7 +55,11 @@ impl AzureProvider {
             messages: self.build_messages(request),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
-            tools: if request.tools.is_empty() { None } else { Some(request.tools.clone()) },
+            tools: if request.tools.is_empty() {
+                None
+            } else {
+                Some(request.tools.clone())
+            },
             stream: if stream { Some(true) } else { None },
         }
     }
@@ -124,28 +132,26 @@ struct AzureUsage {
 use lazy_static::lazy_static;
 
 lazy_static! {
-    static ref AZURE_MODELS: Vec<ModelInfo> = vec![
-        ModelInfo {
-            id: Some(ModelID::new("gpt-4o")),
-            name: Some("GPT-4o (Azure)".to_string()),
-            family: Some("gpt-4".to_string()),
-            release_date: None,
-            attachment: None,
-            reasoning: None,
-            temperature: None,
-            tool_call: None,
-            interleaved: None,
-            cost: None,
-            limit: None,
-            modalities: None,
-            experimental: None,
-            status: None,
-            provider: None,
-            options: None,
-            headers: None,
-            variants: None,
-        },
-    ];
+    static ref AZURE_MODELS: Vec<ModelInfo> = vec![ModelInfo {
+        id: Some(ModelID::new("gpt-4o")),
+        name: Some("GPT-4o (Azure)".to_string()),
+        family: Some("gpt-4".to_string()),
+        release_date: None,
+        attachment: None,
+        reasoning: None,
+        temperature: None,
+        tool_call: None,
+        interleaved: None,
+        cost: None,
+        limit: None,
+        modalities: None,
+        experimental: None,
+        status: None,
+        provider: None,
+        options: None,
+        headers: None,
+        variants: None,
+    },];
 }
 
 #[async_trait::async_trait]
@@ -162,7 +168,8 @@ impl Provider for AzureProvider {
 
         let azure_req = self.build_request(&request, false);
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("api-key", &self.api_key)
             .header("Content-Type", "application/json")
@@ -178,25 +185,37 @@ impl Provider for AzureProvider {
 
         let azure_resp: AzureResponse = response.json().await?;
 
-        let content = azure_resp.choices
+        let content = azure_resp
+            .choices
             .first()
             .and_then(|c| c.message.content.clone())
             .unwrap_or_default();
 
-        let tool_calls: Vec<ToolCall> = azure_resp.choices
+        let tool_calls: Vec<ToolCall> = azure_resp
+            .choices
             .first()
             .and_then(|c| c.message.tool_calls.as_ref())
-            .map(|tc| tc.iter().map(|t| ToolCall {
-                id: t.id.clone(),
-                name: t.function.name.clone(),
-                arguments: t.function.arguments.clone(),
-            }).collect())
+            .map(|tc| {
+                tc.iter()
+                    .map(|t| ToolCall {
+                        id: t.id.clone(),
+                        name: t.function.name.clone(),
+                        arguments: t.function.arguments.clone(),
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
         Ok(CompletionResponse {
             content,
             tool_calls,
-            stop_reason: Some(azure_resp.choices.first().map(|c| c.finish_reason.clone()).unwrap_or_default()),
+            stop_reason: Some(
+                azure_resp
+                    .choices
+                    .first()
+                    .map(|c| c.finish_reason.clone())
+                    .unwrap_or_default(),
+            ),
             usage: TokenUsage {
                 input: azure_resp.usage.prompt_tokens,
                 output: azure_resp.usage.completion_tokens,
@@ -326,7 +345,8 @@ impl AzureProvider {
         let delta_content = choice.and_then(|c| c.delta.content.clone());
         let finish_reason = choice.and_then(|c| c.finish_reason.clone());
 
-        let tool_call = choice.and_then(|c| c.delta.tool_calls.as_ref())
+        let tool_call = choice
+            .and_then(|c| c.delta.tool_calls.as_ref())
             .and_then(|tc| tc.first())
             .and_then(|t| {
                 Some(ToolCall {
@@ -337,7 +357,12 @@ impl AzureProvider {
             });
 
         Ok(StreamEvent {
-            event_type: if finish_reason.is_some() { "message_stop" } else { "content_block_delta" }.to_string(),
+            event_type: if finish_reason.is_some() {
+                "message_stop"
+            } else {
+                "content_block_delta"
+            }
+            .to_string(),
             delta: delta_content,
             tool_call,
             stop_reason: finish_reason,

@@ -57,15 +57,23 @@ impl Sidebar {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        let items: Vec<ListItem> = self.sessions.iter().enumerate().map(|(i, session)| {
-            let style = if i == self.selected_index {
-                Style::default().fg(Color::White).bg(Color::DarkGray).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            let title = session.title.chars().take(30).collect::<String>();
-            ListItem::new(Line::from(Span::styled(title, style)))
-        }).collect();
+        let items: Vec<ListItem> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(i, session)| {
+                let style = if i == self.selected_index {
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                let title = session.title.chars().take(30).collect::<String>();
+                ListItem::new(Line::from(Span::styled(title, style)))
+            })
+            .collect();
 
         let list = List::new(items);
         f.render_widget(list, inner);

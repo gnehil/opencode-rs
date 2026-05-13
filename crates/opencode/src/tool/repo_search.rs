@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 #[derive(Debug, Deserialize)]
 pub struct RepoSearchParams {
@@ -112,7 +112,9 @@ impl Tool for RepoSearchTool {
                 .map(|item| {
                     format!(
                         "{} - {}",
-                        item["repository"]["full_name"].as_str().unwrap_or("unknown"),
+                        item["repository"]["full_name"]
+                            .as_str()
+                            .unwrap_or("unknown"),
                         item["path"].as_str().unwrap_or("unknown")
                     )
                 })

@@ -48,10 +48,7 @@ pub fn read_message(r: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
         }
         // Headers are case-insensitive per HTTP convention. The only
         // one LSP requires is Content-Length.
-        if let Some(rest) = line
-            .to_ascii_lowercase()
-            .strip_prefix("content-length:")
-        {
+        if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
             let s = rest.trim();
             content_length = Some(s.parse().map_err(|_| {
                 io::Error::new(

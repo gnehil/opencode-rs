@@ -6,8 +6,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::message::{Message, UserMessage, AssistantMessage, WithParts, Part};
 use crate::id::SessionID;
+use crate::message::{AssistantMessage, Message, Part, UserMessage, WithParts};
 
 pub struct Chat {
     pub session_id: SessionID,
@@ -43,16 +43,16 @@ impl Chat {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        let lines: Vec<Line> = self.messages.iter().flat_map(|msg| {
-            match &msg.info {
-                Message::User(user) => {
-                    self.render_user_message(user, &msg.parts)
-                }
+        let lines: Vec<Line> = self
+            .messages
+            .iter()
+            .flat_map(|msg| match &msg.info {
+                Message::User(user) => self.render_user_message(user, &msg.parts),
                 Message::Assistant(assistant) => {
                     self.render_assistant_message(assistant, &msg.parts)
                 }
-            }
-        }).collect();
+            })
+            .collect();
 
         let paragraph = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -80,7 +80,12 @@ impl Chat {
             .map(|(i, line)| {
                 if i == 0 {
                     Line::from(vec![
-                        Span::styled("You: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "You: ",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::raw(line.to_string()),
                     ])
                 } else {
@@ -91,7 +96,12 @@ impl Chat {
 
         if lines.is_empty() {
             vec![Line::from(vec![
-                Span::styled("You: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "You: ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("[no content]"),
             ])]
         } else {
@@ -102,9 +112,12 @@ impl Chat {
     fn render_assistant_message(&self, _assistant: &AssistantMessage, parts: &[Part]) -> Vec<Line> {
         let mut lines = Vec::new();
 
-        lines.push(Line::from(vec![
-            Span::styled("Assistant: ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            "Assistant: ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )]));
 
         for part in parts {
             match part {
@@ -114,17 +127,24 @@ impl Chat {
                     }
                 }
                 Part::Reasoning(reasoning_part) => {
-                    lines.push(Line::from(vec![
-                        Span::styled("[Thinking]", Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC)),
-                    ]));
+                    lines.push(Line::from(vec![Span::styled(
+                        "[Thinking]",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::ITALIC),
+                    )]));
                     for line in reasoning_part.text.lines() {
-                        lines.push(Line::from(Span::styled(line.to_string(), Style::default().fg(Color::DarkGray))));
+                        lines.push(Line::from(Span::styled(
+                            line.to_string(),
+                            Style::default().fg(Color::DarkGray),
+                        )));
                     }
                 }
                 Part::Tool(tool_part) => {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("[Tool: {}]", tool_part.tool), Style::default().fg(Color::Magenta)),
-                    ]));
+                    lines.push(Line::from(vec![Span::styled(
+                        format!("[Tool: {}]", tool_part.tool),
+                        Style::default().fg(Color::Magenta),
+                    )]));
                 }
                 _ => {}
             }

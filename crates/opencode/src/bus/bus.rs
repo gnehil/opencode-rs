@@ -154,13 +154,16 @@ mod tests {
         let bus = EventBus::new();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
 
-        bus.subscribe("session.create", Box::new(move |event: &Event| -> BoxFuture {
-            let tx = tx.clone();
-            let id = event.id();
-            Box::pin(async move {
-                let _ = tx.send(id).await;
-            })
-        }));
+        bus.subscribe(
+            "session.create",
+            Box::new(move |event: &Event| -> BoxFuture {
+                let tx = tx.clone();
+                let id = event.id();
+                Box::pin(async move {
+                    let _ = tx.send(id).await;
+                })
+            }),
+        );
 
         bus.publish(Event::session_create("s1"));
         let id = rx.recv().await.unwrap();

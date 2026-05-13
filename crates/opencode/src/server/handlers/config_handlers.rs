@@ -1,14 +1,12 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 use serde_json::json;
 use std::sync::Arc;
 
 use super::session_handlers::AppState;
 
-pub async fn get_config(State(_state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, StatusCode> {
+pub async fn get_config(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
     Ok(Json(json!({
         "provider": "anthropic",
         "model": "claude-3-5-sonnet-20241022",
@@ -28,7 +26,9 @@ pub async fn update_config(
     })))
 }
 
-pub async fn list_providers(State(_state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, StatusCode> {
+pub async fn list_providers(
+    State(_state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
     Ok(Json(json!({
         "providers": [
             {"id": "anthropic", "name": "Anthropic", "models": ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"]},

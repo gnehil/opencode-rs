@@ -35,7 +35,10 @@ impl StatusBar {
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let model_text = self.model.clone().unwrap_or_else(|| "default".to_string());
-        let text = format!("Agent: {} | Model: {} | {}", self.agent, model_text, self.status_text);
+        let text = format!(
+            "Agent: {} | Model: {} | {}",
+            self.agent, model_text, self.status_text
+        );
 
         let paragraph = Paragraph::new(Line::from(Span::styled(
             text,

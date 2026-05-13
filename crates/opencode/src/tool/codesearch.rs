@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 #[derive(Debug, Deserialize)]
 pub struct CodeSearchParams {
@@ -22,7 +22,9 @@ pub struct CodeSearchParams {
 pub struct CodeSearchTool;
 
 impl Tool for CodeSearchTool {
-    fn name(&self) -> &str { "codesearch" }
+    fn name(&self) -> &str {
+        "codesearch"
+    }
 
     fn description(&self) -> &str {
         "Search for code patterns across the codebase or external repositories."
@@ -66,10 +68,12 @@ impl Tool for CodeSearchTool {
             let params: CodeSearchParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid codesearch parameters: {}", e))?;
 
-            let search_path = params.path.unwrap_or_else(|| ctx.working_dir.to_string_lossy().to_string());
-            
+            let search_path = params
+                .path
+                .unwrap_or_else(|| ctx.working_dir.to_string_lossy().to_string());
+
             let mut args = vec!["-r", "-n"];
-            
+
             if !params.case_sensitive.unwrap_or(false) {
                 args.push("-i");
             }
@@ -97,14 +101,15 @@ impl Tool for CodeSearchTool {
                 }
             }
 
-            let include_arg = params.file_pattern.as_ref().map(|fp| format!("--include={}", fp));
+            let include_arg = params
+                .file_pattern
+                .as_ref()
+                .map(|fp| format!("--include={}", fp));
             if let Some(ia) = include_arg.as_deref() {
                 args.push(ia);
             }
 
-            let output = std::process::Command::new("grep")
-                .args(&args)
-                .output();
+            let output = std::process::Command::new("grep").args(&args).output();
 
             match output {
                 Ok(o) => {
@@ -112,19 +117,22 @@ impl Tool for CodeSearchTool {
                     if stdout.is_empty() {
                         Ok(ToolResult::new("No matches found"))
                     } else {
-                        let matches: Vec<String> = stdout.lines()
+                        let matches: Vec<String> = stdout
+                            .lines()
                             .take(50)
                             .map(|line| line.to_string())
                             .collect();
                         Ok(ToolResult::with_metadata(
                             matches.join("\n"),
-                            json!({ "pattern": params.pattern, "matches": matches.len() })
+                            json!({ "pattern": params.pattern, "matches": matches.len() }),
                         ))
                     }
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::NotFound {
-                        Ok(ToolResult::new("grep not available. Install ripgrep for better search."))
+                        Ok(ToolResult::new(
+                            "grep not available. Install ripgrep for better search.",
+                        ))
                     } else {
                         Err(anyhow::anyhow!("Search failed: {}", e))
                     }

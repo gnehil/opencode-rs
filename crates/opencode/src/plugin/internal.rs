@@ -1,6 +1,9 @@
-use std::sync::Arc;
+use super::{
+    HookFn, Hooks, PermissionInput, PermissionOutput, Plugin, PluginConfig, PluginMeta,
+    ProviderRequestInput, ProviderRequestOutput,
+};
 use async_trait::async_trait;
-use super::{Plugin, PluginMeta, PluginConfig, Hooks, HookFn, PermissionInput, PermissionOutput, ProviderRequestInput, ProviderRequestOutput};
+use std::sync::Arc;
 
 pub struct CodexAuthPlugin;
 
@@ -86,7 +89,10 @@ impl Plugin for CopilotAuthPlugin {
                         let mut modified = input.request.clone();
                         if let Ok(token) = std::env::var("GITHUB_COPILOT_TOKEN") {
                             if let Some(obj) = modified.as_object_mut() {
-                                obj.insert("authorization".to_string(), serde_json::json!(format!("Bearer {}", token)));
+                                obj.insert(
+                                    "authorization".to_string(),
+                                    serde_json::json!(format!("Bearer {}", token)),
+                                );
                             }
                         }
                         Ok(ProviderRequestOutput {
@@ -248,7 +254,10 @@ impl Plugin for CloudflareWorkersAuthPlugin {
                         let mut modified = input.request.clone();
                         if let Ok(token) = std::env::var("CF_API_TOKEN") {
                             if let Some(obj) = modified.as_object_mut() {
-                                obj.insert("authorization".to_string(), serde_json::json!(format!("Bearer {}", token)));
+                                obj.insert(
+                                    "authorization".to_string(),
+                                    serde_json::json!(format!("Bearer {}", token)),
+                                );
                             }
                         }
                         Ok(ProviderRequestOutput {
@@ -302,7 +311,10 @@ impl Plugin for CloudflareAIGatewayAuthPlugin {
                         let mut modified = input.request.clone();
                         if let Ok(token) = std::env::var("CF_AI_GATEWAY_TOKEN") {
                             if let Some(obj) = modified.as_object_mut() {
-                                obj.insert("cf-aigateway-token".to_string(), serde_json::json!(token));
+                                obj.insert(
+                                    "cf-aigateway-token".to_string(),
+                                    serde_json::json!(token),
+                                );
                             }
                         }
                         Ok(ProviderRequestOutput {

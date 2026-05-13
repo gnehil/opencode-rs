@@ -162,8 +162,14 @@ mod tests {
     fn diag(severity: u32, code: serde_json::Value, message: &str) -> Diagnostic {
         Diagnostic {
             range: Range {
-                start: Position { line: 9, character: 4 },
-                end: Position { line: 9, character: 10 },
+                start: Position {
+                    line: 9,
+                    character: 4,
+                },
+                end: Position {
+                    line: 9,
+                    character: 10,
+                },
             },
             severity: Some(severity),
             code: if code.is_null() { None } else { Some(code) },
@@ -174,18 +180,36 @@ mod tests {
 
     #[test]
     fn severity_label_known_values() {
-        assert_eq!(diag(1, serde_json::Value::Null, "x").severity_label(), "error");
-        assert_eq!(diag(2, serde_json::Value::Null, "x").severity_label(), "warning");
-        assert_eq!(diag(3, serde_json::Value::Null, "x").severity_label(), "info");
-        assert_eq!(diag(4, serde_json::Value::Null, "x").severity_label(), "hint");
+        assert_eq!(
+            diag(1, serde_json::Value::Null, "x").severity_label(),
+            "error"
+        );
+        assert_eq!(
+            diag(2, serde_json::Value::Null, "x").severity_label(),
+            "warning"
+        );
+        assert_eq!(
+            diag(3, serde_json::Value::Null, "x").severity_label(),
+            "info"
+        );
+        assert_eq!(
+            diag(4, serde_json::Value::Null, "x").severity_label(),
+            "hint"
+        );
     }
 
     #[test]
     fn missing_severity_defaults_to_error() {
         let d = Diagnostic {
             range: Range {
-                start: Position { line: 0, character: 0 },
-                end: Position { line: 0, character: 0 },
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 0,
+                },
             },
             severity: None,
             code: None,

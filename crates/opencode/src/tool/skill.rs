@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 #[derive(Debug, Deserialize)]
 pub struct SkillParams {
@@ -44,7 +44,8 @@ impl Tool for SkillTool {
             let params: SkillParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid skill parameters: {}", e))?;
 
-            let skill_path = ctx.working_dir
+            let skill_path = ctx
+                .working_dir
                 .join(".opencode")
                 .join("skill")
                 .join(format!("{}.md", params.name));
@@ -60,8 +61,7 @@ impl Tool for SkillTool {
 
             let output = format!(
                 "<skill_content name=\"{}\">\n{}\n</skill_content>",
-                params.name,
-                content
+                params.name, content
             );
 
             Ok(ToolResult::with_metadata(

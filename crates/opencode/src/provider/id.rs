@@ -212,7 +212,9 @@ impl AsRef<str> for ModelID {
 // ---------------------------------------------------------------------------
 
 /// Enum of well-known provider names for pattern matching and display.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, EnumString, StrumDisplay)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, EnumString, StrumDisplay,
+)]
 #[strum(serialize_all = "kebab-case")]
 #[serde(rename_all = "kebab-case")]
 pub enum Provider {

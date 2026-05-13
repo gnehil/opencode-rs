@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::{ReadParams, Tool};
+use super::result::ToolResult;
 
 const MAX_LINE_LENGTH: usize = 2000;
 const MAX_LINE_SUFFIX: &str = "... (line truncated to 2000 chars)";
@@ -101,8 +101,7 @@ const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 fn read_image(path: &Path, mime: &str, ctx: &ToolContext) -> Result<ToolResult> {
     use base64::Engine;
 
-    let bytes = fs::read(path)
-        .with_context(|| format!("Cannot read image: {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("Cannot read image: {}", path.display()))?;
     if bytes.len() > MAX_IMAGE_BYTES {
         anyhow::bail!(
             "Image {} is {} bytes; refusing to inline images larger than {} bytes",
@@ -113,9 +112,7 @@ fn read_image(path: &Path, mime: &str, ctx: &ToolContext) -> Result<ToolResult> 
     }
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let url = format!("data:{};base64,{}", mime, b64);
-    let filename = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string());
+    let filename = path.file_name().map(|n| n.to_string_lossy().to_string());
 
     let attachment = crate::message::part::FilePart {
         id: crate::id::PartID::new(),
@@ -242,10 +239,7 @@ fn read_file(path: &Path, params: &ReadParams) -> Result<ToolResult> {
     } else if more {
         output.push_str(&format!(
             "\n(Showing lines {}-{} of {}. Use offset={} to continue.)",
-            params.offset,
-            last_line,
-            total_lines,
-            next_offset
+            params.offset, last_line, total_lines, next_offset
         ));
     } else {
         output.push_str(&format!("\n(End of file - total {} lines)", total_lines));
@@ -304,10 +298,7 @@ mod tests {
 
         let tool = ReadTool;
         let result = tool
-            .execute(
-                serde_json::json!({"filePath": p.to_string_lossy()}),
-                ctx(),
-            )
+            .execute(serde_json::json!({"filePath": p.to_string_lossy()}), ctx())
             .await
             .unwrap();
         let attachments = result.attachments.expect("attachments expected");

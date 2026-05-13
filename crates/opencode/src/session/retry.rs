@@ -16,7 +16,9 @@
 
 use std::time::Duration;
 
-use crate::provider::{CompletionRequest, CompletionResponse, Provider, ProviderError, ProviderResult};
+use crate::provider::{
+    CompletionRequest, CompletionResponse, Provider, ProviderError, ProviderResult,
+};
 
 /// Default retry policy: up to 4 attempts (= 3 retries) with base delay
 /// 500ms, doubled each attempt. Worst-case wait: 0.5 + 1 + 2 = 3.5s
@@ -114,7 +116,9 @@ mod tests {
 
     #[test]
     fn model_not_found_is_not_retryable() {
-        assert!(!is_retryable(&ProviderError::ModelNotFound("x".to_string())));
+        assert!(!is_retryable(&ProviderError::ModelNotFound(
+            "x".to_string()
+        )));
     }
 
     #[test]

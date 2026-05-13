@@ -64,7 +64,7 @@ pub async fn build_completion_messages(
                         content: text,
                         tool_calls: None,
                         tool_call_id: None,
-            images: Vec::new(),
+                        images: Vec::new(),
                     });
                 }
             }
@@ -79,7 +79,11 @@ pub async fn build_completion_messages(
                     out.push(CompletionMessage {
                         role: "assistant".to_string(),
                         content: text,
-                        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                        tool_calls: if tool_calls.is_empty() {
+                            None
+                        } else {
+                            Some(tool_calls)
+                        },
                         tool_call_id: None,
                         images: Vec::new(),
                     });
@@ -285,14 +289,20 @@ mod tests {
                 output: 0.0,
                 reasoning: 0.0,
                 total: None,
-                cache: crate::message::CacheUsage { read: 0.0, write: 0.0 },
+                cache: crate::message::CacheUsage {
+                    read: 0.0,
+                    write: 0.0,
+                },
             },
             structured: None,
             variant: None,
             finish: None,
         };
         store
-            .save_message(&session_id, &crate::message::Message::Assistant(assistant_msg))
+            .save_message(
+                &session_id,
+                &crate::message::Message::Assistant(assistant_msg),
+            )
             .await
             .unwrap();
         store
@@ -306,13 +316,18 @@ mod tests {
                 "bash",
                 "toolu_42",
                 &serde_json::json!({"command": "ls"}),
-                ToolPartResult::Completed { output: "a\nb".to_string(), attachments: vec![] },
+                ToolPartResult::Completed {
+                    output: "a\nb".to_string(),
+                    attachments: vec![],
+                },
             )
             .await
             .unwrap();
 
         // Rebuild.
-        let history = build_completion_messages(&store, &session_id).await.unwrap();
+        let history = build_completion_messages(&store, &session_id)
+            .await
+            .unwrap();
 
         // Expect: user, assistant (with tool_calls), tool (the result).
         assert_eq!(history.len(), 3, "{:#?}", history);
@@ -322,7 +337,10 @@ mod tests {
 
         assert_eq!(history[1].role, "assistant");
         assert_eq!(history[1].content, "running ls");
-        let calls = history[1].tool_calls.as_ref().expect("assistant should carry tool_calls");
+        let calls = history[1]
+            .tool_calls
+            .as_ref()
+            .expect("assistant should carry tool_calls");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["id"], "toolu_42");
         assert_eq!(calls[0]["function"]["name"], "bash");
@@ -348,16 +366,25 @@ mod tests {
             session_id: session_id.clone(),
             role: "user".to_string(),
             time: crate::message::UserTime { created: 1_000 },
-            format: None, summary: None, agent: "build".to_string(),
+            format: None,
+            summary: None,
+            agent: "build".to_string(),
             model: crate::message::ModelRef {
                 provider_id: "anthropic".to_string(),
                 model_id: "m".to_string(),
                 variant: None,
             },
-            system: None, tools: None,
+            system: None,
+            tools: None,
         };
-        store.save_message(&session_id, &crate::message::Message::User(m1)).await.unwrap();
-        store.save_text_part(&session_id, &m1_id, "OLD MESSAGE").await.unwrap();
+        store
+            .save_message(&session_id, &crate::message::Message::User(m1))
+            .await
+            .unwrap();
+        store
+            .save_text_part(&session_id, &m1_id, "OLD MESSAGE")
+            .await
+            .unwrap();
 
         let m2_id = crate::id::MessageID::new();
         let m2 = crate::message::UserMessage {
@@ -365,25 +392,38 @@ mod tests {
             session_id: session_id.clone(),
             role: "user".to_string(),
             time: crate::message::UserTime { created: 5_000 },
-            format: None, summary: None, agent: "build".to_string(),
+            format: None,
+            summary: None,
+            agent: "build".to_string(),
             model: crate::message::ModelRef {
                 provider_id: "anthropic".to_string(),
                 model_id: "m".to_string(),
                 variant: None,
             },
-            system: None, tools: None,
+            system: None,
+            tools: None,
         };
-        store.save_message(&session_id, &crate::message::Message::User(m2)).await.unwrap();
-        store.save_text_part(&session_id, &m2_id, "NEW MESSAGE").await.unwrap();
+        store
+            .save_message(&session_id, &crate::message::Message::User(m2))
+            .await
+            .unwrap();
+        store
+            .save_text_part(&session_id, &m2_id, "NEW MESSAGE")
+            .await
+            .unwrap();
 
         // No boundary yet — both are visible.
-        let before = build_completion_messages(&store, &session_id).await.unwrap();
+        let before = build_completion_messages(&store, &session_id)
+            .await
+            .unwrap();
         assert_eq!(before.len(), 2, "{:?}", before);
 
         // Set the boundary between the two messages.
         store.set_time_compacting(&session_id, 4_000).await.unwrap();
 
-        let after = build_completion_messages(&store, &session_id).await.unwrap();
+        let after = build_completion_messages(&store, &session_id)
+            .await
+            .unwrap();
         assert_eq!(after.len(), 1, "{:?}", after);
         assert_eq!(after[0].content, "NEW MESSAGE");
     }
@@ -403,17 +443,28 @@ mod tests {
             id: user_id.clone(),
             session_id: session_id.clone(),
             role: "user".to_string(),
-            time: crate::message::UserTime { created: chrono::Utc::now().timestamp_millis() },
-            format: None, summary: None, agent: "build".to_string(),
+            time: crate::message::UserTime {
+                created: chrono::Utc::now().timestamp_millis(),
+            },
+            format: None,
+            summary: None,
+            agent: "build".to_string(),
             model: crate::message::ModelRef {
                 provider_id: "anthropic".to_string(),
                 model_id: "m".to_string(),
                 variant: None,
             },
-            system: None, tools: None,
+            system: None,
+            tools: None,
         };
-        store.save_message(&session_id, &crate::message::Message::User(user)).await.unwrap();
-        store.save_text_part(&session_id, &user_id, "show me the logo").await.unwrap();
+        store
+            .save_message(&session_id, &crate::message::Message::User(user))
+            .await
+            .unwrap();
+        store
+            .save_text_part(&session_id, &user_id, "show me the logo")
+            .await
+            .unwrap();
 
         let asst_id = crate::id::MessageID::new();
         let asst = crate::message::AssistantMessage {
@@ -430,17 +481,30 @@ mod tests {
             provider_id: "anthropic".to_string(),
             mode: "default".to_string(),
             agent: "build".to_string(),
-            path: crate::message::PathInfo { cwd: "/tmp".to_string(), root: "/".to_string() },
+            path: crate::message::PathInfo {
+                cwd: "/tmp".to_string(),
+                root: "/".to_string(),
+            },
             summary: None,
             cost: 0.0,
             tokens: crate::message::TokenUsage {
-                input: 0.0, output: 0.0, reasoning: 0.0,
+                input: 0.0,
+                output: 0.0,
+                reasoning: 0.0,
                 total: None,
-                cache: crate::message::CacheUsage { read: 0.0, write: 0.0 },
+                cache: crate::message::CacheUsage {
+                    read: 0.0,
+                    write: 0.0,
+                },
             },
-            structured: None, variant: None, finish: None,
+            structured: None,
+            variant: None,
+            finish: None,
         };
-        store.save_message(&session_id, &crate::message::Message::Assistant(asst)).await.unwrap();
+        store
+            .save_message(&session_id, &crate::message::Message::Assistant(asst))
+            .await
+            .unwrap();
 
         // Persist a tool part with one image attachment.
         let img = crate::message::part::FilePart {
@@ -467,7 +531,9 @@ mod tests {
             .await
             .unwrap();
 
-        let history = build_completion_messages(&store, &session_id).await.unwrap();
+        let history = build_completion_messages(&store, &session_id)
+            .await
+            .unwrap();
         // user, assistant(tool_call), tool, user(synthetic with image).
         assert_eq!(history.len(), 4, "{:#?}", history);
         assert_eq!(history[2].role, "tool");

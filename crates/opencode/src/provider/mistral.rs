@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use futures::StreamExt;
+use lazy_static::lazy_static;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use lazy_static::lazy_static;
 
 use super::id::ModelID;
 use super::model::ModelInfo;
@@ -71,8 +71,7 @@ impl MistralProvider {
     }
 
     pub fn from_env() -> ProviderResult<Self> {
-        let api_key = std::env::var("MISTRAL_API_KEY")
-            .map_err(|_| ProviderError::MissingApiKey)?;
+        let api_key = std::env::var("MISTRAL_API_KEY").map_err(|_| ProviderError::MissingApiKey)?;
         Ok(Self::new(api_key))
     }
 }
@@ -93,7 +92,11 @@ impl Provider for MistralProvider {
 
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let model = request.model.to_string();
-        let messages: Vec<serde_json::Value> = request.messages.iter().map(crate::provider::openai_compat_message_json).collect();
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(crate::provider::openai_compat_message_json)
+            .collect();
 
         let body = serde_json::json!({
             "model": model,
@@ -102,7 +105,8 @@ impl Provider for MistralProvider {
             "temperature": request.temperature.unwrap_or(0.7),
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(API_URL)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
@@ -130,7 +134,12 @@ impl Provider for MistralProvider {
                 cache_read: None,
                 cache_write: None,
             },
-            stop_reason: Some(data["choices"][0]["finish_reason"].as_str().unwrap_or("stop").to_string()),
+            stop_reason: Some(
+                data["choices"][0]["finish_reason"]
+                    .as_str()
+                    .unwrap_or("stop")
+                    .to_string(),
+            ),
             model: model.clone(),
         })
     }
@@ -149,7 +158,10 @@ impl Provider for MistralProvider {
             "stream": true,
         });
         let mut headers = std::collections::HashMap::new();
-        headers.insert("Authorization".to_string(), format!("Bearer {}", self.api_key));
+        headers.insert(
+            "Authorization".to_string(),
+            format!("Bearer {}", self.api_key),
+        );
         crate::provider::openai_sse::stream_openai_sse(
             self.client.clone(),
             API_URL.to_string(),

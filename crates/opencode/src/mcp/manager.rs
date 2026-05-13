@@ -48,8 +48,9 @@ impl McpManager {
                     self.status.insert(
                         name.clone(),
                         McpServerStatus::Failed {
-                            error: "MCP entry only contains enabled=true and no server configuration"
-                                .to_string(),
+                            error:
+                                "MCP entry only contains enabled=true and no server configuration"
+                                    .to_string(),
                         },
                     );
                 }
@@ -98,11 +99,10 @@ impl McpManager {
     }
 
     pub async fn connect_server(&mut self, name: &str) -> Result<()> {
-        let config = self
-            .configs
-            .get(name)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("MCP server '{}' has no known configuration", name))?;
+        let config =
+            self.configs.get(name).cloned().ok_or_else(|| {
+                anyhow::anyhow!("MCP server '{}' has no known configuration", name)
+            })?;
         self.start_server(name, &config).await
     }
 

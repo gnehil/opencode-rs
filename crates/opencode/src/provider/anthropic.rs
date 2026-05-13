@@ -45,7 +45,9 @@ struct CacheControl {
     cache_type: &'static str,
 }
 
-const EPHEMERAL: CacheControl = CacheControl { cache_type: "ephemeral" };
+const EPHEMERAL: CacheControl = CacheControl {
+    cache_type: "ephemeral",
+};
 
 #[derive(Debug, Serialize)]
 struct AnthropicSystemBlock {
@@ -121,8 +123,14 @@ struct AnthropicCompleteResponse {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicResponseBlock {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: serde_json::Value },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,8 +160,8 @@ impl AnthropicProvider {
     }
 
     pub fn from_env() -> ProviderResult<Self> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .map_err(|_| ProviderError::MissingApiKey)?;
+        let api_key =
+            std::env::var("ANTHROPIC_API_KEY").map_err(|_| ProviderError::MissingApiKey)?;
         Ok(Self::new(api_key, None))
     }
 
@@ -466,9 +474,7 @@ impl AnthropicProvider {
             }),
             "content_block_delta" => Ok(StreamEvent {
                 event_type: "content_block_delta".to_string(),
-                delta: event.delta.and_then(|d| {
-                    d.text.or(d.partial_json)
-                }),
+                delta: event.delta.and_then(|d| d.text.or(d.partial_json)),
                 tool_call: None,
                 stop_reason: None,
                 usage: None,
@@ -513,7 +519,10 @@ fn convert_messages(messages: &[crate::provider::CompletionMessage]) -> Vec<Anth
                 return;
             }
         }
-        out.push(AnthropicMessage { role: "user".to_string(), content });
+        out.push(AnthropicMessage {
+            role: "user".to_string(),
+            content,
+        });
     };
 
     for msg in messages {
@@ -542,10 +551,24 @@ fn convert_messages(messages: &[crate::provider::CompletionMessage]) -> Vec<Anth
                 }
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
-                        let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let func = tc.get("function").cloned().unwrap_or(serde_json::Value::Null);
-                        let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let raw_args = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
+                        let id = tc
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let func = tc
+                            .get("function")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        let name = func
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let raw_args = func
+                            .get("arguments")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("{}");
                         let input: serde_json::Value =
                             serde_json::from_str(raw_args).unwrap_or(serde_json::json!({}));
                         content.push(AnthropicContent::ToolUse {
@@ -557,7 +580,10 @@ fn convert_messages(messages: &[crate::provider::CompletionMessage]) -> Vec<Anth
                     }
                 }
                 if !content.is_empty() {
-                    out.push(AnthropicMessage { role: "assistant".to_string(), content });
+                    out.push(AnthropicMessage {
+                        role: "assistant".to_string(),
+                        content,
+                    });
                 }
             }
             // "user" and any other role we treat as a user text turn.
@@ -611,11 +637,7 @@ fn set_cache_control(content: &mut AnthropicContent, cc: Option<CacheControl>) {
 fn parse_image_source(url: &str) -> AnthropicImageSource {
     if let Some(after_data) = url.strip_prefix("data:") {
         if let Some((header, payload)) = after_data.split_once(",") {
-            let media_type = header
-                .split(';')
-                .next()
-                .unwrap_or("image/png")
-                .to_string();
+            let media_type = header.split(';').next().unwrap_or("image/png").to_string();
             // Anthropic only accepts base64 sources for data URLs; if the
             // user passed `data:image/png,...` (no base64 encoding) we'd
             // need to re-encode. For now assume base64.
@@ -625,7 +647,9 @@ fn parse_image_source(url: &str) -> AnthropicImageSource {
             };
         }
     }
-    AnthropicImageSource::Url { url: url.to_string() }
+    AnthropicImageSource::Url {
+        url: url.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -645,13 +669,13 @@ mod tests {
 
     #[test]
     fn user_assistant_turns_serialize_as_text_blocks() {
-        let result = convert_messages(&[
-            msg("user", "hi"),
-            msg("assistant", "hello"),
-        ]);
+        let result = convert_messages(&[msg("user", "hi"), msg("assistant", "hello")]);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].role, "user");
-        assert!(matches!(result[0].content[0], AnthropicContent::Text { .. }));
+        assert!(matches!(
+            result[0].content[0],
+            AnthropicContent::Text { .. }
+        ));
     }
 
     #[test]
@@ -670,9 +694,14 @@ mod tests {
         let result = convert_messages(&[assistant]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].content.len(), 2);
-        assert!(matches!(result[0].content[0], AnthropicContent::Text { .. }));
+        assert!(matches!(
+            result[0].content[0],
+            AnthropicContent::Text { .. }
+        ));
         match &result[0].content[1] {
-            AnthropicContent::ToolUse { id, name, input, .. } => {
+            AnthropicContent::ToolUse {
+                id, name, input, ..
+            } => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(name, "bash");
                 assert_eq!(input["command"], "ls");
@@ -689,14 +718,14 @@ mod tests {
                 content: "out1".to_string(),
                 tool_calls: None,
                 tool_call_id: Some("toolu_1".to_string()),
-            images: Vec::new(),
+                images: Vec::new(),
             },
             CompletionMessage {
                 role: "tool".to_string(),
                 content: "out2".to_string(),
                 tool_calls: None,
                 tool_call_id: Some("toolu_2".to_string()),
-            images: Vec::new(),
+                images: Vec::new(),
             },
         ]);
         assert_eq!(result.len(), 1);
@@ -704,8 +733,12 @@ mod tests {
         assert_eq!(result[0].content.len(), 2);
         match (&result[0].content[0], &result[0].content[1]) {
             (
-                AnthropicContent::ToolResult { tool_use_id: id1, .. },
-                AnthropicContent::ToolResult { tool_use_id: id2, .. },
+                AnthropicContent::ToolResult {
+                    tool_use_id: id1, ..
+                },
+                AnthropicContent::ToolResult {
+                    tool_use_id: id2, ..
+                },
             ) => {
                 assert_eq!(id1, "toolu_1");
                 assert_eq!(id2, "toolu_2");
@@ -723,11 +756,13 @@ mod tests {
             model: crate::provider::ModelID::new("claude-3-5-sonnet-20241022"),
             messages: vec![msg("user", "hi")],
             system: system.map(|s| s.to_string()),
-            tools: (0..tool_count).map(|i| crate::provider::ToolDefinition {
-                name: format!("tool_{i}"),
-                description: "desc".to_string(),
-                parameters: serde_json::json!({"type": "object"}),
-            }).collect(),
+            tools: (0..tool_count)
+                .map(|i| crate::provider::ToolDefinition {
+                    name: format!("tool_{i}"),
+                    description: "desc".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                })
+                .collect(),
             max_tokens: Some(1024),
             temperature: None,
             top_p: None,
@@ -808,14 +843,14 @@ mod tests {
                 content: "r1".to_string(),
                 tool_calls: None,
                 tool_call_id: Some("toolu_1".to_string()),
-            images: Vec::new(),
+                images: Vec::new(),
             },
             CompletionMessage {
                 role: "tool".to_string(),
                 content: "r2".to_string(),
                 tool_calls: None,
                 tool_call_id: Some("toolu_2".to_string()),
-            images: Vec::new(),
+                images: Vec::new(),
             },
         ]);
         assert_eq!(result.len(), 1);
@@ -868,7 +903,10 @@ mod tests {
         // No text, so just the one Image block.
         assert_eq!(result[0].content.len(), 1);
         match &result[0].content[0] {
-            AnthropicContent::Image { source: AnthropicImageSource::Url { url }, .. } => {
+            AnthropicContent::Image {
+                source: AnthropicImageSource::Url { url },
+                ..
+            } => {
                 assert_eq!(url, "https://example.com/cat.png");
             }
             _ => panic!("expected URL image"),

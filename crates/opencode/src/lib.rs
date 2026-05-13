@@ -1,5 +1,6 @@
-pub mod agent;
 pub mod acp;
+pub mod agent;
+pub mod auth;
 pub mod bus;
 pub mod cli;
 pub mod config;

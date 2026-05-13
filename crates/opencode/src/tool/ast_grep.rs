@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 #[derive(Debug, Deserialize)]
 pub struct AstGrepSearchParams {
@@ -40,9 +40,9 @@ impl Tool for AstGrepSearchTool {
                 },
                 "lang": {
                     "type": "string",
-                    "enum": ["bash", "c", "cpp", "csharp", "css", "elixir", "go", "haskell", 
-                             "html", "java", "javascript", "json", "kotlin", "lua", "nix", 
-                             "php", "python", "ruby", "rust", "scala", "solidity", "swift", 
+                    "enum": ["bash", "c", "cpp", "csharp", "css", "elixir", "go", "haskell",
+                             "html", "java", "javascript", "json", "kotlin", "lua", "nix",
+                             "php", "python", "ruby", "rust", "scala", "solidity", "swift",
                              "typescript", "tsx", "yaml"],
                     "description": "Target language"
                 },
@@ -74,7 +74,8 @@ impl Tool for AstGrepSearchTool {
             let params: AstGrepSearchParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid ast-grep parameters: {}", e))?;
 
-            let search_path = params.paths
+            let search_path = params
+                .paths
                 .and_then(|p| p.first().cloned())
                 .unwrap_or_else(|| ctx.working_dir.to_string_lossy().to_string());
 
@@ -110,8 +111,10 @@ impl Tool for AstGrepSearchTool {
             let output = std::process::Command::new("sg")
                 .args([
                     "run",
-                    "--pattern", &params.pattern,
-                    "--lang", sg_path,
+                    "--pattern",
+                    &params.pattern,
+                    "--lang",
+                    sg_path,
                     "--json",
                     &search_path,
                 ])
@@ -124,7 +127,8 @@ impl Tool for AstGrepSearchTool {
                     if stdout.is_empty() {
                         Ok(ToolResult::new("No matches found"))
                     } else {
-                        let matches: Vec<String> = stdout.lines()
+                        let matches: Vec<String> = stdout
+                            .lines()
                             .filter_map(|line| {
                                 let json: serde_json::Value = serde_json::from_str(line).ok()?;
                                 Some(format!(
@@ -140,7 +144,9 @@ impl Tool for AstGrepSearchTool {
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::NotFound {
-                        Ok(ToolResult::new("ast-grep (sg) not installed. Install with: cargo install ast-grep"))
+                        Ok(ToolResult::new(
+                            "ast-grep (sg) not installed. Install with: cargo install ast-grep",
+                        ))
                     } else {
                         Err(anyhow::anyhow!("ast-grep execution failed: {}", e))
                     }
@@ -164,7 +170,9 @@ pub struct AstGrepReplaceParams {
     pub dry_run: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 pub struct AstGrepReplaceTool;
 
@@ -191,9 +199,9 @@ impl Tool for AstGrepReplaceTool {
                 },
                 "lang": {
                     "type": "string",
-                    "enum": ["bash", "c", "cpp", "csharp", "css", "elixir", "go", "haskell", 
-                             "html", "java", "javascript", "json", "kotlin", "lua", "nix", 
-                             "php", "python", "ruby", "rust", "scala", "solidity", "swift", 
+                    "enum": ["bash", "c", "cpp", "csharp", "css", "elixir", "go", "haskell",
+                             "html", "java", "javascript", "json", "kotlin", "lua", "nix",
+                             "php", "python", "ruby", "rust", "scala", "solidity", "swift",
                              "typescript", "tsx", "yaml"],
                     "description": "Target language"
                 },
@@ -225,7 +233,8 @@ impl Tool for AstGrepReplaceTool {
             let params: AstGrepReplaceParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid ast-grep replace parameters: {}", e))?;
 
-            let search_path = params.paths
+            let search_path = params
+                .paths
                 .and_then(|p| p.first().cloned())
                 .unwrap_or_else(|| ctx.working_dir.to_string_lossy().to_string());
 
@@ -238,9 +247,12 @@ impl Tool for AstGrepReplaceTool {
 
             let mut args = vec![
                 "run",
-                "--pattern", &params.pattern,
-                "--rewrite", &params.rewrite,
-                "--lang", sg_path,
+                "--pattern",
+                &params.pattern,
+                "--rewrite",
+                &params.rewrite,
+                "--lang",
+                sg_path,
             ];
 
             if params.dry_run {
@@ -260,7 +272,8 @@ impl Tool for AstGrepReplaceTool {
                 Ok(o) => {
                     let stdout = String::from_utf8_lossy(&o.stdout);
                     if params.dry_run {
-                        let changes: Vec<String> = stdout.lines()
+                        let changes: Vec<String> = stdout
+                            .lines()
                             .filter_map(|line| {
                                 let json: serde_json::Value = serde_json::from_str(line).ok()?;
                                 Some(format!(
@@ -273,15 +286,20 @@ impl Tool for AstGrepReplaceTool {
                             .collect();
                         Ok(ToolResult::with_metadata(
                             changes.join("\n"),
-                            json!({ "dry_run": true, "changes_count": changes.len() })
+                            json!({ "dry_run": true, "changes_count": changes.len() }),
                         ))
                     } else {
-                        Ok(ToolResult::new(format!("Applied {} replacements", stdout.lines().count())))
+                        Ok(ToolResult::new(format!(
+                            "Applied {} replacements",
+                            stdout.lines().count()
+                        )))
                     }
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::NotFound {
-                        Ok(ToolResult::new("ast-grep (sg) not installed. Install with: cargo install ast-grep"))
+                        Ok(ToolResult::new(
+                            "ast-grep (sg) not installed. Install with: cargo install ast-grep",
+                        ))
                     } else {
                         Err(anyhow::anyhow!("ast-grep execution failed: {}", e))
                     }

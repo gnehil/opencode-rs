@@ -105,9 +105,7 @@ impl ServerPool {
         //    crashed on a malformed file, etc.), evict it from the
         //    pool and spawn a replacement. We check liveness on the
         //    hot path; it's a non-blocking try_wait, ~microseconds.
-        let server = self
-            .get_or_spawn_live(&key, spec, &workspace_canon)
-            .await?;
+        let server = self.get_or_spawn_live(&key, spec, &workspace_canon).await?;
 
         // 2. Open or update the document, depending on its prior state
         // in this pool.
@@ -125,7 +123,15 @@ impl ServerPool {
         //     in cases where the server crashes deterministically on
         //     startup.
         let mut docs = server.documents.lock().await;
-        let notify_result = open_or_update(&server, &spec.language_id, &uri, &file_text, content_hash, &mut docs).await;
+        let notify_result = open_or_update(
+            &server,
+            &spec.language_id,
+            &uri,
+            &file_text,
+            content_hash,
+            &mut docs,
+        )
+        .await;
         drop(docs);
 
         if notify_result.is_err() && !server.client.is_alive().await {
@@ -134,11 +140,17 @@ impl ServerPool {
                 key.language_id
             );
             self.evict(&key).await;
-            let fresh = self
-                .get_or_spawn_live(&key, spec, &workspace_canon)
-                .await?;
+            let fresh = self.get_or_spawn_live(&key, spec, &workspace_canon).await?;
             let mut docs = fresh.documents.lock().await;
-            open_or_update(&fresh, &spec.language_id, &uri, &file_text, content_hash, &mut docs).await?;
+            open_or_update(
+                &fresh,
+                &spec.language_id,
+                &uri,
+                &file_text,
+                content_hash,
+                &mut docs,
+            )
+            .await?;
             return Ok(LiveDoc {
                 client: fresh.client.clone(),
                 uri,
@@ -265,7 +277,13 @@ async fn open_or_update(
                     }),
                 )
                 .await?;
-            docs.insert(uri.to_string(), OpenDoc { version, content_hash });
+            docs.insert(
+                uri.to_string(),
+                OpenDoc {
+                    version,
+                    content_hash,
+                },
+            );
             Ok(())
         }
     }
@@ -285,7 +303,9 @@ async fn spawn_server(spec: &ServerSpec, workspace_root: &Path) -> Result<Pooled
 static GLOBAL_POOL: OnceCell<ServerPool> = OnceCell::const_new();
 
 pub async fn global() -> &'static ServerPool {
-    GLOBAL_POOL.get_or_init(|| async { ServerPool::new() }).await
+    GLOBAL_POOL
+        .get_or_init(|| async { ServerPool::new() })
+        .await
 }
 
 /// Shutdown the global pool. Call from process exit hooks; safe to

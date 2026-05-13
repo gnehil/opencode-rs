@@ -1,7 +1,7 @@
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use notify::{Watcher, RecommendedWatcher, Event, EventKind, RecursiveMode};
 
 pub struct FileWatcher {
     watcher: RecommendedWatcher,
@@ -46,24 +46,18 @@ impl FileWatcher {
 
     fn convert_event(event: Event) -> Option<FileEvent> {
         match event.kind {
-            EventKind::Create(_) => {
-                event.paths.first().map(|p| FileEvent {
-                    path: p.clone(),
-                    kind: FileEventKind::Created,
-                })
-            }
-            EventKind::Modify(_) => {
-                event.paths.first().map(|p| FileEvent {
-                    path: p.clone(),
-                    kind: FileEventKind::Modified,
-                })
-            }
-            EventKind::Remove(_) => {
-                event.paths.first().map(|p| FileEvent {
-                    path: p.clone(),
-                    kind: FileEventKind::Deleted,
-                })
-            }
+            EventKind::Create(_) => event.paths.first().map(|p| FileEvent {
+                path: p.clone(),
+                kind: FileEventKind::Created,
+            }),
+            EventKind::Modify(_) => event.paths.first().map(|p| FileEvent {
+                path: p.clone(),
+                kind: FileEventKind::Modified,
+            }),
+            EventKind::Remove(_) => event.paths.first().map(|p| FileEvent {
+                path: p.clone(),
+                kind: FileEventKind::Deleted,
+            }),
             EventKind::Any => {
                 if event.paths.len() == 2 {
                     Some(FileEvent {

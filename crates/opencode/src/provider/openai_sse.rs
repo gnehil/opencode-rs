@@ -144,13 +144,18 @@ pub fn parse_chunk(data: &str) -> Option<StreamEvent> {
     let finish_reason = choice.finish_reason.clone();
     let delta_content = choice.delta.content.clone();
 
-    let tool_call = choice.delta.tool_calls.as_ref()
+    let tool_call = choice
+        .delta
+        .tool_calls
+        .as_ref()
         .and_then(|tc| tc.first())
-        .and_then(|t| Some(ToolCall {
-            id: t.id.clone()?,
-            name: t.function.as_ref()?.name.clone()?,
-            arguments: t.function.as_ref()?.arguments.clone().unwrap_or_default(),
-        }));
+        .and_then(|t| {
+            Some(ToolCall {
+                id: t.id.clone()?,
+                name: t.function.as_ref()?.name.clone()?,
+                arguments: t.function.as_ref()?.arguments.clone().unwrap_or_default(),
+            })
+        });
 
     let usage = resp.usage.map(|u| TokenUsage {
         input: u.prompt_tokens,
@@ -160,7 +165,12 @@ pub fn parse_chunk(data: &str) -> Option<StreamEvent> {
     });
 
     Some(StreamEvent {
-        event_type: if finish_reason.is_some() { "message_stop" } else { "content_block_delta" }.to_string(),
+        event_type: if finish_reason.is_some() {
+            "message_stop"
+        } else {
+            "content_block_delta"
+        }
+        .to_string(),
         delta: delta_content,
         tool_call,
         stop_reason: finish_reason,

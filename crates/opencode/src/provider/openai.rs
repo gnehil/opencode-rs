@@ -141,8 +141,7 @@ impl OpenAIProvider {
     }
 
     pub fn from_env() -> ProviderResult<Self> {
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .map_err(|_| ProviderError::MissingApiKey)?;
+        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| ProviderError::MissingApiKey)?;
         Ok(Self::new(api_key, None))
     }
 
@@ -335,11 +334,15 @@ impl Provider for OpenAIProvider {
 
         let tool_calls: Vec<ToolCall> = choice
             .and_then(|c| c.message.tool_calls.as_ref())
-            .map(|tc| tc.iter().map(|t| ToolCall {
-                id: t.id.clone(),
-                name: t.function.name.clone(),
-                arguments: t.function.arguments.clone(),
-            }).collect())
+            .map(|tc| {
+                tc.iter()
+                    .map(|t| ToolCall {
+                        id: t.id.clone(),
+                        name: t.function.name.clone(),
+                        arguments: t.function.arguments.clone(),
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
         let finish_reason = choice.and_then(|c| c.finish_reason.clone());
@@ -473,7 +476,8 @@ impl OpenAIProvider {
         let delta_content = choice.and_then(|c| c.delta.content.clone());
         let finish_reason = choice.and_then(|c| c.finish_reason.clone());
 
-        let tool_call = choice.and_then(|c| c.delta.tool_calls.as_ref())
+        let tool_call = choice
+            .and_then(|c| c.delta.tool_calls.as_ref())
             .and_then(|tc| tc.first())
             .and_then(|t| {
                 Some(ToolCall {
@@ -484,7 +488,12 @@ impl OpenAIProvider {
             });
 
         Ok(StreamEvent {
-            event_type: if finish_reason.is_some() { "message_stop" } else { "content_block_delta" }.to_string(),
+            event_type: if finish_reason.is_some() {
+                "message_stop"
+            } else {
+                "content_block_delta"
+            }
+            .to_string(),
             delta: delta_content,
             tool_call,
             stop_reason: finish_reason,
@@ -556,10 +565,7 @@ mod tests {
 
     #[test]
     fn images_yield_content_parts_array() {
-        let v = openai_content_value(&msg(
-            "what is this?",
-            vec!["https://example.com/cat.png"],
-        ));
+        let v = openai_content_value(&msg("what is this?", vec!["https://example.com/cat.png"]));
         let arr = v.as_array().expect("array");
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["type"], "text");

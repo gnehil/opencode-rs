@@ -3,9 +3,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::acp::types::{ACPSessionState, McpServer, McpServerConfig, ModelSelection};
+use crate::id::SessionID;
 use crate::session::SessionStore;
 use crate::storage::SessionRow;
-use crate::id::SessionID;
 use anyhow::Result;
 
 pub struct ACPSessionManager {
@@ -37,19 +37,33 @@ impl ACPSessionManager {
         let session_row = self.store.create(&title, "acp", &directory).await?;
         let session_id = session_row.id;
 
-        let mcp_configs = mcp_servers.iter().map(|s| match s {
-            McpServer::Sse { name, url, headers } => McpServerConfig::Remote {
-                name: name.clone(),
-                url: url.clone(),
-                headers: headers.iter().map(|h| (h.name.clone(), h.value.clone())).collect(),
-            },
-            McpServer::Stdio { name, command, args, env } => McpServerConfig::Local {
-                name: name.clone(),
-                command: command.clone(),
-                args: args.clone(),
-                env: env.iter().map(|e| (e.name.clone(), e.value.clone())).collect(),
-            },
-        }).collect();
+        let mcp_configs = mcp_servers
+            .iter()
+            .map(|s| match s {
+                McpServer::Sse { name, url, headers } => McpServerConfig::Remote {
+                    name: name.clone(),
+                    url: url.clone(),
+                    headers: headers
+                        .iter()
+                        .map(|h| (h.name.clone(), h.value.clone()))
+                        .collect(),
+                },
+                McpServer::Stdio {
+                    name,
+                    command,
+                    args,
+                    env,
+                } => McpServerConfig::Local {
+                    name: name.clone(),
+                    command: command.clone(),
+                    args: args.clone(),
+                    env: env
+                        .iter()
+                        .map(|e| (e.name.clone(), e.value.clone()))
+                        .collect(),
+                },
+            })
+            .collect();
 
         let state = ACPSessionState {
             id: session_id.clone(),
@@ -75,22 +89,39 @@ impl ACPSessionManager {
         model: Option<ModelSelection>,
     ) -> Result<ACPSessionState> {
         let parsed_id = SessionID::parse(session_id)?;
-        let _session_row = self.store.get(&parsed_id).await?
+        let _session_row = self
+            .store
+            .get(&parsed_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
 
-        let mcp_configs = mcp_servers.iter().map(|s| match s {
-            McpServer::Sse { name, url, headers } => McpServerConfig::Remote {
-                name: name.clone(),
-                url: url.clone(),
-                headers: headers.iter().map(|h| (h.name.clone(), h.value.clone())).collect(),
-            },
-            McpServer::Stdio { name, command, args, env } => McpServerConfig::Local {
-                name: name.clone(),
-                command: command.clone(),
-                args: args.clone(),
-                env: env.iter().map(|e| (e.name.clone(), e.value.clone())).collect(),
-            },
-        }).collect();
+        let mcp_configs = mcp_servers
+            .iter()
+            .map(|s| match s {
+                McpServer::Sse { name, url, headers } => McpServerConfig::Remote {
+                    name: name.clone(),
+                    url: url.clone(),
+                    headers: headers
+                        .iter()
+                        .map(|h| (h.name.clone(), h.value.clone()))
+                        .collect(),
+                },
+                McpServer::Stdio {
+                    name,
+                    command,
+                    args,
+                    env,
+                } => McpServerConfig::Local {
+                    name: name.clone(),
+                    command: command.clone(),
+                    args: args.clone(),
+                    env: env
+                        .iter()
+                        .map(|e| (e.name.clone(), e.value.clone()))
+                        .collect(),
+                },
+            })
+            .collect();
 
         let state = ACPSessionState {
             id: session_id.to_string(),
@@ -110,7 +141,8 @@ impl ACPSessionManager {
 
     pub async fn get(&self, session_id: &str) -> Result<ACPSessionState> {
         let sessions = self.sessions.read().await;
-        sessions.get(session_id)
+        sessions
+            .get(session_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))
     }

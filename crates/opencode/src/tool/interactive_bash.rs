@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 #[derive(Debug, Deserialize)]
 pub struct InteractiveBashParams {
@@ -52,16 +52,16 @@ impl Tool for InteractiveBashTool {
                 Ok(o) => {
                     let stdout = String::from_utf8_lossy(&o.stdout);
                     let stderr = String::from_utf8_lossy(&o.stderr);
-                    
+
                     if !stderr.is_empty() {
                         Ok(ToolResult::with_metadata(
                             format!("tmux {}\nstderr: {}", params.tmux_command, stderr),
-                            json!({ "success": false, "error": stderr.to_string() })
+                            json!({ "success": false, "error": stderr.to_string() }),
                         ))
                     } else {
                         Ok(ToolResult::with_metadata(
                             format!("tmux {}\n{}", params.tmux_command, stdout),
-                            json!({ "success": true, "output": stdout.to_string() })
+                            json!({ "success": true, "output": stdout.to_string() }),
                         ))
                     }
                 }

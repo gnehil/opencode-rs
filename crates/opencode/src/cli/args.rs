@@ -503,15 +503,33 @@ pub struct StatsArgs {
 pub enum DebugSubcommand {
     /// Show merged configuration with source attribution
     Config,
+    /// Show debug information
+    Info,
+    /// Show global paths (data, config, cache, state)
+    Paths,
+    /// Wait indefinitely (for debugging)
+    Wait,
+    /// List all available skills
+    Skill,
+    /// Print startup timing
+    Startup,
+    /// Show agent configuration details
+    Agent(DebugAgentArgs),
     /// LSP debugging utilities
     Lsp {
         #[command(subcommand)]
         subcommand: DebugLspSubcommand,
     },
-    /// Search using ripgrep
-    Rg(RgDebugArgs),
-    /// Read a file with full context
-    File(FileDebugArgs),
+    /// Ripgrep debugging utilities
+    Rg {
+        #[command(subcommand)]
+        subcommand: DebugRgSubcommand,
+    },
+    /// File system debugging utilities
+    File {
+        #[command(subcommand)]
+        subcommand: DebugFileSubcommand,
+    },
     /// Snapshot debugging utilities
     Snapshot {
         #[command(subcommand)]
@@ -559,33 +577,128 @@ pub struct DebugDocumentSymbolsArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct RgDebugArgs {
-    /// Search pattern
-    pub pattern: String,
+pub struct DebugAgentArgs {
+    /// Agent name
+    #[arg(value_name = "NAME")]
+    pub name: String,
 
-    /// Paths to search
-    #[arg(last = true)]
-    pub paths: Vec<String>,
+    /// Tool id to execute
+    #[arg(long)]
+    pub tool: Option<String>,
+
+    /// Tool params as JSON
+    #[arg(long)]
+    pub params: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DebugRgSubcommand {
+    /// Show file tree using ripgrep
+    Tree(DebugRgTreeArgs),
+    /// List files using ripgrep
+    Files(DebugRgFilesArgs),
+    /// Search file contents using ripgrep
+    Search(DebugRgSearchArgs),
 }
 
 #[derive(Args, Debug)]
-pub struct FileDebugArgs {
-    /// File path to display
+pub struct DebugRgTreeArgs {
+    /// Limit number of tree entries
+    #[arg(long)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub struct DebugRgFilesArgs {
+    /// Filter files by query
+    #[arg(long)]
+    pub query: Option<String>,
+
+    /// Glob pattern to match files
+    #[arg(long)]
+    pub glob: Option<String>,
+
+    /// Limit number of results
+    #[arg(long)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub struct DebugRgSearchArgs {
+    /// Search pattern
+    #[arg(value_name = "PATTERN")]
+    pub pattern: String,
+
+    /// File glob patterns
+    #[arg(long)]
+    pub glob: Vec<String>,
+
+    /// Limit number of results
+    #[arg(long)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DebugFileSubcommand {
+    /// Read file contents as JSON
+    Read(DebugFileReadArgs),
+    /// Show file status information
+    Status,
+    /// List files in a directory
+    List(DebugFileListArgs),
+    /// Search files by query
+    Search(DebugFileSearchArgs),
+    /// Show directory tree
+    Tree(DebugFileTreeArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct DebugFileReadArgs {
+    /// File path to read
+    #[arg(value_name = "PATH")]
     pub path: String,
+}
+
+#[derive(Args, Debug)]
+pub struct DebugFileListArgs {
+    /// File path to list
+    #[arg(value_name = "PATH")]
+    pub path: String,
+}
+
+#[derive(Args, Debug)]
+pub struct DebugFileSearchArgs {
+    /// Search query
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+}
+
+#[derive(Args, Debug)]
+pub struct DebugFileTreeArgs {
+    /// Directory to tree
+    #[arg(value_name = "DIR", default_value = ".")]
+    pub dir: String,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum DebugSnapshotSubcommand {
+    /// Track current snapshot state
+    Track,
+    /// Show patch for a snapshot hash
+    Patch(DebugSnapshotHashArgs),
+    /// Show diff for a snapshot hash
+    Diff(DebugSnapshotHashArgs),
     /// List available snapshots
     List,
     /// Show a specific snapshot
-    Show(DebugSnapshotShowArgs),
+    Show(DebugSnapshotHashArgs),
 }
 
 #[derive(Args, Debug)]
-pub struct DebugSnapshotShowArgs {
-    /// Snapshot ID
-    pub id: String,
+pub struct DebugSnapshotHashArgs {
+    /// Snapshot hash
+    #[arg(value_name = "HASH")]
+    pub hash: String,
 }
 
 // ─── MCP ─────────────────────────────────────────────────────────────────────

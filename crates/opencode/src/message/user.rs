@@ -60,7 +60,9 @@ impl Default for UserMessage {
     }
 }
 
-fn user_role_default() -> String { "user".to_string() }
+fn user_role_default() -> String {
+    "user".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

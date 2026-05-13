@@ -1,4 +1,4 @@
-use std::io::{BufRead, stdin};
+use std::io::{stdin, BufRead};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -9,10 +9,10 @@ use serde_json::Value;
 use crate::acp::agent::{ACPAgent, JsonRpcNotification};
 use crate::acp::session::ACPSessionManager;
 use crate::acp::types::*;
-use crate::session::SessionStore;
-use crate::provider::{Provider, ProviderID};
-use crate::provider::AnthropicProvider;
 use crate::bus::EventBus;
+use crate::provider::AnthropicProvider;
+use crate::provider::{Provider, ProviderID};
+use crate::session::SessionStore;
 
 pub struct ACPServer {
     agent: Arc<ACPAgent>,
@@ -29,7 +29,7 @@ impl ACPServer {
 
         let provider: Arc<dyn Provider> = Arc::new(
             AnthropicProvider::from_env()
-                .map_err(|_| anyhow::anyhow!("Missing ANTHROPIC_API_KEY"))?
+                .map_err(|_| anyhow::anyhow!("Missing ANTHROPIC_API_KEY"))?,
         );
 
         let agent = Arc::new(ACPAgent::new(
@@ -41,7 +41,10 @@ impl ACPServer {
             notification_tx,
         ));
 
-        Ok(Self { agent, notification_rx })
+        Ok(Self {
+            agent,
+            notification_rx,
+        })
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -109,60 +112,67 @@ impl ACPServer {
 
         let result = match request.method.as_str() {
             "initialize" => {
-                self.agent.handle_initialize(request.params.unwrap_or(Value::Null))
+                self.agent
+                    .handle_initialize(request.params.unwrap_or(Value::Null))
                     .await
             }
             "session/new" => {
-                self.agent.handle_new_session(request.params.unwrap_or(Value::Null))
+                self.agent
+                    .handle_new_session(request.params.unwrap_or(Value::Null))
                     .await
             }
             "session/load" => {
-                self.agent.handle_load_session(request.params.unwrap_or(Value::Null))
+                self.agent
+                    .handle_load_session(request.params.unwrap_or(Value::Null))
                     .await
             }
             "session/list" => {
-                self.agent.handle_list_sessions(request.params.unwrap_or(Value::Null))
+                self.agent
+                    .handle_list_sessions(request.params.unwrap_or(Value::Null))
                     .await
             }
             "session/close" => {
-                self.agent.handle_close_session(request.params.unwrap_or(Value::Null))
+                self.agent
+                    .handle_close_session(request.params.unwrap_or(Value::Null))
                     .await
             }
             "session/fork" => {
-                self.agent.handle_fork_session(request.params.unwrap_or(Value::Null))
+                self.agent
+                    .handle_fork_session(request.params.unwrap_or(Value::Null))
                     .await
             }
             "session/resume" => {
-                self.agent.handle_resume_session(request.params.unwrap_or(Value::Null))
+                self.agent
+                    .handle_resume_session(request.params.unwrap_or(Value::Null))
                     .await
             }
             "session/setModel" => {
-                self.agent.handle_set_session_model(request.params.unwrap_or(Value::Null))
+                self.agent
+                    .handle_set_session_model(request.params.unwrap_or(Value::Null))
                     .await
             }
             "session/setMode" => {
-                self.agent.handle_set_session_mode(request.params.unwrap_or(Value::Null))
+                self.agent
+                    .handle_set_session_mode(request.params.unwrap_or(Value::Null))
                     .await
             }
             "session/setConfigOption" => {
-                self.agent.handle_set_session_config_option(request.params.unwrap_or(Value::Null))
+                self.agent
+                    .handle_set_session_config_option(request.params.unwrap_or(Value::Null))
                     .await
             }
             "session/prompt" => {
-                self.agent.handle_prompt(request.params.unwrap_or(Value::Null))
+                self.agent
+                    .handle_prompt(request.params.unwrap_or(Value::Null))
                     .await
             }
-            "cancel" => {
-                self.agent.handle_cancel(request.params.unwrap_or(Value::Null))
-                    .await
-                    .map(|_| Value::Null)
-            }
-            "shutdown" => {
-                Ok(Value::Null)
-            }
-            _ => {
-                Err(anyhow::anyhow!("Method not found: {}", request.method))
-            }
+            "cancel" => self
+                .agent
+                .handle_cancel(request.params.unwrap_or(Value::Null))
+                .await
+                .map(|_| Value::Null),
+            "shutdown" => Ok(Value::Null),
+            _ => Err(anyhow::anyhow!("Method not found: {}", request.method)),
         };
 
         match result {

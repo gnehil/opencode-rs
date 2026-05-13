@@ -64,8 +64,17 @@ pub struct ResourceSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum FilePartSource {
-    File { path: String, text: SourceText },
-    Symbol { path: String, range: serde_json::Value, name: String, kind: u64, text: SourceText },
+    File {
+        path: String,
+        text: SourceText,
+    },
+    Symbol {
+        path: String,
+        range: serde_json::Value,
+        name: String,
+        kind: u64,
+        text: SourceText,
+    },
     Resource {
         #[serde(rename = "clientName")]
         client_name: String,

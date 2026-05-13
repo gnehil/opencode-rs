@@ -3,13 +3,10 @@ use std::process::Stdio;
 
 use anyhow::{Context, Result};
 use rmcp::handler::client::ClientHandler;
-use rmcp::model::{
-    CallToolRequestParam, ClientInfo, ReadResourceRequestParam,
-    ServerInfo,
-};
+use rmcp::model::{CallToolRequestParam, ClientInfo, ReadResourceRequestParam, ServerInfo};
 use rmcp::service::{Peer, RoleClient, ServiceExt};
-use rmcp::transport::TokioChildProcess;
 use rmcp::transport::sse::SseTransport;
+use rmcp::transport::TokioChildProcess;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -213,10 +210,9 @@ impl McpClient {
                     parts.push(text.clone());
                 }
                 ResourceContents::BlobResourceContents { blob, .. } => {
-                    if let Ok(decoded) = base64::Engine::decode(
-                        &base64::engine::general_purpose::STANDARD,
-                        blob,
-                    ) {
+                    if let Ok(decoded) =
+                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, blob)
+                    {
                         if let Ok(t) = String::from_utf8(decoded) {
                             parts.push(t);
                         } else {

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use reqwest::Client;
 use lazy_static::lazy_static;
+use reqwest::Client;
 
 use super::id::ModelID;
 use super::model::ModelInfo;
@@ -8,7 +8,8 @@ use super::request::CompletionRequest;
 use super::response::{CompletionResponse, StreamEvent, TokenUsage};
 use super::trait_::{EventStream, Provider, ProviderError, ProviderResult};
 
-const API_URL: &str = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation";
+const API_URL: &str =
+    "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation";
 
 lazy_static! {
     static ref MODELS: Vec<ModelInfo> = vec![
@@ -61,7 +62,12 @@ pub struct AlibabaProvider {
 }
 
 impl AlibabaProvider {
-    pub fn new(api_key: String) -> Self { Self { client: Client::new(), api_key } }
+    pub fn new(api_key: String) -> Self {
+        Self {
+            client: Client::new(),
+            api_key,
+        }
+    }
     pub fn from_env() -> ProviderResult<Self> {
         let api_key = std::env::var("ALIBABA_API_KEY")
             .or_else(|_| std::env::var("DASHSCOPE_API_KEY"))
@@ -72,9 +78,15 @@ impl AlibabaProvider {
 
 #[async_trait]
 impl Provider for AlibabaProvider {
-    fn name(&self) -> &str { "alibaba" }
-    fn default_model(&self) -> Option<&ModelInfo> { MODELS.first() }
-    fn models(&self) -> &[ModelInfo] { &MODELS }
+    fn name(&self) -> &str {
+        "alibaba"
+    }
+    fn default_model(&self) -> Option<&ModelInfo> {
+        MODELS.first()
+    }
+    fn models(&self) -> &[ModelInfo] {
+        &MODELS
+    }
 
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let model = request.model.to_string();
@@ -90,7 +102,8 @@ impl Provider for AlibabaProvider {
             "parameters": { "max_tokens": request.max_tokens.unwrap_or(4096) }
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(API_URL)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
@@ -109,7 +122,12 @@ impl Provider for AlibabaProvider {
         Ok(CompletionResponse {
             content: data["output"]["text"].as_str().unwrap_or("").to_string(),
             tool_calls: vec![],
-            usage: TokenUsage { input: 0, output: 0, cache_read: None, cache_write: None },
+            usage: TokenUsage {
+                input: 0,
+                output: 0,
+                cache_read: None,
+                cache_write: None,
+            },
             stop_reason: Some("stop".to_string()),
             model,
         })

@@ -47,7 +47,7 @@ pub async fn compact_session(
         content: SUMMARY_INSTRUCTION.to_string(),
         tool_calls: None,
         tool_call_id: None,
-            images: Vec::new(),
+        images: Vec::new(),
     });
 
     let request = CompletionRequest {
@@ -80,7 +80,9 @@ pub async fn compact_session(
         id: summary_message_id.clone(),
         session_id: session_id.clone(),
         role: "user".to_string(),
-        time: crate::message::UserTime { created: boundary_ts },
+        time: crate::message::UserTime {
+            created: boundary_ts,
+        },
         format: None,
         summary: None,
         agent: "build".to_string(),
@@ -106,9 +108,7 @@ pub async fn compact_session(
     // 4. Move the boundary forward. From now on history rebuilds will
     //    include only messages with time_created >= boundary_ts (i.e. the
     //    summary itself and anything that comes after).
-    store
-        .set_time_compacting(session_id, boundary_ts)
-        .await?;
+    store.set_time_compacting(session_id, boundary_ts).await?;
 
     Ok(())
 }

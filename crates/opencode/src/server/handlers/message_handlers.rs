@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State, Json},
+    extract::{Json, Path, State},
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
@@ -151,18 +151,12 @@ pub async fn prompt(
     // Best-effort: pull the most recent user message id from the
     // store as a correlation handle. (Processor doesn't surface it
     // directly.)
-    let message_id = match store
-        .get_messages(&session_id)
-        .await
-        .ok()
-        .and_then(|msgs| {
-            msgs.into_iter()
-                .rev()
-                .find_map(|m| match m {
-                    crate::message::Message::User(u) => Some(u.id.to_string()),
-                    _ => None,
-                })
-        }) {
+    let message_id = match store.get_messages(&session_id).await.ok().and_then(|msgs| {
+        msgs.into_iter().rev().find_map(|m| match m {
+            crate::message::Message::User(u) => Some(u.id.to_string()),
+            _ => None,
+        })
+    }) {
         Some(id) => id,
         None => MessageID::new().to_string(),
     };

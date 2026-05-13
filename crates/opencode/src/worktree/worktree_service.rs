@@ -1,8 +1,8 @@
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
-use anyhow::Result;
 
 const WORKTREE_PREFIX: &str = "wt";
 
@@ -27,7 +27,12 @@ impl WorktreeService {
         }
     }
 
-    pub async fn create(&self, project_path: &PathBuf, name: &str, branch: &str) -> Result<WorktreeInfo> {
+    pub async fn create(
+        &self,
+        project_path: &PathBuf,
+        name: &str,
+        branch: &str,
+    ) -> Result<WorktreeInfo> {
         let id = format!("{}_{}", WORKTREE_PREFIX, ulid::Ulid::new().to_string());
 
         let worktree_dir = project_path.join(".opencode").join("worktrees").join(&id);
@@ -43,7 +48,13 @@ impl WorktreeService {
         };
 
         let output = std::process::Command::new("git")
-            .args(["worktree", "add", "-b", &branch, worktree_path.to_string_lossy().as_ref()])
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                &branch,
+                worktree_path.to_string_lossy().as_ref(),
+            ])
             .current_dir(project_path)
             .output();
 
@@ -72,11 +83,20 @@ impl WorktreeService {
     pub async fn list(&self, project_path: &PathBuf) -> Vec<WorktreeInfo> {
         let worktrees = self.worktrees.read().await;
         let project_id = self.get_project_id(project_path);
-        worktrees.iter().filter(|w| w.project_id == project_id).cloned().collect()
+        worktrees
+            .iter()
+            .filter(|w| w.project_id == project_id)
+            .cloned()
+            .collect()
     }
 
     pub async fn get(&self, id: &str) -> Option<WorktreeInfo> {
-        self.worktrees.read().await.iter().find(|w| w.id == id).cloned()
+        self.worktrees
+            .read()
+            .await
+            .iter()
+            .find(|w| w.id == id)
+            .cloned()
     }
 
     pub async fn remove(&self, id: &str, project_path: &PathBuf) -> Result<Option<WorktreeInfo>> {
@@ -85,7 +105,12 @@ impl WorktreeService {
 
         if let Some(wt) = worktree {
             let output = std::process::Command::new("git")
-                .args(["worktree", "remove", "--force", wt.directory.to_string_lossy().as_ref()])
+                .args([
+                    "worktree",
+                    "remove",
+                    "--force",
+                    wt.directory.to_string_lossy().as_ref(),
+                ])
                 .current_dir(project_path)
                 .output();
 
@@ -141,7 +166,11 @@ impl WorktreeService {
         }
     }
 
-    fn parse_worktree_list(&self, output: &str, project_path: &PathBuf) -> Result<Vec<WorktreeInfo>> {
+    fn parse_worktree_list(
+        &self,
+        output: &str,
+        project_path: &PathBuf,
+    ) -> Result<Vec<WorktreeInfo>> {
         let mut worktrees = Vec::new();
         let mut current_dir: Option<PathBuf> = None;
         let mut current_branch: Option<String> = None;
@@ -153,12 +182,12 @@ impl WorktreeService {
                 current_branch = Some(line[7..].trim().to_string());
             } else if line.is_empty() {
                 if let (Some(dir), Some(branch)) = (current_dir.take(), current_branch.take()) {
-                    let name = dir.file_name()
+                    let name = dir
+                        .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("unknown");
 
-                    let branch_name = branch.strip_prefix("refs/heads/")
-                        .unwrap_or(&branch);
+                    let branch_name = branch.strip_prefix("refs/heads/").unwrap_or(&branch);
 
                     worktrees.push(WorktreeInfo {
                         id: format!("{}_{}", WORKTREE_PREFIX, name),

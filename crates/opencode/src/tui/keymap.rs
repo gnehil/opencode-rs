@@ -1,4 +1,4 @@
-use crossterm::event::{KeyEvent, KeyModifiers, KeyCode};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone)]
 pub struct KeyBinding {
@@ -80,7 +80,8 @@ impl KeyMap {
     }
 
     pub fn get_action(&self, key: KeyEvent) -> Option<&str> {
-        self.bindings.iter()
+        self.bindings
+            .iter()
             .find(|b| b.key == key.code && b.modifiers == key.modifiers)
             .map(|b| b.action.as_str())
     }

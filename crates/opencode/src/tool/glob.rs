@@ -6,8 +6,8 @@ use serde_json::json;
 use walkdir::WalkDir;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::{GlobParams, Tool};
+use super::result::ToolResult;
 
 const LIMIT: usize = 100;
 
@@ -51,7 +51,10 @@ impl Tool for GlobTool {
             let search_dir = params.path.unwrap_or_else(|| ctx.working_dir.clone());
             let path = Path::new(&search_dir);
             if !path.exists() {
-                return Err(anyhow::anyhow!("Search directory not found: {}", search_dir.display()));
+                return Err(anyhow::anyhow!(
+                    "Search directory not found: {}",
+                    search_dir.display()
+                ));
             }
             if !path.is_dir() {
                 return Err(anyhow::anyhow!(
@@ -68,9 +71,7 @@ impl Tool for GlobTool {
                 }
 
                 let file_path = entry.path();
-                let relative = file_path
-                    .strip_prefix(&search_dir)
-                    .unwrap_or(file_path);
+                let relative = file_path.strip_prefix(&search_dir).unwrap_or(file_path);
                 let relative_str = relative.to_string_lossy().replace('\\', "/");
 
                 if glob_match(&params.pattern, &relative_str)

@@ -164,7 +164,10 @@ fn jsonc_to_json(value: jsonc_parser::ast::Value) -> anyhow::Result<serde_json::
         Value::Object(v) => {
             let mut map = serde_json::Map::new();
             for prop in v.properties {
-                map.insert(prop.name.value.as_ref().to_string(), jsonc_to_json(prop.value)?);
+                map.insert(
+                    prop.name.value.as_ref().to_string(),
+                    jsonc_to_json(prop.value)?,
+                );
             }
             serde_json::Value::Object(map)
         }
@@ -476,6 +479,31 @@ pub struct McpServerConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, String>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum McpOAuthConfig {
+    Enabled(bool),
+    Options(McpOAuthOptions),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpOAuthOptions {
+    #[serde(rename = "clientId", skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+
+    #[serde(rename = "clientSecret", skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+
+    #[serde(rename = "redirectUri", skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
 }
 
 impl McpServerConfig {
@@ -641,7 +669,9 @@ mod tests {
                     Some(&"pw:mcp".to_string())
                 );
             }
-            McpConfigEntry::Disabled { .. } => panic!("enabled local MCP must not parse as disabled-only entry"),
+            McpConfigEntry::Disabled { .. } => {
+                panic!("enabled local MCP must not parse as disabled-only entry")
+            }
         }
     }
 

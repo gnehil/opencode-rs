@@ -93,26 +93,17 @@ mod tests {
 
     #[test]
     fn semicolon_splits() {
-        assert_eq!(
-            split_commands("echo a ; echo b"),
-            vec!["echo a", "echo b"]
-        );
+        assert_eq!(split_commands("echo a ; echo b"), vec!["echo a", "echo b"]);
     }
 
     #[test]
     fn pipe_splits() {
-        assert_eq!(
-            split_commands("ls | grep foo"),
-            vec!["ls", "grep foo"]
-        );
+        assert_eq!(split_commands("ls | grep foo"), vec!["ls", "grep foo"]);
     }
 
     #[test]
     fn double_pipe_splits() {
-        assert_eq!(
-            split_commands("false || true"),
-            vec!["false", "true"]
-        );
+        assert_eq!(split_commands("false || true"), vec!["false", "true"]);
     }
 
     #[test]
@@ -121,18 +112,12 @@ mod tests {
             split_commands(r#"echo "a; b && c""#),
             vec![r#"echo "a; b && c""#]
         );
-        assert_eq!(
-            split_commands("echo 'a | b'"),
-            vec!["echo 'a | b'"]
-        );
+        assert_eq!(split_commands("echo 'a | b'"), vec!["echo 'a | b'"]);
     }
 
     #[test]
     fn escaped_operator_does_not_split() {
-        assert_eq!(
-            split_commands(r"echo \&\& done"),
-            vec![r"echo \&\& done"]
-        );
+        assert_eq!(split_commands(r"echo \&\& done"), vec![r"echo \&\& done"]);
     }
 
     #[test]

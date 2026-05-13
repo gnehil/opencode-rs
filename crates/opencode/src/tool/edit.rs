@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::{EditParams, Tool};
+use super::result::ToolResult;
 
 pub struct EditTool;
 

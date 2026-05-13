@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use thiserror::Error;
 use glob_match::glob_match;
+use thiserror::Error;
 use tokio::fs::{self, DirEntry};
 use walkdir::WalkDir;
 

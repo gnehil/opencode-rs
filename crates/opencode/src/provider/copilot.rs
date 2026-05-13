@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use reqwest::Client;
 use lazy_static::lazy_static;
+use reqwest::Client;
 
 use super::id::ModelID;
 use super::model::ModelInfo;
@@ -62,7 +62,10 @@ pub struct GitHubCopilotProvider {
 
 impl GitHubCopilotProvider {
     pub fn new(token: String) -> Self {
-        Self { client: Client::new(), token }
+        Self {
+            client: Client::new(),
+            token,
+        }
     }
 
     pub fn from_env() -> ProviderResult<Self> {
@@ -75,17 +78,28 @@ impl GitHubCopilotProvider {
 
 #[async_trait]
 impl Provider for GitHubCopilotProvider {
-    fn name(&self) -> &str { "github-copilot" }
-    fn default_model(&self) -> Option<&ModelInfo> { MODELS.first() }
-    fn models(&self) -> &[ModelInfo] { &MODELS }
+    fn name(&self) -> &str {
+        "github-copilot"
+    }
+    fn default_model(&self) -> Option<&ModelInfo> {
+        MODELS.first()
+    }
+    fn models(&self) -> &[ModelInfo] {
+        &MODELS
+    }
 
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let model = request.model.to_string();
-        let messages: Vec<serde_json::Value> = request.messages.iter().map(crate::provider::openai_compat_message_json).collect();
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(crate::provider::openai_compat_message_json)
+            .collect();
 
         let body = serde_json::json!({ "model": model, "messages": messages, "max_tokens": request.max_tokens.unwrap_or(4096) });
 
-        let response = self.client
+        let response = self
+            .client
             .post(API_URL)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Content-Type", "application/json")
@@ -96,17 +110,29 @@ impl Provider for GitHubCopilotProvider {
             .await
             .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
-        let data: serde_json::Value = response.json().await.map_err(|e| ProviderError::api(0, e.to_string()))?;
+        let data: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
         Ok(CompletionResponse {
-            content: data["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string(),
+            content: data["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
             tool_calls: vec![],
             usage: TokenUsage {
                 input: data["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
                 output: data["usage"]["completion_tokens"].as_u64().unwrap_or(0),
-                cache_read: None, cache_write: None,
+                cache_read: None,
+                cache_write: None,
             },
-            stop_reason: Some(data["choices"][0]["finish_reason"].as_str().unwrap_or("stop").to_string()),
+            stop_reason: Some(
+                data["choices"][0]["finish_reason"]
+                    .as_str()
+                    .unwrap_or("stop")
+                    .to_string(),
+            ),
             model: model.clone(),
         })
     }
@@ -125,7 +151,10 @@ impl Provider for GitHubCopilotProvider {
             "stream": true,
         });
         let mut headers = std::collections::HashMap::new();
-        headers.insert("Authorization".to_string(), format!("Bearer {}", self.token));
+        headers.insert(
+            "Authorization".to_string(),
+            format!("Bearer {}", self.token),
+        );
         crate::provider::openai_sse::stream_openai_sse(
             self.client.clone(),
             API_URL.to_string(),

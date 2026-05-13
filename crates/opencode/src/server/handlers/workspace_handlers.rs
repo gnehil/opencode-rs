@@ -1,8 +1,8 @@
 use axum::{
-    extract::{State, Path, Json, Query},
+    extract::{Json, Path, Query, State},
     http::StatusCode,
 };
-use serde::{Deserialize};
+use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 

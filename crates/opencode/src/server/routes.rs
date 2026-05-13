@@ -1,15 +1,15 @@
 use axum::{
-    routing::{get, post, put, delete, patch},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 
+use crate::server::handlers::session_handlers::AppState;
 use crate::server::handlers::{
-    session_handlers, message_handlers, event_handlers, config_handlers, 
-    file_handlers, mcp_handlers, global_handlers, agent_handlers, 
-    instance_handlers, permission_handlers, tui_handlers, workspace_handlers
+    agent_handlers, config_handlers, event_handlers, file_handlers, global_handlers,
+    instance_handlers, mcp_handlers, message_handlers, permission_handlers, session_handlers,
+    tui_handlers, workspace_handlers,
 };
 use crate::server::middleware::cors_layer;
-use crate::server::handlers::session_handlers::AppState;
 
 pub fn create_router(data_dir: std::path::PathBuf) -> Router {
     let app_state = std::sync::Arc::new(AppState::new(data_dir));
@@ -32,12 +32,30 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/api/session/:id", get(session_handlers::get_session))
         .route("/api/session/:id", put(session_handlers::update_session))
         .route("/api/session/:id", delete(session_handlers::delete_session))
-        .route("/api/session/:id/archive", post(session_handlers::archive_session))
-        .route("/api/session/:id/fork", post(session_handlers::fork_session))
-        .route("/api/session/:id/children", get(session_handlers::session_children))
-        .route("/api/session/:id/revert", post(session_handlers::revert_message))
-        .route("/api/session/:id/abort", post(session_handlers::abort_session))
-        .route("/api/session/:id/messages", get(message_handlers::list_messages))
+        .route(
+            "/api/session/:id/archive",
+            post(session_handlers::archive_session),
+        )
+        .route(
+            "/api/session/:id/fork",
+            post(session_handlers::fork_session),
+        )
+        .route(
+            "/api/session/:id/children",
+            get(session_handlers::session_children),
+        )
+        .route(
+            "/api/session/:id/revert",
+            post(session_handlers::revert_message),
+        )
+        .route(
+            "/api/session/:id/abort",
+            post(session_handlers::abort_session),
+        )
+        .route(
+            "/api/session/:id/messages",
+            get(message_handlers::list_messages),
+        )
         .route("/api/session/:id/prompt", post(message_handlers::prompt))
         // Aliases matching opencode's official server API shape.
         // `/session/:id/message` is the canonical send-and-wait route;
@@ -55,7 +73,10 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/file/status", get(file_handlers::git_status))
         .route("/find", get(file_handlers::find_text))
         .route("/find/file", get(file_handlers::list_files))
-        .route("/mcp", get(mcp_handlers::mcp_status).post(mcp_handlers::mcp_add))
+        .route(
+            "/mcp",
+            get(mcp_handlers::mcp_status).post(mcp_handlers::mcp_add),
+        )
         .route("/mcp/:name/connect", post(mcp_handlers::mcp_connect))
         .route("/mcp/:name/disconnect", post(mcp_handlers::mcp_disconnect))
         .route("/mcp/resources", get(mcp_handlers::mcp_list_resources))
@@ -66,11 +87,23 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/skill", get(instance_handlers::skill_list))
         .route("/path", get(instance_handlers::path_info))
         .route("/permission", get(permission_handlers::list_permissions))
-        .route("/permission/:request_id/reply", post(permission_handlers::reply_permission))
-        .route("/permission/:request_id/reject", post(permission_handlers::reject_permission))
+        .route(
+            "/permission/:request_id/reply",
+            post(permission_handlers::reply_permission),
+        )
+        .route(
+            "/permission/:request_id/reject",
+            post(permission_handlers::reject_permission),
+        )
         .route("/question", get(permission_handlers::list_questions))
-        .route("/question/:request_id/reply", post(permission_handlers::reply_question))
-        .route("/question/:request_id/reject", post(permission_handlers::reject_question))
+        .route(
+            "/question/:request_id/reply",
+            post(permission_handlers::reply_question),
+        )
+        .route(
+            "/question/:request_id/reject",
+            post(permission_handlers::reject_question),
+        )
         .route("/tui/append-prompt", post(tui_handlers::append_prompt))
         .route("/tui/submit-prompt", post(tui_handlers::submit_prompt))
         .route("/tui/clear-prompt", post(tui_handlers::clear_prompt))
@@ -84,8 +117,14 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/tui/control/response", post(tui_handlers::tui_response))
         .route("/workspace", get(workspace_handlers::list_workspaces))
         .route("/workspace", post(workspace_handlers::create_workspace))
-        .route("/workspace/:id", delete(workspace_handlers::remove_workspace))
-        .route("/workspace/status", get(workspace_handlers::workspace_status))
+        .route(
+            "/workspace/:id",
+            delete(workspace_handlers::remove_workspace),
+        )
+        .route(
+            "/workspace/status",
+            get(workspace_handlers::workspace_status),
+        )
         .route("/sync/start", post(workspace_handlers::sync_start))
         .route("/sync/history", get(workspace_handlers::sync_history))
         .route("/sync/replay", post(workspace_handlers::sync_replay))

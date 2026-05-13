@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use reqwest::Client;
 use lazy_static::lazy_static;
+use reqwest::Client;
 
 use super::id::ModelID;
 use super::model::ModelInfo;
@@ -9,28 +9,26 @@ use super::response::{CompletionResponse, StreamEvent, TokenUsage, ToolCall};
 use super::trait_::{EventStream, Provider, ProviderError, ProviderResult};
 
 lazy_static! {
-    static ref MODELS: Vec<ModelInfo> = vec![
-        ModelInfo {
-            id: Some(ModelID::new("code-assistant")),
-            name: Some("GitLab Code Assistant".to_string()),
-            family: Some("gitlab".to_string()),
-            reasoning: Some(false),
-            tool_call: Some(true),
-            attachment: Some(false),
-            temperature: Some(true),
-            interleaved: None,
-            cost: None,
-            limit: None,
-            modalities: None,
-            experimental: None,
-            release_date: None,
-            status: Some("active".to_string()),
-            provider: None,
-            options: None,
-            headers: None,
-            variants: None,
-        },
-    ];
+    static ref MODELS: Vec<ModelInfo> = vec![ModelInfo {
+        id: Some(ModelID::new("code-assistant")),
+        name: Some("GitLab Code Assistant".to_string()),
+        family: Some("gitlab".to_string()),
+        reasoning: Some(false),
+        tool_call: Some(true),
+        attachment: Some(false),
+        temperature: Some(true),
+        interleaved: None,
+        cost: None,
+        limit: None,
+        modalities: None,
+        experimental: None,
+        release_date: None,
+        status: Some("active".to_string()),
+        provider: None,
+        options: None,
+        headers: None,
+        variants: None,
+    },];
 }
 
 pub struct GitLabProvider {
@@ -50,26 +48,36 @@ impl GitLabProvider {
 
     pub fn from_env() -> ProviderResult<Self> {
         let base_url = std::env::var("GITLAB_BASE_URL").ok();
-        let token = std::env::var("GITLAB_TOKEN")
-            .map_err(|_| ProviderError::MissingApiKey)?;
+        let token = std::env::var("GITLAB_TOKEN").map_err(|_| ProviderError::MissingApiKey)?;
         Ok(Self::new(base_url, token))
     }
 }
 
 #[async_trait]
 impl Provider for GitLabProvider {
-    fn name(&self) -> &str { "gitlab" }
-    fn default_model(&self) -> Option<&ModelInfo> { MODELS.first() }
-    fn models(&self) -> &[ModelInfo] { &MODELS }
+    fn name(&self) -> &str {
+        "gitlab"
+    }
+    fn default_model(&self) -> Option<&ModelInfo> {
+        MODELS.first()
+    }
+    fn models(&self) -> &[ModelInfo] {
+        &MODELS
+    }
 
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let url = format!("{}/api/v4/chat/completions", self.base_url);
         let model = request.model.to_string();
-        let messages: Vec<serde_json::Value> = request.messages.iter().map(crate::provider::openai_compat_message_json).collect();
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(crate::provider::openai_compat_message_json)
+            .collect();
 
         let body = serde_json::json!({ "model": model, "messages": messages, "max_tokens": request.max_tokens.unwrap_or(4096) });
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Content-Type", "application/json")
@@ -78,12 +86,23 @@ impl Provider for GitLabProvider {
             .await
             .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
-        let data: serde_json::Value = response.json().await.map_err(|e| ProviderError::api(0, e.to_string()))?;
+        let data: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
         Ok(CompletionResponse {
-            content: data["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string(),
+            content: data["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
             tool_calls: vec![],
-            usage: TokenUsage { input: 0, output: 0, cache_read: None, cache_write: None },
+            usage: TokenUsage {
+                input: 0,
+                output: 0,
+                cache_read: None,
+                cache_write: None,
+            },
             stop_reason: Some("stop".to_string()),
             model: model.clone(),
         })
@@ -104,12 +123,10 @@ impl Provider for GitLabProvider {
             "stream": true,
         });
         let mut headers = std::collections::HashMap::new();
-        headers.insert("Authorization".to_string(), format!("Bearer {}", self.token));
-        crate::provider::openai_sse::stream_openai_sse(
-            self.client.clone(),
-            url,
-            headers,
-            body,
-        )
+        headers.insert(
+            "Authorization".to_string(),
+            format!("Bearer {}", self.token),
+        );
+        crate::provider::openai_sse::stream_openai_sse(self.client.clone(), url, headers, body)
     }
 }

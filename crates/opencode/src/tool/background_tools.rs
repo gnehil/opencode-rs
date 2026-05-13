@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 #[derive(Debug, Deserialize)]
 pub struct BackgroundOutputParams {
@@ -89,17 +89,19 @@ impl Tool for BackgroundOutputTool {
             let data_dir = std::env::var("OPENCODE_DATA_DIR")
                 .ok()
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| dirs::data_local_dir()
-                    .map(|p| p.join("opencode"))
-                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode")));
+                .unwrap_or_else(|| {
+                    dirs::data_local_dir()
+                        .map(|p| p.join("opencode"))
+                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode"))
+                });
 
             let store = std::sync::Arc::new(crate::session::SessionStore::new(data_dir).await?);
-            
+
             let session_id = crate::id::SessionID::parse(&params.task_id)
                 .map_err(|_| anyhow::anyhow!("Invalid task_id format"))?;
-            
+
             let with_parts = store.get_messages_with_parts(&session_id).await?;
-            
+
             let message_limit = params.message_limit.unwrap_or(100);
             let messages: Vec<String> = with_parts
                 .iter()
@@ -109,12 +111,14 @@ impl Tool for BackgroundOutputTool {
                         crate::message::Message::User(_) => "user",
                         crate::message::Message::Assistant(_) => "assistant",
                     };
-                    
+
                     let mut content_parts: Vec<String> = Vec::new();
                     for part in wp.parts.iter() {
                         match part {
                             crate::message::Part::Text(t) => content_parts.push(t.text.clone()),
-                            crate::message::Part::Reasoning(r) if params.include_thinking.unwrap_or(false) => {
+                            crate::message::Part::Reasoning(r)
+                                if params.include_thinking.unwrap_or(false) =>
+                            {
                                 content_parts.push(format!("[thinking] {}", r.text));
                             }
                             crate::message::Part::Tool(t) => {
@@ -128,13 +132,17 @@ impl Tool for BackgroundOutputTool {
                 .collect();
 
             Ok(ToolResult::with_metadata(
-                format!("Task {}\nStatus: completed\nMessages: {}\n\n{}", 
-                    params.task_id, messages.len(), messages.join("\n")),
+                format!(
+                    "Task {}\nStatus: completed\nMessages: {}\n\n{}",
+                    params.task_id,
+                    messages.len(),
+                    messages.join("\n")
+                ),
                 json!({
                     "task_id": params.task_id,
                     "status": "completed",
                     "message_count": messages.len(),
-                })
+                }),
             ))
         })
     }
@@ -189,10 +197,12 @@ impl Tool for BackgroundCancelTool {
             } else if let Some(task_id) = params.task_id {
                 Ok(ToolResult::with_metadata(
                     format!("Cancelled task {}", task_id),
-                    json!({ "task_id": task_id, "cancelled": true })
+                    json!({ "task_id": task_id, "cancelled": true }),
                 ))
             } else {
-                Err(anyhow::anyhow!("Either task_id or all=true must be provided"))
+                Err(anyhow::anyhow!(
+                    "Either task_id or all=true must be provided"
+                ))
             }
         })
     }

@@ -1,12 +1,12 @@
 use axum::{
-    extract::{Path, State, Json},
+    extract::{Json, Path, State},
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::bus::EventBus;
-use crate::id::SessionID;
+use crate::id::{MessageID, PartID, SessionID};
 use crate::session::SessionStore;
 use crate::storage::SessionRow;
 
@@ -73,6 +73,10 @@ impl AppState {
     pub async fn get_store(&self) -> SessionStore {
         SessionStore::new(self.data_dir.clone()).await.unwrap()
     }
+
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        self.data_dir.clone()
+    }
 }
 
 #[derive(Deserialize)]
@@ -112,8 +116,13 @@ pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<SessionResponse>>, StatusCode> {
     let store = state.get_store().await;
-    let sessions = store.list(None).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(sessions.into_iter().map(SessionResponse::from).collect()))
+    let sessions = store
+        .list(None)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        sessions.into_iter().map(SessionResponse::from).collect(),
+    ))
 }
 
 pub async fn create_session(
@@ -122,10 +131,15 @@ pub async fn create_session(
 ) -> Result<Json<SessionResponse>, StatusCode> {
     let store = state.get_store().await;
     let mut session = store
-        .create(&body.title, &body.project_id, &std::path::PathBuf::from(&body.directory))
+        .create(
+            &body.title,
+            &body.project_id,
+            &std::path::PathBuf::from(&body.directory),
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let session_id = SessionID::parse(&session.id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let session_id =
+        SessionID::parse(&session.id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if let Some(agent) = &state.default_agent {
         store
             .set_agent(&session_id, agent)
@@ -152,7 +166,10 @@ pub async fn get_session(
 ) -> Result<Json<SessionResponse>, StatusCode> {
     let store = state.get_store().await;
     let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let session = store.get(&session_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let session = store
+        .get(&session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     match session {
         Some(s) => Ok(Json(SessionResponse::from(s))),
         None => Err(StatusCode::NOT_FOUND),
@@ -166,18 +183,30 @@ pub async fn update_session(
 ) -> Result<Json<SessionResponse>, StatusCode> {
     let store = state.get_store().await;
     let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
+
     if let Some(title) = body.title {
-        store.update_title(&session_id, &title).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        store
+            .update_title(&session_id, &title)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
     if let Some(agent) = body.agent {
-        store.set_agent(&session_id, &agent).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        store
+            .set_agent(&session_id, &agent)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
     if let Some(model) = body.model {
-        store.set_model(&session_id, &model).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        store
+            .set_model(&session_id, &model)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
-    let session = store.get(&session_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let session = store
+        .get(&session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     match session {
         Some(s) => {
             state
@@ -195,7 +224,10 @@ pub async fn delete_session(
 ) -> Result<StatusCode, StatusCode> {
     let store = state.get_store().await;
     let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    store.delete(&session_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    store
+        .delete(&session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     state
         .event_bus
         .publish(crate::bus::Event::session_delete(&id));
@@ -208,7 +240,10 @@ pub async fn archive_session(
 ) -> Result<StatusCode, StatusCode> {
     let store = state.get_store().await;
     let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    store.archive(&session_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    store
+        .archive(&session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     state
         .event_bus
         .publish(crate::bus::Event::session_update(&id));
@@ -227,13 +262,20 @@ pub async fn fork_session(
 ) -> Result<Json<SessionResponse>, StatusCode> {
     let store = state.get_store().await;
     let parent_session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    let parent = store.get(&parent_session_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let parent = store
+        .get(&parent_session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     match parent {
         Some(p) => {
             let new_title = body.title.unwrap_or_else(|| format!("{} (fork)", p.title));
             let session = store
-                .create(&new_title, &p.project_id, &std::path::PathBuf::from(&p.directory))
+                .create(
+                    &new_title,
+                    &p.project_id,
+                    &std::path::PathBuf::from(&p.directory),
+                )
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             Ok(Json(SessionResponse::from(session)))
@@ -274,18 +316,42 @@ pub async fn session_children(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RevertBody {
+    #[serde(alias = "message_id")]
     pub message_id: String,
+    #[serde(default, alias = "part_id")]
+    pub part_id: Option<String>,
 }
 
-/// Revert is not implemented in the storage layer yet. Return 501 rather
-/// than pretending to succeed.
 pub async fn revert_message(
-    State(_state): State<Arc<AppState>>,
-    Path(_id): Path<String>,
-    Json(_body): Json<RevertBody>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    Err(StatusCode::NOT_IMPLEMENTED)
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<RevertBody>,
+) -> Result<Json<SessionResponse>, StatusCode> {
+    let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let message_id = MessageID::parse(&body.message_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let part_id = body
+        .part_id
+        .as_deref()
+        .map(PartID::parse)
+        .transpose()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let store = state.get_store().await;
+    match store
+        .revert_to_message(&session_id, &message_id, part_id.as_ref())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        Some(session) => {
+            state
+                .event_bus
+                .publish(crate::bus::Event::session_update(&id));
+            Ok(Json(SessionResponse::from(session)))
+        }
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 /// Abort signals any in-flight processing for the session. There is no

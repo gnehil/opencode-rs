@@ -1,5 +1,5 @@
 use axum::{
-    extract::{State, Query},
+    extract::{Query, State},
     http::StatusCode,
     Json,
 };
@@ -28,9 +28,15 @@ pub struct FindQuery {
 /// client can't escape just by leading with a `/`.
 pub fn resolve_inside_root(root: &Path, supplied: &str) -> Result<PathBuf, StatusCode> {
     let trimmed = supplied.trim_start_matches('/');
-    let candidate = if trimmed.is_empty() { root.to_path_buf() } else { root.join(trimmed) };
+    let candidate = if trimmed.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(trimmed)
+    };
 
-    let canonical = candidate.canonicalize().map_err(|_| StatusCode::NOT_FOUND)?;
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|_| StatusCode::NOT_FOUND)?;
     let root_canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
 
     if !canonical.starts_with(&root_canonical) {
@@ -77,7 +83,8 @@ pub async fn read_file(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let content = std::fs::read_to_string(&path_buf).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let content =
+        std::fs::read_to_string(&path_buf).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({
         "path": path_buf.to_string_lossy(),
         "content": content,

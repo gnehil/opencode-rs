@@ -1,6 +1,6 @@
-use std::path::PathBuf;
-use std::collections::HashSet;
 use glob_match;
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 pub struct IgnoreMatcher {
     patterns: Vec<IgnorePattern>,
@@ -25,7 +25,7 @@ impl IgnoreMatcher {
     pub fn from_gitignore(root: PathBuf) -> anyhow::Result<Self> {
         let gitignore_path = root.join(".gitignore");
         let mut matcher = Self::new(root);
-        
+
         if gitignore_path.exists() {
             let content = std::fs::read_to_string(&gitignore_path)?;
             matcher.parse_gitignore(&content);
@@ -124,7 +124,8 @@ impl IgnoreMatcher {
     }
 
     pub fn filter_files(&self, paths: &[PathBuf]) -> Vec<PathBuf> {
-        paths.iter()
+        paths
+            .iter()
             .filter(|p| !self.is_ignored(p))
             .cloned()
             .collect()

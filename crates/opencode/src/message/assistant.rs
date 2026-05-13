@@ -36,7 +36,9 @@ pub struct PathInfo {
     pub root: String,
 }
 
-fn assistant_role_default() -> String { "assistant".to_string() }
+fn assistant_role_default() -> String {
+    "assistant".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

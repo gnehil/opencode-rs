@@ -1,5 +1,8 @@
 pub mod args;
 mod local;
+pub(crate) mod local_process;
+pub(crate) mod mcp_cli;
+pub(crate) mod provider_auth;
 
 use clap::{CommandFactory, Parser};
 use std::net::SocketAddr;
@@ -62,7 +65,7 @@ pub async fn run_async() {
             exit_on_error(local::handle_uninstall(uninstall_args, data_dir));
         }
         Some(args::Commands::Models(models_args)) => {
-            handle_models(models_args).await;
+            handle_models(models_args, data_dir).await;
         }
         Some(args::Commands::Serve(network_args)) => {
             handle_serve(network_args, data_dir, false).await;
@@ -92,7 +95,7 @@ pub async fn run_async() {
             exit_on_error(local::handle_pr(pr_args));
         }
         Some(args::Commands::Providers { subcommand }) => {
-            handle_providers(subcommand).await;
+            handle_providers(subcommand, data_dir).await;
         }
         Some(args::Commands::Plugin(plugin_args)) => {
             exit_on_error(local::handle_plugin(plugin_args));
@@ -104,7 +107,7 @@ pub async fn run_async() {
             handle_acp(acp_args, data_dir).await;
         }
         Some(args::Commands::Attach(attach_args)) => {
-            exit_on_error(local::handle_attach(attach_args));
+            exit_on_error(local::handle_attach(attach_args).await);
         }
         None => {
             handle_tui(
@@ -177,10 +180,12 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
 
     let message = args.message.join(" ");
 
-    let store = SessionStore::new(data_dir).await.unwrap_or_else(|e| {
-        eprintln!("Failed to initialize database: {}", e);
-        std::process::exit(1);
-    });
+    let store = SessionStore::new(data_dir.clone())
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to initialize database: {}", e);
+            std::process::exit(1);
+        });
 
     let project_config = match crate::config::load_project_config(&project_path) {
         Ok(config) => config,
@@ -251,11 +256,16 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
         })
         .or(env_model.as_deref());
 
-    let provider = build_provider_from_model_config_or_env(selected_model, project_config.as_ref())
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to initialize provider: {}", e);
-            std::process::exit(1);
-        });
+    let credentials = load_provider_credentials(&data_dir);
+    let provider = build_provider_from_model_config_auth_or_env(
+        selected_model,
+        project_config.as_ref(),
+        Some(&credentials),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Failed to initialize provider: {}", e);
+        std::process::exit(1);
+    });
 
     println!("Using provider: {}", provider.name());
     println!(
@@ -357,11 +367,14 @@ async fn handle_session(subcommand: args::SessionSubcommand, data_dir: PathBuf) 
     }
 }
 
-async fn handle_models(args: args::ModelsArgs) {
-    let provider = build_provider_from_model_or_env(args.provider.as_deref()).unwrap_or_else(|e| {
-        eprintln!("Failed to initialize provider: {}", e);
-        std::process::exit(1);
-    });
+async fn handle_models(args: args::ModelsArgs, data_dir: PathBuf) {
+    let credentials = load_provider_credentials(&data_dir);
+    let provider =
+        build_provider_from_model_auth_or_env(args.provider.as_deref(), Some(&credentials))
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to initialize provider: {}", e);
+                std::process::exit(1);
+            });
 
     println!("Provider: {}", provider.name());
     println!("Models:");
@@ -372,9 +385,11 @@ async fn handle_models(args: args::ModelsArgs) {
     }
 }
 
-async fn handle_providers(subcommand: args::ProvidersSubcommand) {
+async fn handle_providers(subcommand: args::ProvidersSubcommand, data_dir: PathBuf) {
+    let store = provider_auth::ProviderAuthStore::new(data_dir);
     match subcommand {
         args::ProvidersSubcommand::List => {
+            let credentials = store.load().unwrap_or_default();
             println!("Available providers:");
             println!("  anthropic - Anthropic (Claude)");
             println!("  openai - OpenAI (GPT)");
@@ -385,28 +400,111 @@ async fn handle_providers(subcommand: args::ProvidersSubcommand) {
             println!("  mistral - Mistral");
             println!("  xai - xAI");
             println!("  ollama - Ollama (local)");
+            println!();
+            println!("Credential store: {}", store.auth_path().display());
+            if credentials.is_empty() {
+                println!("Stored credentials: none");
+            } else {
+                println!("Stored credentials:");
+                for (provider, credential) in credentials {
+                    let kind = match credential {
+                        provider_auth::ProviderCredential::Api { .. } => "api-key",
+                        provider_auth::ProviderCredential::Wellknown { .. } => "well-known",
+                        provider_auth::ProviderCredential::Oauth { .. } => "oauth",
+                    };
+                    println!("  {} ({})", provider, kind);
+                }
+            }
         }
         args::ProvidersSubcommand::Login {
             url,
             provider,
             method,
         } => {
-            let provider_name = provider.unwrap_or_else(|| "default".to_string());
-            println!("Provider: {}", provider_name);
-            if let Some(url) = url {
-                println!("URL: {}", url);
+            if let Some(method) = method.as_deref() {
+                eprintln!("Login method: {}", method);
             }
-            if let Some(method) = method {
-                println!("Method: {}", method);
+            let mode =
+                provider_auth::choose_provider_login_mode(url.as_deref(), provider.as_deref())
+                    .unwrap_or_else(|e| {
+                        eprintln!("Invalid provider login target: {}", e);
+                        std::process::exit(1);
+                    });
+            let mut credentials = store.load().unwrap_or_default();
+            match mode {
+                provider_auth::ProviderLoginMode::ApiKey { provider } => {
+                    let provider_id = normalize_provider_id(&provider);
+                    let key = provider_login_api_key(&provider_id).unwrap_or_else(|| {
+                        eprintln!(
+                            "No API key found for {}. Set OPENCODE_PROVIDER_API_KEY or one of: {}",
+                            provider_id,
+                            provider_api_key_env_names(&provider_id).join(", ")
+                        );
+                        std::process::exit(1);
+                    });
+                    let credential = provider_auth::api_key_credential(&key).unwrap_or_else(|e| {
+                        eprintln!("Invalid provider API key: {}", e);
+                        std::process::exit(1);
+                    });
+                    credentials.insert(provider_id.clone(), credential);
+                    store.save(&credentials).unwrap_or_else(|e| {
+                        eprintln!("Failed to save provider credentials: {}", e);
+                        std::process::exit(1);
+                    });
+                    println!("Saved credentials for provider '{}'.", provider_id);
+                }
+                provider_auth::ProviderLoginMode::WellKnownUrl { base_url } => {
+                    let client = reqwest::Client::new();
+                    let metadata = provider_auth::fetch_well_known_metadata(&client, &base_url)
+                        .await
+                        .unwrap_or_else(|e| {
+                            eprintln!("Failed to fetch provider metadata from {}: {}", base_url, e);
+                            std::process::exit(1);
+                        });
+                    let token = provider_auth::run_well_known_auth_command(&metadata.auth.command)
+                        .await
+                        .unwrap_or_else(|e| {
+                            eprintln!("Failed to run provider auth command: {}", e);
+                            std::process::exit(1);
+                        });
+                    let credential =
+                        provider_auth::well_known_credential(&metadata.auth.env, &token)
+                            .unwrap_or_else(|e| {
+                                eprintln!("Invalid provider auth response: {}", e);
+                                std::process::exit(1);
+                            });
+                    credentials.insert(base_url.clone(), credential);
+                    store.save(&credentials).unwrap_or_else(|e| {
+                        eprintln!("Failed to save provider credentials: {}", e);
+                        std::process::exit(1);
+                    });
+                    println!("Saved well-known provider credentials for {}.", base_url);
+                }
+                provider_auth::ProviderLoginMode::SelectProvider => {
+                    eprintln!("Specify a provider with --provider, or pass a provider login URL.");
+                    std::process::exit(1);
+                }
             }
-            println!("Set the provider API key in opencode.json or the provider-specific environment variable.");
         }
         args::ProvidersSubcommand::Logout { provider } => {
-            let provider_name = provider.unwrap_or_else(|| "default".to_string());
-            println!(
-                "Provider logout for {} is local-only: remove its key from opencode.json or unset the environment variable.",
-                provider_name
-            );
+            let mut credentials = store.load().unwrap_or_default();
+            if let Some(provider) = provider {
+                let provider_id = normalize_provider_id(&provider);
+                credentials.remove(&provider_id);
+                credentials.remove(provider.trim());
+                store.save(&credentials).unwrap_or_else(|e| {
+                    eprintln!("Failed to save provider credentials: {}", e);
+                    std::process::exit(1);
+                });
+                println!("Removed stored credentials for provider '{}'.", provider_id);
+            } else {
+                credentials.clear();
+                store.save(&credentials).unwrap_or_else(|e| {
+                    eprintln!("Failed to save provider credentials: {}", e);
+                    std::process::exit(1);
+                });
+                println!("Removed all stored provider credentials.");
+            }
         }
     }
 }
@@ -431,6 +529,7 @@ async fn handle_serve(args: args::NetworkArgs, data_dir: PathBuf, open_web: bool
             std::process::exit(1);
         });
 
+    let credential_dir = data_dir.clone();
     let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut state = crate::server::AppState::new(data_dir).with_workspace_root(workspace_root);
 
@@ -459,7 +558,12 @@ async fn handle_serve(args: args::NetworkArgs, data_dir: PathBuf, open_web: bool
     let selected_model = project_config
         .as_ref()
         .and_then(|config| config.model.as_deref());
-    match try_build_provider_from_config_or_env(selected_model, project_config.as_ref()) {
+    let credentials = load_provider_credentials(&credential_dir);
+    match try_build_provider_from_config_auth_or_env(
+        selected_model,
+        project_config.as_ref(),
+        Some(&credentials),
+    ) {
         Ok(Some(provider)) => {
             eprintln!("Using provider: {}", provider.name());
             state = state.with_provider(provider);
@@ -567,13 +671,36 @@ fn infer_provider_id(model: Option<&str>, has_anthropic_key: bool, has_openai_ke
     "anthropic".to_string()
 }
 
+type ProviderCredentials = std::collections::BTreeMap<String, provider_auth::ProviderCredential>;
+
+fn load_provider_credentials(data_dir: &PathBuf) -> ProviderCredentials {
+    provider_auth::ProviderAuthStore::new(data_dir.clone())
+        .load()
+        .unwrap_or_default()
+}
+
 fn build_provider_from_model_or_env(model: Option<&str>) -> anyhow::Result<Arc<dyn Provider>> {
-    build_provider_from_model_config_or_env(model, None)
+    build_provider_from_model_auth_or_env(model, None)
+}
+
+fn build_provider_from_model_auth_or_env(
+    model: Option<&str>,
+    credentials: Option<&ProviderCredentials>,
+) -> anyhow::Result<Arc<dyn Provider>> {
+    build_provider_from_model_config_auth_or_env(model, None, credentials)
 }
 
 fn build_provider_from_model_config_or_env(
     model: Option<&str>,
     config: Option<&Config>,
+) -> anyhow::Result<Arc<dyn Provider>> {
+    build_provider_from_model_config_auth_or_env(model, config, None)
+}
+
+fn build_provider_from_model_config_auth_or_env(
+    model: Option<&str>,
+    config: Option<&Config>,
+    credentials: Option<&ProviderCredentials>,
 ) -> anyhow::Result<Arc<dyn Provider>> {
     let env_model = std::env::var("OPENCODE_MODEL").ok();
     let model = model.or(env_model.as_deref());
@@ -583,6 +710,7 @@ fn build_provider_from_model_config_or_env(
         .and_then(|p| provider_id_from_model(Some(p)))
         .or_else(|| provider_id_from_model(model))
         .or_else(|| provider_id_from_config(config))
+        .or_else(|| provider_id_from_credentials(credentials))
         .or_else(provider_id_from_configured_env)
         .unwrap_or_else(|| {
             infer_provider_id(
@@ -591,7 +719,11 @@ fn build_provider_from_model_config_or_env(
                 std::env::var_os("OPENAI_API_KEY").is_some(),
             )
         });
-    if let Some(provider) = build_provider_from_config(&provider_id, config)? {
+    if let Some(provider) = build_provider_from_config_with_auth(&provider_id, config, credentials)?
+    {
+        return Ok(provider);
+    }
+    if let Some(provider) = build_provider_from_auth(&provider_id, credentials)? {
         return Ok(provider);
     }
     build_provider_from_env(&provider_id)
@@ -642,6 +774,14 @@ fn build_provider_from_config(
     provider_id: &str,
     config: Option<&Config>,
 ) -> anyhow::Result<Option<Arc<dyn Provider>>> {
+    build_provider_from_config_with_auth(provider_id, config, None)
+}
+
+fn build_provider_from_config_with_auth(
+    provider_id: &str,
+    config: Option<&Config>,
+    credentials: Option<&ProviderCredentials>,
+) -> anyhow::Result<Option<Arc<dyn Provider>>> {
     let provider_id = normalize_provider_id(provider_id);
     let Some((entry_id, entry)) = configured_provider_entry(config, &provider_id) else {
         return Ok(None);
@@ -649,9 +789,41 @@ fn build_provider_from_config(
     let runtime_provider_id = provider_runtime_id(entry_id, entry);
     let configured_provider_id = normalize_provider_id(entry_id);
 
-    let api_key = provider_api_key_from_config_entry(entry);
+    let api_key = provider_api_key_from_config_entry(entry)
+        .or_else(|| provider_api_key_from_credentials(&provider_id, credentials))
+        .or_else(|| provider_api_key_from_credentials(&configured_provider_id, credentials));
     let base_url = provider_base_url_from_config_entry(entry);
-    let provider: Option<Arc<dyn Provider>> = match runtime_provider_id.as_str() {
+    Ok(build_provider_from_parts(
+        runtime_provider_id.as_str(),
+        configured_provider_id,
+        api_key,
+        base_url,
+    ))
+}
+
+fn build_provider_from_auth(
+    provider_id: &str,
+    credentials: Option<&ProviderCredentials>,
+) -> anyhow::Result<Option<Arc<dyn Provider>>> {
+    let provider_id = normalize_provider_id(provider_id);
+    let Some(api_key) = provider_api_key_from_credentials(&provider_id, credentials) else {
+        return Ok(None);
+    };
+    Ok(build_provider_from_parts(
+        &provider_id,
+        provider_id.clone(),
+        Some(api_key),
+        None,
+    ))
+}
+
+fn build_provider_from_parts(
+    runtime_provider_id: &str,
+    configured_provider_id: String,
+    api_key: Option<String>,
+    base_url: Option<String>,
+) -> Option<Arc<dyn Provider>> {
+    match runtime_provider_id {
         "alibaba" => api_key.map(|key| Arc::new(AlibabaProvider::new(key)) as Arc<dyn Provider>),
         "anthropic" | "claude" => {
             api_key.map(|key| Arc::new(AnthropicProvider::new(key, None)) as Arc<dyn Provider>)
@@ -704,9 +876,7 @@ fn build_provider_from_config(
         "vercel" => api_key.map(|key| Arc::new(VercelProvider::new(key)) as Arc<dyn Provider>),
         "xai" | "grok" => api_key.map(|key| Arc::new(XAIProvider::new(key)) as Arc<dyn Provider>),
         _ => None,
-    };
-
-    Ok(provider)
+    }
 }
 
 fn normalize_provider_id(provider_id: &str) -> String {
@@ -803,6 +973,84 @@ fn provider_base_url_from_config_entry(entry: &ProviderConfigEntry) -> Option<St
         .filter(|url| !url.trim().is_empty())
 }
 
+fn provider_id_from_credentials(credentials: Option<&ProviderCredentials>) -> Option<String> {
+    let credentials = credentials?;
+    let mut ids = credentials
+        .iter()
+        .filter_map(|(id, credential)| match credential {
+            provider_auth::ProviderCredential::Api { .. } => Some(normalize_provider_id(id)),
+            provider_auth::ProviderCredential::Wellknown { .. }
+            | provider_auth::ProviderCredential::Oauth { .. } => None,
+        });
+    let first = ids.next()?;
+    if ids.next().is_some() {
+        None
+    } else {
+        Some(first)
+    }
+}
+
+fn provider_api_key_from_credentials(
+    provider_id: &str,
+    credentials: Option<&ProviderCredentials>,
+) -> Option<String> {
+    let credentials = credentials?;
+    let normalized = normalize_provider_id(provider_id);
+    credentials.iter().find_map(|(id, credential)| {
+        if normalize_provider_id(id) != normalized {
+            return None;
+        }
+        match credential {
+            provider_auth::ProviderCredential::Api { key, .. } => {
+                Some(key.clone()).filter(|key| !key.trim().is_empty())
+            }
+            provider_auth::ProviderCredential::Wellknown { .. } => None,
+            provider_auth::ProviderCredential::Oauth { .. } => None,
+        }
+    })
+}
+
+fn provider_api_key_env_names(provider_id: &str) -> Vec<String> {
+    match normalize_provider_id(provider_id).as_str() {
+        "alibaba" => vec!["ALIBABA_API_KEY".to_string()],
+        "anthropic" => vec!["ANTHROPIC_API_KEY".to_string()],
+        "azure" => vec!["AZURE_OPENAI_API_KEY".to_string()],
+        "cerebras" => vec!["CEREBRAS_API_KEY".to_string()],
+        "cohere" => vec!["COHERE_API_KEY".to_string()],
+        "copilot" => vec!["GITHUB_TOKEN".to_string()],
+        "deepinfra" => vec!["DEEPINFRA_API_KEY".to_string()],
+        "deepseek" => vec!["DEEPSEEK_API_KEY".to_string()],
+        "fireworks" => vec!["FIREWORKS_API_KEY".to_string()],
+        "gitlab" => vec!["GITLAB_TOKEN".to_string()],
+        "google" => vec!["GOOGLE_API_KEY".to_string(), "GEMINI_API_KEY".to_string()],
+        "groq" => vec!["GROQ_API_KEY".to_string()],
+        "mistral" => vec!["MISTRAL_API_KEY".to_string()],
+        "openai" => vec!["OPENAI_API_KEY".to_string()],
+        "openrouter" => vec!["OPENROUTER_API_KEY".to_string()],
+        "perplexity" => vec!["PERPLEXITY_API_KEY".to_string()],
+        "together" | "togetherai" => vec!["TOGETHER_API_KEY".to_string()],
+        "venice" => vec!["VENICE_API_KEY".to_string()],
+        "vercel" => vec!["VERCEL_API_KEY".to_string()],
+        "xai" => vec!["XAI_API_KEY".to_string()],
+        other => vec![format!(
+            "{}_API_KEY",
+            other.to_ascii_uppercase().replace('-', "_")
+        )],
+    }
+}
+
+fn provider_login_api_key(provider_id: &str) -> Option<String> {
+    std::env::var("OPENCODE_PROVIDER_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            provider_api_key_env_names(provider_id)
+                .into_iter()
+                .find_map(|name| std::env::var(name).ok())
+                .filter(|value| !value.trim().is_empty())
+        })
+}
+
 fn provider_id_from_configured_env() -> Option<String> {
     let candidates = [
         ("ANTHROPIC_API_KEY", "anthropic"),
@@ -840,17 +1088,26 @@ fn try_build_provider_from_config_or_env(
     model: Option<&str>,
     config: Option<&Config>,
 ) -> anyhow::Result<Option<Arc<dyn Provider>>> {
+    try_build_provider_from_config_auth_or_env(model, config, None)
+}
+
+fn try_build_provider_from_config_auth_or_env(
+    model: Option<&str>,
+    config: Option<&Config>,
+    credentials: Option<&ProviderCredentials>,
+) -> anyhow::Result<Option<Arc<dyn Provider>>> {
     let has_any_provider_hint = std::env::var_os("OPENCODE_PROVIDER").is_some()
         || std::env::var_os("OPENCODE_MODEL").is_some()
         || model.is_some()
         || provider_id_from_config(config).is_some()
+        || provider_id_from_credentials(credentials).is_some()
         || provider_id_from_configured_env().is_some();
 
     if !has_any_provider_hint {
         return Ok(None);
     }
 
-    build_provider_from_model_config_or_env(model, config).map(Some)
+    build_provider_from_model_config_auth_or_env(model, config, credentials).map(Some)
 }
 
 fn build_provider_from_env(provider_id: &str) -> anyhow::Result<Arc<dyn Provider>> {

@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 #[derive(Debug, Deserialize)]
 pub struct PatchParams {
@@ -50,16 +50,16 @@ impl Tool for ApplyPatchTool {
             }
 
             let hunks = parse_patch(&params.patch_text)?;
-            
+
             if hunks.is_empty() {
                 return Err(anyhow::anyhow!("No hunks found in patch"));
             }
 
             let mut changes: Vec<(std::path::PathBuf, String)> = Vec::new();
-            
+
             for hunk in &hunks {
                 let file_path = ctx.working_dir.join(&hunk.path);
-                
+
                 match hunk.operation.as_str() {
                     "add" => {
                         changes.push((file_path.clone(), hunk.content.clone()));
@@ -78,21 +78,26 @@ impl Tool for ApplyPatchTool {
                             changes.push((file_path.clone(), updated.clone()));
                             tokio::fs::write(&file_path, updated).await?;
                         } else {
-                            return Err(anyhow::anyhow!("File not found for update: {}", file_path.display()));
+                            return Err(anyhow::anyhow!(
+                                "File not found for update: {}",
+                                file_path.display()
+                            ));
                         }
                     }
                     _ => {}
                 }
             }
 
-            let summary = hunks.iter().map(|h| {
-                match h.operation.as_str() {
+            let summary = hunks
+                .iter()
+                .map(|h| match h.operation.as_str() {
                     "add" => format!("A {}", h.path),
                     "delete" => format!("D {}", h.path),
                     "update" => format!("M {}", h.path),
                     _ => h.path.clone(),
-                }
-            }).collect::<Vec<_>>().join("\n");
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
 
             Ok(ToolResult::with_metadata(
                 format!("Success. Updated the following files:\n{}", summary),
@@ -155,10 +160,12 @@ fn parse_patch(patch_text: &str) -> Result<Vec<Hunk>> {
             let parts: Vec<&str> = line.split_whitespace().collect();
             let old_range: usize = 1;
             let new_range: usize = 1;
-            
+
             current_hunk = Some(Hunk {
                 path: current_path.clone().unwrap_or_default(),
-                operation: current_operation.clone().unwrap_or_else(|| "update".to_string()),
+                operation: current_operation
+                    .clone()
+                    .unwrap_or_else(|| "update".to_string()),
                 content: String::new(),
                 old_start: old_range,
                 old_count: 0,
@@ -167,10 +174,11 @@ fn parse_patch(patch_text: &str) -> Result<Vec<Hunk>> {
             });
             continue;
         }
-        
+
         if let Some(ref mut hunk) = current_hunk {
             if line.starts_with('+') {
-                hunk.content.push_str(&format!("{}\n", line.trim_start_matches('+')));
+                hunk.content
+                    .push_str(&format!("{}\n", line.trim_start_matches('+')));
                 hunk.new_count += 1;
             } else if line.starts_with('-') {
                 hunk.old_count += 1;
@@ -190,11 +198,14 @@ fn parse_patch(patch_text: &str) -> Result<Vec<Hunk>> {
 fn apply_hunk(original: &str, hunk: &Hunk) -> String {
     let lines: Vec<&str> = original.lines().collect();
     let mut result = lines.clone();
-    
+
     let start_idx = (hunk.old_start - 1).min(result.len());
     let remove_count = hunk.old_count.min(result.len() - start_idx);
-    
-    result.splice(start_idx..start_idx + remove_count, hunk.content.lines().collect::<Vec<&str>>());
-    
+
+    result.splice(
+        start_idx..start_idx + remove_count,
+        hunk.content.lines().collect::<Vec<&str>>(),
+    );
+
     result.join("\n")
 }

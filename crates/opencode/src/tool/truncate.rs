@@ -3,8 +3,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::Tool;
+use super::result::ToolResult;
 
 #[derive(Debug, Deserialize)]
 pub struct TruncateParams {
@@ -57,7 +57,7 @@ impl Tool for TruncateTool {
                 .map_err(|e| anyhow::anyhow!("Invalid truncate parameters: {}", e))?;
 
             let path = std::path::PathBuf::from(&params.file_path);
-            
+
             if !path.exists() {
                 return Err(anyhow::anyhow!("File not found: {}", params.file_path));
             }
@@ -66,7 +66,7 @@ impl Tool for TruncateTool {
                 let content = std::fs::read_to_string(&path)?;
                 let lines: Vec<&str> = content.lines().collect();
                 let max_lines = params.max_lines.unwrap();
-                
+
                 if lines.len() > max_lines {
                     let truncated = lines[..max_lines].join("\n");
                     std::fs::write(&path, truncated)?;
@@ -87,7 +87,7 @@ impl Tool for TruncateTool {
             if params.max_bytes.is_some() {
                 let content = std::fs::read(&path)?;
                 let max_bytes = params.max_bytes.unwrap() as usize;
-                
+
                 if content.len() > max_bytes {
                     let truncated = &content[..max_bytes];
                     std::fs::write(&path, truncated)?;
@@ -105,7 +105,10 @@ impl Tool for TruncateTool {
                 )));
             }
 
-            Ok(ToolResult::new(format!("No truncation performed for {}", params.file_path)))
+            Ok(ToolResult::new(format!(
+                "No truncation performed for {}",
+                params.file_path
+            )))
         })
     }
 }

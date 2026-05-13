@@ -7,8 +7,8 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use super::context::ToolContext;
-use super::result::ToolResult;
 use super::r#trait::{BashParams, Tool};
+use super::result::ToolResult;
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
@@ -77,7 +77,7 @@ impl Tool for BashTool {
 
             let mut child = cmd.spawn().context("Failed to spawn shell")?;
 
-let stdout_handle = child.stdout.take();
+            let stdout_handle = child.stdout.take();
             let stderr_handle = child.stderr.take();
 
             let timeout = tokio::time::Duration::from_millis(DEFAULT_TIMEOUT_MS);
