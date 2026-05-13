@@ -37,6 +37,14 @@ pub async fn tool_list(State(_state): State<Arc<AppState>>) -> Json<serde_json::
     }))
 }
 
+pub async fn command_list(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<crate::command::CommandInfo>>, StatusCode> {
+    let commands = crate::command::load_commands(&state.workspace_root, state.config.as_ref())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(commands))
+}
+
 pub async fn skill_list(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(json!({
         "skills": [

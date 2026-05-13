@@ -3,6 +3,7 @@ pub mod agent;
 pub mod auth;
 pub mod bus;
 pub mod cli;
+pub mod command;
 pub mod config;
 pub mod file;
 pub mod git;

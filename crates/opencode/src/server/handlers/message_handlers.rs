@@ -322,16 +322,34 @@ pub async fn command(
     Path(id): Path<String>,
     Json(req): Json<CommandRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let text = command_request_text(&req);
-    if text.trim().is_empty() {
+    let command_name = req.command.trim().trim_start_matches('/');
+    if command_name.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
+    }
+    let commands = crate::command::load_commands(&state.workspace_root, state.config.as_ref())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let command = commands
+        .into_iter()
+        .find(|command| command.name == command_name)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    let arguments = req.arguments.as_deref().unwrap_or_default();
+    let mut text = crate::command::render_template(&command.template, arguments);
+    let file_notes = request_file_part_notes(&req.parts);
+    if !file_notes.is_empty() {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&file_notes);
     }
 
     let turn = PromptTurn {
         text,
         message_id: req.message_id,
-        agent: req.agent,
-        model_selection: model_selection_from_value(req.model.as_ref()),
+        agent: command.agent.or(req.agent),
+        model_selection: command
+            .model
+            .or_else(|| model_selection_from_value(req.model.as_ref())),
         no_reply: false,
     };
     run_prompt_turn(state, id, turn)
@@ -758,20 +776,9 @@ fn prompt_request_text(req: &PromptRequest) -> String {
     chunks.join("\n")
 }
 
-fn command_request_text(req: &CommandRequest) -> String {
-    let mut text = req.command.trim().to_string();
-    if !text.starts_with('/') {
-        text.insert(0, '/');
-    }
-    if let Some(arguments) = req
-        .arguments
-        .as_deref()
-        .filter(|args| !args.trim().is_empty())
-    {
-        text.push(' ');
-        text.push_str(arguments.trim());
-    }
-    if let Some(parts) = &req.parts {
+fn request_file_part_notes(parts: &Option<Vec<serde_json::Value>>) -> String {
+    let mut notes = Vec::new();
+    if let Some(parts) = parts {
         for part in parts {
             if part.get("type").and_then(|value| value.as_str()) == Some("file") {
                 let name = part
@@ -779,12 +786,11 @@ fn command_request_text(req: &CommandRequest) -> String {
                     .and_then(|value| value.as_str())
                     .or_else(|| part.get("url").and_then(|value| value.as_str()))
                     .unwrap_or("file");
-                text.push_str("\n\nAttached file: ");
-                text.push_str(name);
+                notes.push(format!("Attached file: {name}"));
             }
         }
     }
-    text
+    notes.join("\n")
 }
 
 fn optional_message_id(value: Option<&str>) -> Result<MessageID, StatusCode> {
@@ -867,21 +873,14 @@ mod tests {
     }
 
     #[test]
-    fn command_request_text_matches_slash_command_shape() {
-        let req = CommandRequest {
-            command: "review".to_string(),
-            arguments: Some("--quick".to_string()),
-            parts: Some(vec![serde_json::json!({
+    fn request_file_part_notes_summarizes_file_attachments() {
+        assert_eq!(
+            request_file_part_notes(&Some(vec![serde_json::json!({
                 "type": "file",
                 "filename": "src/lib.rs",
                 "url": "file:///tmp/src/lib.rs"
-            })]),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            command_request_text(&req),
-            "/review --quick\n\nAttached file: src/lib.rs"
+            })])),
+            "Attached file: src/lib.rs"
         );
     }
 }

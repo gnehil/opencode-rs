@@ -21,6 +21,7 @@ pub struct AppState {
     pub mcp_manager: std::sync::Arc<tokio::sync::RwLock<crate::mcp::McpManager>>,
     pub default_agent: Option<String>,
     pub default_model: Option<String>,
+    pub config: Option<crate::config::Config>,
     /// Provider available to HTTP `/prompt`. Optional because servers
     /// that only handle session CRUD (no model dispatch) shouldn't
     /// require credentials to start.
@@ -42,6 +43,7 @@ impl AppState {
             )),
             default_agent: None,
             default_model: None,
+            config: None,
             provider: None,
         }
     }
@@ -60,6 +62,7 @@ impl AppState {
     }
 
     pub fn with_config_defaults(mut self, config: &crate::config::Config) -> Self {
+        self.config = Some(config.clone());
         self.default_agent = config.default_agent.clone();
         self.default_model = self
             .default_agent

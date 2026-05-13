@@ -130,6 +130,7 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/mcp/resources", get(mcp_handlers::mcp_list_resources))
         .route("/agent", get(agent_handlers::list_agents))
         .route("/agent/default", get(agent_handlers::get_default_agent))
+        .route("/command", get(instance_handlers::command_list))
         .route("/lsp", get(instance_handlers::lsp_status))
         .route("/tool", get(instance_handlers::tool_list))
         .route("/skill", get(instance_handlers::skill_list))
@@ -204,6 +205,23 @@ mod tests {
             AppState::new(tmp.path().join("data")).with_workspace_root(tmp.path().to_path_buf()),
         );
         let app = create_router_with_state(state);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/command")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let commands = response_json(response).await;
+        assert!(commands
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command["name"] == "init"));
 
         let response = send(
             app.clone(),

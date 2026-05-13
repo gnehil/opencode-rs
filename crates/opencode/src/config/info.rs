@@ -217,10 +217,22 @@ pub struct ServerConfig {
     pub cors: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommandConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtask: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
