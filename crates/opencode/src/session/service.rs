@@ -145,6 +145,60 @@ impl SessionStore {
         Ok(row)
     }
 
+    pub async fn get_todos(&self, session_id: &SessionID) -> Result<Vec<crate::tool::TodoItem>> {
+        let rows = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT content, status, priority
+             FROM todo
+             WHERE session_id = ?1
+             ORDER BY position ASC",
+        )
+        .bind(session_id.to_string())
+        .fetch_all(self.pool.as_ref())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(content, status, priority)| crate::tool::TodoItem {
+                content,
+                status,
+                priority,
+            })
+            .collect())
+    }
+
+    pub async fn replace_todos(
+        &self,
+        session_id: &SessionID,
+        todos: &[crate::tool::TodoItem],
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM todo WHERE session_id = ?1")
+            .bind(session_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+
+        for (position, todo) in todos.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO todo
+                 (session_id, content, status, priority, position, time_created, time_updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .bind(session_id.to_string())
+            .bind(&todo.content)
+            .bind(&todo.status)
+            .bind(&todo.priority)
+            .bind(position as i64)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn list(&self, project_id: Option<&str>) -> Result<Vec<SessionRow>> {
         let rows = if let Some(pid) = project_id {
             sqlx::query_as::<_, SessionRow>(

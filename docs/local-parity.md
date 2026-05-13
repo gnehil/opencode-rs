@@ -34,7 +34,7 @@ Legend:
 | Session messages | `SessionPaths.messages/message` | `server/handlers/message_handlers.rs` | partial | Broaden `MessageV2` shape tests and SDK compatibility checks |
 | Session prompt | `prompt`, `prompt_async`, `command`, `shell` | `message_handlers.rs`, `command/*`, `session/history.rs`, `session/processor.rs`, `plugin/*` | partial | Route-level SDK shape checks and broader prompt variant parity |
 | Revert/unrevert | `SessionPaths.revert/unrevert` | `session/service.rs`, `session_handlers.rs` | partial | Full restore semantics after revert, not only clearing the marker |
-| Todo/diff/init | `SessionPaths.todo/diff/init` | mixed | missing | Local-only implementations |
+| Todo/diff/init | `SessionPaths.todo/diff/init` | `session_handlers.rs`, `session/service.rs` | partial | Replace git working-tree diff fallback with exact snapshot/message diff parity |
 | Share/unshare | `SessionPaths.share` | none | skip | Cloud share scope |
 | File/find API | `groups/file.ts` | `server/handlers/file_handlers.rs` | partial | Add image/base64 and git diff patch metadata for `/file/content` |
 | SSE event API | `event.ts` | `server/handlers/event_handlers.rs` | partial | Use TS event envelope/initial `server.connected`/camelCase payloads |

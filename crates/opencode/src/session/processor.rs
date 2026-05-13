@@ -660,6 +660,13 @@ impl PromptProcessor {
 
             // Persist BEFORE publishing the complete event so a subscriber
             // racing to read history doesn't miss it.
+            if tool_call.name == "todowrite" {
+                if let ToolPartResult::Completed { output, .. } = &outcome {
+                    if let Ok(todos) = serde_json::from_str::<Vec<crate::tool::TodoItem>>(output) {
+                        self.store.replace_todos(session_id, &todos).await?;
+                    }
+                }
+            }
             self.store
                 .save_tool_part(
                     session_id,

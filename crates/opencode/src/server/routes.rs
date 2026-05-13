@@ -44,6 +44,12 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
             "/api/session/:id/children",
             get(session_handlers::session_children),
         )
+        .route("/api/session/:id/todo", get(session_handlers::session_todo))
+        .route("/api/session/:id/diff", get(session_handlers::session_diff))
+        .route(
+            "/api/session/:id/init",
+            post(session_handlers::init_session),
+        )
         .route(
             "/api/session/:id/revert",
             post(session_handlers::revert_message),
@@ -86,6 +92,9 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
             "/session/:id/children",
             get(session_handlers::session_children),
         )
+        .route("/session/:id/todo", get(session_handlers::session_todo))
+        .route("/session/:id/diff", get(session_handlers::session_diff))
+        .route("/session/:id/init", post(session_handlers::init_session))
         .route(
             "/session/:id/revert",
             post(session_handlers::revert_message),
@@ -217,7 +226,7 @@ mod tests {
         let state = std::sync::Arc::new(
             AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
         );
-        let app = create_router_with_state(state);
+        let app = create_router_with_state(state.clone());
 
         let response = send(
             app.clone(),
@@ -331,7 +340,7 @@ mod tests {
         let state = std::sync::Arc::new(
             AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
         );
-        let app = create_router_with_state(state);
+        let app = create_router_with_state(state.clone());
 
         let response = send(
             app.clone(),
@@ -407,6 +416,143 @@ mod tests {
             .unwrap()
             .iter()
             .all(|item| !item.as_str().unwrap().ends_with('/')));
+    }
+
+    #[tokio::test]
+    async fn canonical_session_local_routes_expose_todo_diff_and_init() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::fs::write(root.join("tracked.txt"), "before\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::fs::write(root.join("tracked.txt"), "before\nafter\n").unwrap();
+
+        let state = std::sync::Arc::new(
+            AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
+        );
+        let app = create_router_with_state(state.clone());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/session")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "directory": root }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let created = response_json(response).await;
+        let session_id = created["id"].as_str().unwrap();
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri(format!("/session/{session_id}/todo"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!([]));
+
+        let parsed_session_id = crate::id::SessionID::parse(session_id).unwrap();
+        state
+            .get_store()
+            .await
+            .replace_todos(
+                &parsed_session_id,
+                &[crate::tool::TodoItem {
+                    content: "finish local routes".to_string(),
+                    status: "in_progress".to_string(),
+                    priority: "high".to_string(),
+                }],
+            )
+            .await
+            .unwrap();
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri(format!("/session/{session_id}/todo"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            serde_json::json!([{
+                "content": "finish local routes",
+                "status": "in_progress",
+                "priority": "high"
+            }])
+        );
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri(format!("/session/{session_id}/diff"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let diff = response_json(response).await;
+        let diff = diff.as_array().expect("/session/:id/diff returns an array");
+        assert_eq!(diff.len(), 1);
+        assert_eq!(diff[0]["file"], "tracked.txt");
+        assert_eq!(diff[0]["additions"], 1);
+        assert_eq!(diff[0]["deletions"], 0);
+        assert_eq!(diff[0]["status"], "modified");
+        assert!(diff[0]["patch"].as_str().unwrap().contains("@@"));
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/session/{session_id}/init"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "providerID": "anthropic",
+                        "modelID": "claude-sonnet-4-5",
+                        "messageID": "msg_test"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::bus::EventBus;
@@ -107,6 +108,27 @@ pub struct UpdateSessionBody {
     pub model: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitSessionBody {
+    #[serde(rename = "modelID", alias = "model_id", alias = "modelId")]
+    pub model_id: String,
+    #[serde(rename = "providerID", alias = "provider_id", alias = "providerId")]
+    pub provider_id: String,
+    #[serde(rename = "messageID", alias = "message_id", alias = "messageId")]
+    pub message_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFileDiff {
+    file: String,
+    patch: String,
+    additions: usize,
+    deletions: usize,
+    status: String,
+}
+
 #[derive(Serialize)]
 pub struct SessionResponse {
     pub id: String,
@@ -192,6 +214,77 @@ pub async fn get_session(
     }
 }
 
+pub async fn session_todo(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::tool::TodoItem>>, StatusCode> {
+    let store = state.get_store().await;
+    let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if store
+        .get(&session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let todos = store
+        .get_todos(&session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(todos))
+}
+
+pub async fn session_diff(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<SessionFileDiff>>, StatusCode> {
+    let store = state.get_store().await;
+    let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let session = store
+        .get(&session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(git_session_diff(&std::path::PathBuf::from(
+        session.directory,
+    ))))
+}
+
+pub async fn init_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<InitSessionBody>,
+) -> Result<Json<bool>, StatusCode> {
+    let store = state.get_store().await;
+    let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if store
+        .get(&session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if state.provider.is_none() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let req = super::message_handlers::CommandRequest {
+        message_id: Some(body.message_id),
+        command: "init".to_string(),
+        arguments: None,
+        agent: None,
+        model: Some(serde_json::json!({
+            "providerID": body.provider_id,
+            "modelID": body.model_id,
+        })),
+        parts: None,
+    };
+    let _ = super::message_handlers::command(State(state), Path(id), Json(req)).await?;
+    Ok(Json(true))
+}
+
 pub async fn update_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -232,6 +325,71 @@ pub async fn update_session(
         }
         None => Err(StatusCode::NOT_FOUND),
     }
+}
+
+fn git_session_diff(repo_path: &std::path::Path) -> Vec<SessionFileDiff> {
+    if !repo_path.join(".git").exists() {
+        return Vec::new();
+    }
+
+    let numstat = git_output(repo_path, &["diff", "HEAD", "--numstat"]);
+    let statuses = git_statuses(repo_path);
+    let mut diffs = Vec::new();
+    for line in numstat.lines().filter(|line| !line.trim().is_empty()) {
+        let mut parts = line.splitn(3, '\t');
+        let additions = parse_numstat(parts.next());
+        let deletions = parse_numstat(parts.next());
+        let Some(file) = parts.next() else { continue };
+        let patch = git_output(repo_path, &["diff", "HEAD", "--", file]);
+        diffs.push(SessionFileDiff {
+            file: file.to_string(),
+            patch,
+            additions,
+            deletions,
+            status: statuses
+                .get(file)
+                .cloned()
+                .unwrap_or_else(|| "modified".to_string()),
+        });
+    }
+    diffs
+}
+
+fn git_statuses(repo_path: &std::path::Path) -> HashMap<String, String> {
+    let mut statuses = HashMap::new();
+    for line in git_output(repo_path, &["diff", "HEAD", "--name-status"])
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        let mut parts = line.splitn(2, '\t');
+        let Some(status) = parts.next() else { continue };
+        let Some(file) = parts.next() else { continue };
+        let status = match status.chars().next() {
+            Some('A') => "added",
+            Some('D') => "deleted",
+            _ => "modified",
+        };
+        statuses.insert(file.to_string(), status.to_string());
+    }
+    statuses
+}
+
+fn git_output(repo_path: &std::path::Path, args: &[&str]) -> String {
+    let Ok(output) = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+    else {
+        return String::new();
+    };
+    if !output.status.success() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn parse_numstat(value: Option<&str>) -> usize {
+    value.and_then(|value| value.parse().ok()).unwrap_or(0)
 }
 
 pub async fn delete_session(
