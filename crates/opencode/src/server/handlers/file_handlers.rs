@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Deserialize;
 use serde_json::json;
 use std::path::{Component, Path, PathBuf};
@@ -186,6 +187,21 @@ pub async fn read_file(
         if !canonical.starts_with(root_canonical(&state.workspace_root)) {
             return Err(StatusCode::FORBIDDEN);
         }
+    }
+
+    if is_image_file(&path_buf) {
+        return match std::fs::read(&path_buf) {
+            Ok(bytes) => Ok(Json(json!({
+                "type": "text",
+                "content": STANDARD.encode(bytes),
+                "encoding": "base64",
+                "mimeType": image_mime_type(&path_buf),
+            }))),
+            Err(_) => Ok(Json(json!({
+                "type": "text",
+                "content": "",
+            }))),
+        };
     }
 
     if is_binary_file(&path_buf) {
@@ -532,6 +548,65 @@ fn is_binary_file(path: &Path) -> bool {
             | "sqlite"
             | "db"
     )
+}
+
+fn is_image_file(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "bmp"
+            | "webp"
+            | "ico"
+            | "tif"
+            | "tiff"
+            | "svg"
+            | "svgz"
+            | "avif"
+            | "apng"
+            | "jxl"
+            | "heic"
+            | "heif"
+            | "raw"
+            | "cr2"
+            | "nef"
+            | "arw"
+            | "dng"
+            | "orf"
+            | "raf"
+            | "pef"
+            | "x3f"
+    )
+}
+
+fn image_mime_type(path: &Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg".to_string(),
+        "png" => "image/png".to_string(),
+        "gif" => "image/gif".to_string(),
+        "bmp" => "image/bmp".to_string(),
+        "webp" => "image/webp".to_string(),
+        "ico" => "image/x-icon".to_string(),
+        "tif" | "tiff" => "image/tiff".to_string(),
+        "svg" | "svgz" => "image/svg+xml".to_string(),
+        "avif" => "image/avif".to_string(),
+        "apng" => "image/apng".to_string(),
+        "jxl" => "image/jxl".to_string(),
+        "heic" => "image/heic".to_string(),
+        "heif" => "image/heif".to_string(),
+        other if !other.is_empty() => format!("image/{other}"),
+        _ => "application/octet-stream".to_string(),
+    }
 }
 
 #[cfg(test)]

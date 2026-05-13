@@ -215,6 +215,7 @@ mod tests {
         let root_canonical = root.canonicalize().unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("README.md"), "hello readme\n").unwrap();
+        std::fs::write(root.join("image.png"), [137, 80, 78, 71, 13, 10, 26, 10]).unwrap();
         std::fs::write(
             root.join("src/main.rs"),
             "fn main() { println!(\"hello\"); }\n",
@@ -268,6 +269,22 @@ mod tests {
         assert_eq!(content["type"], "text");
         assert_eq!(content["content"], "hello readme");
         assert!(content.get("path").is_none());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/file/content?path=image.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content = response_json(response).await;
+        assert_eq!(content["type"], "text");
+        assert_eq!(content["content"], "iVBORw0KGgo=");
+        assert_eq!(content["encoding"], "base64");
+        assert_eq!(content["mimeType"], "image/png");
 
         let response = send(
             app.clone(),

@@ -36,7 +36,7 @@ Legend:
 | Revert/unrevert | `SessionPaths.revert/unrevert` | `session/service.rs`, `session_handlers.rs` | partial | Full restore semantics after revert, not only clearing the marker |
 | Todo/diff/init | `SessionPaths.todo/diff/init` | `session_handlers.rs`, `session/service.rs` | partial | Replace git working-tree diff fallback with exact snapshot/message diff parity |
 | Share/unshare | `SessionPaths.share` | none | skip | Cloud share scope |
-| File/find API | `groups/file.ts` | `server/handlers/file_handlers.rs` | partial | Add image/base64 and git diff patch metadata for `/file/content` |
+| File/find API | `groups/file.ts` | `server/handlers/file_handlers.rs` | partial | Add git diff patch metadata for `/file/content` |
 | SSE event API | `event.ts` | `server/handlers/event_handlers.rs` | partial | Align remaining Rust-only event type names/properties with TS bus schemas |
 | TUI control | `groups/tui.ts`, `groups/control.ts` | `tui_handlers.rs` | partial | Real request queue/control loop |
 | Pty | `groups/pty.ts` | `pty/*` but no HTTP group | missing | Expose PTY API routes if required by local TUI |
