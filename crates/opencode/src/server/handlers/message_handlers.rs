@@ -815,6 +815,9 @@ async fn run_prompt_turn(
         .with_plugin_manager(state.plugin_manager.clone())
         .with_tools(crate::tool::registry_with(mcp_tools))
         .with_agent(agent_name);
+    if let Some(config) = state.config.clone() {
+        processor = processor.with_config(config);
+    }
     if let Some(model) = &model_selection {
         processor = processor.with_model_selection(model);
     }
@@ -1055,19 +1058,7 @@ fn agent_mode(
     agent: &str,
     config: Option<&crate::config::Config>,
 ) -> Option<crate::agent::AgentMode> {
-    if let Some(mode) = crate::agent::get_agent(agent).map(|agent| agent.mode) {
-        return Some(mode);
-    }
-    config
-        .and_then(|config| config.agent.as_ref())
-        .and_then(|agents| agents.get(agent))
-        .and_then(|agent| agent.mode.as_deref())
-        .and_then(|mode| match mode {
-            "subagent" => Some(crate::agent::AgentMode::Subagent),
-            "primary" => Some(crate::agent::AgentMode::Primary),
-            "all" => Some(crate::agent::AgentMode::All),
-            _ => None,
-        })
+    crate::agent::resolve_agent(agent, config).map(|agent| agent.mode)
 }
 
 fn prompt_output_json(output: PromptOutput) -> Json<serde_json::Value> {

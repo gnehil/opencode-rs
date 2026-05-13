@@ -438,7 +438,9 @@ async fn handle_debug_skill() -> Result<()> {
 }
 
 async fn handle_debug_agent(debug_args: args::DebugAgentArgs) -> Result<()> {
-    let Some(agent) = crate::agent::get_agent(&debug_args.name) else {
+    let cwd = std::env::current_dir()?;
+    let config = crate::config::load_project_config(&cwd)?;
+    let Some(agent) = crate::agent::resolve_agent(&debug_args.name, config.as_ref()) else {
         anyhow::bail!(
             "Agent {} not found, run 'opencode agent list' to get an agent list",
             debug_args.name
@@ -466,7 +468,7 @@ async fn handle_debug_agent(debug_args: args::DebugAgentArgs) -> Result<()> {
         let params = parse_debug_tool_params(debug_args.params.as_deref())?;
         let ctx = crate::tool::ToolContext {
             session_id: crate::id::SessionID::new(),
-            working_dir: std::env::current_dir()?,
+            working_dir: cwd,
             permission_rules: agent.permission.clone(),
             event_bus: None,
             permission_broker: None,

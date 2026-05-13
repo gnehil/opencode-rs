@@ -281,6 +281,9 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
     let mut processor = PromptProcessor::new(store.clone(), provider)
         .with_tools(crate::tool::registry_with(mcp_tools))
         .with_agent(agent_name);
+    if let Some(config) = project_config.clone() {
+        processor = processor.with_config(config);
+    }
     if let Some(model) = selected_model {
         processor = processor.with_model_selection(model);
     }

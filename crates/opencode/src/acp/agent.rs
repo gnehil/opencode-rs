@@ -1448,6 +1448,15 @@ pub fn build_system_prompt_for_agent(
     tools: &[Arc<dyn crate::tool::Tool>],
     agent_name: &str,
 ) -> String {
+    let agent_info = crate::agent::get_agent(agent_name);
+    build_system_prompt_for_agent_info(cwd, tools, agent_info.as_ref())
+}
+
+pub fn build_system_prompt_for_agent_info(
+    cwd: &str,
+    tools: &[Arc<dyn crate::tool::Tool>],
+    agent_info: Option<&crate::agent::AgentInfo>,
+) -> String {
     let mut s = String::new();
     s.push_str("You are an autonomous coding agent operating inside a developer's project.\n");
     s.push_str(&format!("Working directory: {}\n", cwd));
@@ -1460,7 +1469,7 @@ pub fn build_system_prompt_for_agent(
         }
         s.push('\n');
     }
-    if let Some(agent_info) = crate::agent::get_agent(agent_name) {
+    if let Some(agent_info) = agent_info {
         if let Some(persona) = agent_info.prompt.as_ref().filter(|p| !p.trim().is_empty()) {
             s.push_str("---\n");
             s.push_str(persona);

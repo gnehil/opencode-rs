@@ -18,6 +18,7 @@ pub struct PromptProcessor {
     plugin_manager: Option<Arc<crate::plugin::PluginManager>>,
     max_iterations: usize,
     agent_name: String,
+    config: Option<crate::config::Config>,
     model_id: Option<String>,
 }
 
@@ -40,6 +41,7 @@ impl PromptProcessor {
             plugin_manager: None,
             max_iterations: 10,
             agent_name: "build".to_string(),
+            config: None,
             model_id: None,
         }
     }
@@ -51,6 +53,11 @@ impl PromptProcessor {
     ///     `agent` so the UI can show "you're in plan mode" etc.
     pub fn with_agent(mut self, agent_name: impl Into<String>) -> Self {
         self.agent_name = agent_name.into();
+        self
+    }
+
+    pub fn with_config(mut self, config: crate::config::Config) -> Self {
+        self.config = Some(config);
         self
     }
 
@@ -404,9 +411,7 @@ impl PromptProcessor {
                         let ctx = ToolContext {
                             session_id: session_id.clone(),
                             working_dir: working_dir.clone(),
-                            permission_rules: crate::agent::get_agent(&task.agent)
-                                .map(|agent| agent.permission)
-                                .unwrap_or_default(),
+                            permission_rules: self.agent_permission_rules(&task.agent),
                             event_bus: Some(self.bus.clone()),
                             permission_broker: self.permission_broker.clone(),
                         };
@@ -622,14 +627,9 @@ impl PromptProcessor {
                         let ctx = ToolContext {
                             session_id: session_id.clone(),
                             working_dir: working_dir.clone(),
-                            // Use the agent's configured permission rules.
-                            // If the agent is unknown (no entry in registry)
-                            // we fall back to an empty ruleset, which
-                            // permits everything — same as before this
-                            // commit but tracked explicitly.
-                            permission_rules: crate::agent::get_agent(&self.agent_name)
-                                .map(|a| a.permission)
-                                .unwrap_or_default(),
+                            // Use the configured agent rules; unknown agents
+                            // keep the previous permissive empty ruleset.
+                            permission_rules: self.agent_permission_rules(&self.agent_name),
                             event_bus: Some(self.bus.clone()),
                             permission_broker: self.permission_broker.clone(),
                         };
@@ -718,8 +718,12 @@ impl PromptProcessor {
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        let system =
-            crate::acp::agent::build_system_prompt_for_agent(&cwd, &self.tools, &self.agent_name);
+        let agent = self.agent_info(&self.agent_name);
+        let system = crate::acp::agent::build_system_prompt_for_agent_info(
+            &cwd,
+            &self.tools,
+            agent.as_ref(),
+        );
 
         Ok(CompletionRequest {
             model: crate::provider::ModelID::new(model_id),
@@ -731,6 +735,16 @@ impl PromptProcessor {
             top_p: None,
             stop_sequences: None,
         })
+    }
+
+    fn agent_info(&self, name: &str) -> Option<crate::agent::AgentInfo> {
+        crate::agent::resolve_agent(name, self.config.as_ref())
+    }
+
+    fn agent_permission_rules(&self, name: &str) -> crate::permission::Ruleset {
+        self.agent_info(name)
+            .map(|agent| agent.permission)
+            .unwrap_or_default()
     }
 }
 
@@ -932,6 +946,70 @@ mod tests {
         fn default_model(&self) -> Option<&ModelInfo> {
             Some(&self.model)
         }
+    }
+
+    #[tokio::test]
+    async fn config_agent_drives_system_prompt_and_permission_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()).await.unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(FakeProvider {
+            model: ModelInfo {
+                id: Some(ModelID::new("test-model")),
+                name: None,
+                family: None,
+                release_date: None,
+                attachment: None,
+                reasoning: None,
+                temperature: None,
+                tool_call: None,
+                interleaved: None,
+                cost: None,
+                limit: None,
+                modalities: None,
+                experimental: None,
+                status: None,
+                provider: None,
+                options: None,
+                headers: None,
+                variants: None,
+            },
+            seen,
+        });
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "agent": {
+                "reviewer": {
+                    "prompt": "CUSTOM REVIEW PERSONA",
+                    "permission": {
+                        "bash": "deny",
+                        "read": {
+                            "*.env": "ask"
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let processor = PromptProcessor::new(store, provider)
+            .with_config(config)
+            .with_agent("reviewer");
+
+        let request = processor
+            .build_request_from_history("test-model", Vec::new())
+            .unwrap();
+        assert!(request.system.unwrap().contains("CUSTOM REVIEW PERSONA"));
+
+        let rules = processor.agent_permission_rules("reviewer");
+        assert!(rules.iter().any(|rule| {
+            rule.permission == "bash"
+                && rule.pattern == "*"
+                && rule.action == crate::permission::Action::Deny
+        }));
+        assert!(rules.iter().any(|rule| {
+            rule.permission == "read"
+                && rule.pattern == "*.env"
+                && rule.action == crate::permission::Action::Ask
+        }));
     }
 
     struct FakeTaskTool;

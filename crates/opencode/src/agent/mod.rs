@@ -44,6 +44,25 @@ pub fn get_agent(name: &str) -> Option<AgentInfo> {
 }
 
 pub fn list_agents(config: Option<&crate::config::Config>) -> Vec<AgentInfo> {
+    let mut agents = agent_map(config).into_values().collect::<Vec<_>>();
+    let default_agent = config
+        .and_then(|config| config.default_agent.as_deref())
+        .unwrap_or(DEFAULT_AGENT_NAME);
+    agents.sort_by(
+        |a, b| match (a.name == default_agent, b.name == default_agent) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.cmp(&b.name),
+        },
+    );
+    agents
+}
+
+pub fn resolve_agent(name: &str, config: Option<&crate::config::Config>) -> Option<AgentInfo> {
+    agent_map(config).remove(name)
+}
+
+fn agent_map(config: Option<&crate::config::Config>) -> BTreeMap<String, AgentInfo> {
     let mut agents: BTreeMap<String, AgentInfo> = BUILTIN_AGENT_NAMES
         .iter()
         .filter_map(|name| get_agent(name).map(|agent| ((*name).to_string(), agent)))
@@ -85,19 +104,7 @@ pub fn list_agents(config: Option<&crate::config::Config>) -> Vec<AgentInfo> {
             apply_agent_config(agent, entry);
         }
     }
-
-    let default_agent = config
-        .and_then(|config| config.default_agent.as_deref())
-        .unwrap_or(DEFAULT_AGENT_NAME);
-    let mut list = agents.into_values().collect::<Vec<_>>();
-    list.sort_by(
-        |a, b| match (a.name == default_agent, b.name == default_agent) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.cmp(&b.name),
-        },
-    );
-    list
+    agents
 }
 
 fn apply_agent_config(agent: &mut AgentInfo, entry: &crate::config::AgentConfigEntry) {
