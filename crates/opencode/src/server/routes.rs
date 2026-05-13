@@ -577,6 +577,13 @@ mod tests {
             .unwrap();
         std::fs::write(root.join("tracked.txt"), "before\nafter\n").unwrap();
         std::fs::write(root.join("untracked.txt"), "new\n").unwrap();
+        let skill_dir = root.join(".opencode").join("skills").join("local-review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: local-review\ndescription: Local review skill\n---\nUse local context.\n",
+        )
+        .unwrap();
 
         let state = std::sync::Arc::new(
             AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
@@ -726,7 +733,7 @@ new file mode 100644
         );
 
         let response = send(
-            app,
+            app.clone(),
             Request::builder()
                 .method("GET")
                 .uri("/formatter")
@@ -736,6 +743,36 @@ new file mode 100644
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response_json(response).await, serde_json::json!([]));
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/lsp")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!([]));
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("GET")
+                .uri("/skill")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let skills = response_json(response).await;
+        assert!(skills.as_array().unwrap().iter().any(|skill| {
+            skill["name"] == "local-review"
+                && skill["description"] == "Local review skill"
+                && skill["location"].as_str().unwrap().ends_with("SKILL.md")
+                && skill["content"] == "Use local context."
+        }));
     }
 
     #[tokio::test]

@@ -280,11 +280,10 @@ const FORMATTERS: &[FormatterInfo] = &[
     },
 ];
 
-pub async fn lsp_status(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(json!({
-        "languages": ["rust", "typescript", "python"],
-        "status": "available"
-    }))
+pub async fn lsp_status(State(_state): State<Arc<AppState>>) -> Json<Vec<serde_json::Value>> {
+    // The TS route reports live, connected LSP clients. opencode-rs does not
+    // keep server-owned LSP clients yet, so the correct idle shape is [].
+    Json(Vec::new())
 }
 
 pub async fn tool_list(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -321,15 +320,17 @@ pub async fn command_list(
     Ok(Json(commands))
 }
 
-pub async fn skill_list(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(json!({
-        "skills": [
-            {"name": "playwright", "description": "Browser automation via Playwright MCP"},
-            {"name": "frontend-ui-ux", "description": "Designer-turned-developer UI/UX"},
-            {"name": "git-master", "description": "Git operations"},
-            {"name": "review-work", "description": "Post-implementation review orchestrator"}
-        ]
-    }))
+pub async fn skill_list(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<crate::skill::SkillInfo>>, StatusCode> {
+    let service = crate::skill::SkillService::new();
+    service
+        .discover(&state.workspace_root)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut skills = service.all().await;
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(Json(skills))
 }
 
 pub async fn instance_dispose(State(_state): State<Arc<AppState>>) -> Json<bool> {

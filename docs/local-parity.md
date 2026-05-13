@@ -37,7 +37,7 @@ Legend:
 | Todo/diff/init | `SessionPaths.todo/diff/init` | `session_handlers.rs`, `session/service.rs` | partial | Replace git working-tree diff fallback with exact snapshot/message diff parity |
 | Share/unshare | `SessionPaths.share` | none | skip | Cloud share scope |
 | File/find API | `groups/file.ts` | `server/handlers/file_handlers.rs` | partial | Keep `/find/symbol` empty while TS handler also returns `[]`; revisit if TS wires LSP |
-| Instance path/VCS/formatter | `groups/instance.ts`, `handlers/instance.ts` | `instance_handlers.rs`, `routes.rs` | partial | Broaden formatter config overrides and remaining dynamic `agent`/`skill`/`lsp` behavior |
+| Instance path/VCS/formatter | `groups/instance.ts`, `handlers/instance.ts` | `instance_handlers.rs`, `routes.rs` | partial | Broaden formatter config overrides and live LSP client reporting |
 | SSE event API | `event.ts` | `server/handlers/event_handlers.rs` | partial | Align remaining Rust-only event type names/properties with TS bus schemas |
 | TUI control | `groups/tui.ts`, `groups/control.ts` | `tui_handlers.rs`, `tui/control.rs` | partial | Wire queue producers from the interactive TUI runtime |
 | Pty | `groups/pty.ts` | `pty/*`, `server/handlers/pty_handlers.rs` | partial | Add browser-origin/auth fallback nuance and WebSocket E2E coverage |
