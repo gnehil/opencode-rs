@@ -140,6 +140,51 @@ pub fn render_template(template: &str, arguments: &str) -> String {
     rendered.trim().to_string()
 }
 
+pub async fn render_template_with_shell(
+    template: &str,
+    arguments: &str,
+    cwd: &Path,
+    shell: Option<&str>,
+) -> anyhow::Result<String> {
+    let rendered = render_template(template, arguments);
+    expand_shell_substitutions(&rendered, cwd, shell).await
+}
+
+async fn expand_shell_substitutions(
+    template: &str,
+    cwd: &Path,
+    shell: Option<&str>,
+) -> anyhow::Result<String> {
+    let captures = shell_regex().captures_iter(template).collect::<Vec<_>>();
+    if captures.is_empty() {
+        return Ok(template.to_string());
+    }
+
+    let sh = shell
+        .map(ToString::to_string)
+        .or_else(|| std::env::var("SHELL").ok())
+        .unwrap_or_else(|| "/bin/sh".to_string());
+    let mut replacements = Vec::with_capacity(captures.len());
+    for captures in captures {
+        let command = captures.get(1).map(|m| m.as_str()).unwrap_or_default();
+        let output = tokio::process::Command::new(&sh)
+            .arg("-lc")
+            .arg(command)
+            .current_dir(cwd)
+            .output()
+            .await?;
+        replacements.push(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+
+    let mut index = 0;
+    let expanded = shell_regex().replace_all(template, |_captures: &regex::Captures| {
+        let replacement = replacements.get(index).cloned().unwrap_or_default();
+        index += 1;
+        replacement
+    });
+    Ok(expanded.trim().to_string())
+}
+
 impl CommandInfo {
     fn new(
         name: impl Into<String>,
@@ -298,6 +343,11 @@ fn placeholder_regex() -> &'static Regex {
     REGEX.get_or_init(|| Regex::new(r"\$(\d+)").expect("valid command placeholder regex"))
 }
 
+fn shell_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| Regex::new(r"!`([^`]+)`").expect("valid command shell regex"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -323,6 +373,20 @@ mod tests {
             super::render_template("Review this", "--cached"),
             "Review this\n\n--cached"
         );
+    }
+
+    #[tokio::test]
+    async fn render_template_expands_shell_substitutions_like_typescript() {
+        let rendered = super::render_template_with_shell(
+            "Current: !`printf branch`",
+            "",
+            std::path::Path::new("."),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rendered, "Current: branch");
     }
 
     #[test]

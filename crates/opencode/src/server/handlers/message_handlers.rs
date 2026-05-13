@@ -444,7 +444,17 @@ pub async fn command(
         .ok_or(StatusCode::BAD_REQUEST)?;
 
     let arguments = req.arguments.as_deref().unwrap_or_default();
-    let text = crate::command::render_template(&command.template, arguments);
+    let text = crate::command::render_template_with_shell(
+        &command.template,
+        arguments,
+        &state.workspace_root,
+        state
+            .config
+            .as_ref()
+            .and_then(|config| config.shell.as_deref()),
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut parts = vec![UserPartDraft::Text {
         id: None,
         text: text.clone(),
