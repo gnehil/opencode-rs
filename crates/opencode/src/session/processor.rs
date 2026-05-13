@@ -14,6 +14,7 @@ pub struct PromptProcessor {
     tools: Vec<Arc<dyn Tool>>,
     bus: EventBus,
     max_iterations: usize,
+    agent_name: String,
 }
 
 pub enum ProcessEvent {
@@ -26,21 +27,24 @@ pub enum ProcessEvent {
 
 impl PromptProcessor {
     pub fn new(store: Arc<SessionStore>, provider: Arc<dyn Provider>) -> Self {
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(BashTool),
-            Arc::new(ReadTool),
-            Arc::new(WriteTool),
-            Arc::new(EditTool),
-            Arc::new(GlobTool),
-            Arc::new(GrepTool),
-        ];
-        Self { 
-            store, 
-            provider, 
-            tools,
+        Self {
+            store,
+            provider,
+            tools: crate::tool::default_registry(),
             bus: EventBus::new(),
             max_iterations: 10,
+            agent_name: "build".to_string(),
         }
+    }
+
+    /// Override the agent. The agent name selects:
+    ///   * the permission ruleset applied to tool calls (from
+    ///     `agent::get_agent(name).permission`)
+    ///   * the value stamped on persisted assistant messages as
+    ///     `agent` so the UI can show "you're in plan mode" etc.
+    pub fn with_agent(mut self, agent_name: impl Into<String>) -> Self {
+        self.agent_name = agent_name.into();
+        self
     }
 
     pub fn with_bus(mut self, bus: EventBus) -> Self {
@@ -241,7 +245,14 @@ impl PromptProcessor {
                     let ctx = ToolContext {
                         session_id: session_id.clone(),
                         working_dir: working_dir.clone(),
-                        permission_rules: crate::permission::Ruleset::default(),
+                        // Use the agent's configured permission rules.
+                        // If the agent is unknown (no entry in registry)
+                        // we fall back to an empty ruleset, which
+                        // permits everything — same as before this
+                        // commit but tracked explicitly.
+                        permission_rules: crate::agent::get_agent(&self.agent_name)
+                            .map(|a| a.permission)
+                            .unwrap_or_default(),
                     };
                     match tool.execute(params.clone(), ctx).await {
                         Ok(tool_result) => ToolPartResult::Completed {

@@ -53,14 +53,7 @@ impl ACPAgent {
         event_bus: EventBus,
         notification_tx: mpsc::Sender<JsonRpcNotification>,
     ) -> Self {
-        let tools: Vec<Arc<dyn crate::tool::Tool>> = vec![
-            Arc::new(crate::tool::BashTool),
-            Arc::new(crate::tool::ReadTool),
-            Arc::new(crate::tool::WriteTool),
-            Arc::new(crate::tool::EditTool),
-            Arc::new(crate::tool::GlobTool),
-            Arc::new(crate::tool::GrepTool),
-        ];
+        let tools = crate::tool::default_registry();
         Self {
             session_manager,
             store,
@@ -983,6 +976,22 @@ impl ACPAgent {
 
         let working_dir = std::path::PathBuf::from(cwd);
 
+        // Look up the session's configured agent so its permission
+        // ruleset gates the tool calls. Falls back to "build" (the
+        // unrestricted default) if the row has no agent set, or if no
+        // agent registry entry matches.
+        let agent_name = self
+            .store
+            .get(session_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|row| row.agent)
+            .unwrap_or_else(|| "build".to_string());
+        let permission_rules = crate::agent::get_agent(&agent_name)
+            .map(|a| a.permission)
+            .unwrap_or_default();
+
         for call in tool_calls {
             let params: Value = serde_json::from_str(&call.arguments).unwrap_or(serde_json::json!({}));
 
@@ -997,7 +1006,7 @@ impl ACPAgent {
                     let ctx = ToolContext {
                         session_id: session_id.clone(),
                         working_dir: working_dir.clone(),
-                        permission_rules: crate::permission::Ruleset::default(),
+                        permission_rules: permission_rules.clone(),
                     };
                     match tool.execute(params.clone(), ctx).await {
                         Ok(r) => ToolPartResult::Completed {

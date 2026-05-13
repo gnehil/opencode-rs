@@ -4,13 +4,15 @@
 //!
 //! The architecture is one reader task per server:
 //!
+//! ```text
 //!                                stdin (writes)
-//!   `LspClient` ---> Mutex<ChildStdin>
+//!   LspClient ---> Mutex<ChildStdin>
 //!                                stdout (reads)
-//!   `LspClient` <--- reader_task <--- ChildStdout
+//!   LspClient <--- reader_task <--- ChildStdout
 //!                       |
 //!                       +--> Map<id, oneshot::Sender<Response>>  (responses)
 //!                       +--> mpsc::Sender<Notification>          (notifications)
+//! ```
 //!
 //! Sending a `request()` allocates a request id, registers a oneshot
 //! sender in the pending map, writes the JSON-RPC message to the
