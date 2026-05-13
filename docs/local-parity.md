@@ -36,7 +36,7 @@ Legend:
 | Revert/unrevert | `SessionPaths.revert/unrevert` | `session/service.rs`, `session_handlers.rs` | partial | Full restore semantics after revert, not only clearing the marker |
 | Todo/diff/init | `SessionPaths.todo/diff/init` | mixed | missing | Local-only implementations |
 | Share/unshare | `SessionPaths.share` | none | skip | Cloud share scope |
-| File/find API | `groups/file.ts` | `server/handlers/file_handlers.rs` | partial | Return TS-compatible arrays, add symbol search, fix `/find/file` query semantics |
+| File/find API | `groups/file.ts` | `server/handlers/file_handlers.rs` | partial | Add image/base64 and git diff patch metadata for `/file/content` |
 | SSE event API | `event.ts` | `server/handlers/event_handlers.rs` | partial | Use TS event envelope/initial `server.connected`/camelCase payloads |
 | TUI control | `groups/tui.ts`, `groups/control.ts` | `tui_handlers.rs` | partial | Real request queue/control loop |
 | Pty | `groups/pty.ts` | `pty/*` but no HTTP group | missing | Expose PTY API routes if required by local TUI |
@@ -55,7 +55,7 @@ Legend:
 
 ## Current priority queue
 
-1. Run JSON/file/command behavior against the server routes.
+1. Run JSON command/session behavior against the server routes.
 2. External JS/TS plugin loading/runtime compatibility.
 3. Remote TUI attach/control queue and TUI prompt execution.
 4. MCP needs_auth/reconnect parity.

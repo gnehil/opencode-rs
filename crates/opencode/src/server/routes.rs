@@ -120,7 +120,8 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/file/content", get(file_handlers::read_file))
         .route("/file/status", get(file_handlers::git_status))
         .route("/find", get(file_handlers::find_text))
-        .route("/find/file", get(file_handlers::list_files))
+        .route("/find/file", get(file_handlers::find_file))
+        .route("/find/symbol", get(file_handlers::find_symbol))
         .route(
             "/mcp",
             get(mcp_handlers::mcp_status).post(mcp_handlers::mcp_add),
@@ -196,6 +197,216 @@ mod tests {
     async fn send(app: Router, request: Request<Body>) -> axum::response::Response {
         let mut app = app;
         Service::call(&mut app, request).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn canonical_file_routes_match_opencode_httpapi_shapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let root_canonical = root.canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("README.md"), "hello readme\n").unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            "fn main() { println!(\"hello\"); }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(root.join("ignored.txt"), "secret-token\n").unwrap();
+
+        let state = std::sync::Arc::new(
+            AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
+        );
+        let app = create_router_with_state(state);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/file?path=.")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let files = response_json(response).await;
+        let files = files.as_array().expect("/file returns a bare array");
+        let src = files.iter().find(|item| item["name"] == "src").unwrap();
+        assert_eq!(src["path"], "src");
+        assert_eq!(
+            src["absolute"],
+            root_canonical.join("src").to_string_lossy().as_ref()
+        );
+        assert_eq!(src["type"], "directory");
+        assert_eq!(src["ignored"], false);
+        let ignored = files
+            .iter()
+            .find(|item| item["name"] == "ignored.txt")
+            .unwrap();
+        assert_eq!(ignored["ignored"], true);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/file/content?path=README.md")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content = response_json(response).await;
+        assert_eq!(content["type"], "text");
+        assert_eq!(content["content"], "hello readme");
+        assert!(content.get("path").is_none());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/file/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response_json(response).await.is_array());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/find?pattern=hello")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let matches = response_json(response).await;
+        let matches = matches.as_array().expect("/find returns a bare array");
+        assert!(matches.iter().any(|item| {
+            item["path"]["text"] == "README.md"
+                && item["lines"]["text"].as_str().unwrap().contains("hello")
+                && item["line_number"] == 1
+                && item["submatches"][0]["match"]["text"] == "hello"
+        }));
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/find?pattern=secret-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!([]));
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("GET")
+                .uri("/find/symbol?query=main")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn find_file_honors_query_type_limit_and_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src/components")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
+        std::fs::write(root.join("docs/app.md"), "# app\n").unwrap();
+        std::fs::write(root.join("docs/guide.md"), "# guide\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "docs/app.md\n").unwrap();
+
+        let state = std::sync::Arc::new(
+            AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
+        );
+        let app = create_router_with_state(state);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/find/file?query=main&type=file&limit=5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            serde_json::json!(["src/main.rs"])
+        );
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/find/file?query=src&type=directory&limit=5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            serde_json::json!(["src/", "src/components/"])
+        );
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/find/file?query=&limit=5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            serde_json::json!(["docs/", "src/", "src/components/"])
+        );
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/find/file?query=app&type=file&limit=5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!([]));
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("GET")
+                .uri("/find/file?query=&dirs=false&limit=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let files = response_json(response).await;
+        assert_eq!(files.as_array().unwrap().len(), 2);
+        assert!(files
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| !item.as_str().unwrap().ends_with('/')));
     }
 
     #[tokio::test]
