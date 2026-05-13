@@ -19,6 +19,8 @@ pub struct PluginConfig {
 }
 
 pub struct Hooks {
+    pub on_command_execute_before:
+        Option<HookFn<CommandExecuteBeforeInput, CommandExecuteBeforeOutput>>,
     pub on_session_create: Option<HookFn<SessionCreateInput, SessionCreateOutput>>,
     pub on_session_prompt: Option<HookFn<SessionPromptInput, SessionPromptOutput>>,
     pub on_tool_start: Option<HookFn<ToolStartInput, ToolStartOutput>>,
@@ -31,11 +33,42 @@ pub struct Hooks {
     pub on_event: Option<HookFn<EventInput, EventOutput>>,
 }
 
+impl Default for Hooks {
+    fn default() -> Self {
+        Self {
+            on_command_execute_before: None,
+            on_session_create: None,
+            on_session_prompt: None,
+            on_tool_start: None,
+            on_tool_complete: None,
+            on_permission_asked: None,
+            on_message_create: None,
+            on_provider_request: None,
+            on_provider_response: None,
+            on_config_change: None,
+            on_event: None,
+        }
+    }
+}
+
 pub type HookFn<I, O> = Arc<
     dyn Fn(I) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<O>> + Send>>
         + Send
         + Sync,
 >;
+
+#[derive(Debug, Clone)]
+pub struct CommandExecuteBeforeInput {
+    pub session_id: String,
+    pub command: String,
+    pub arguments: Option<String>,
+    pub parts: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandExecuteBeforeOutput {
+    pub parts: Vec<serde_json::Value>,
+}
 
 #[derive(Debug, Clone)]
 pub struct SessionCreateInput {
@@ -212,6 +245,26 @@ impl PluginManager {
         Ok(output)
     }
 
+    pub async fn trigger_command_execute_before(
+        &self,
+        input: CommandExecuteBeforeInput,
+        output: CommandExecuteBeforeOutput,
+    ) -> anyhow::Result<CommandExecuteBeforeOutput> {
+        let mut output = output;
+        for hooks in &self.hooks {
+            if let Some(hook) = &hooks.on_command_execute_before {
+                output = hook(CommandExecuteBeforeInput {
+                    session_id: input.session_id.clone(),
+                    command: input.command.clone(),
+                    arguments: input.arguments.clone(),
+                    parts: output.parts.clone(),
+                })
+                .await?;
+            }
+        }
+        Ok(output)
+    }
+
     pub async fn trigger_session_prompt(
         &self,
         input: SessionPromptInput,
@@ -236,13 +289,20 @@ impl PluginManager {
             approved: true,
             modified_input: None,
         };
+        let mut current_input = input;
         for hooks in &self.hooks {
             if let Some(hook) = &hooks.on_tool_start {
-                output = hook(input.clone()).await?;
+                output = hook(current_input.clone()).await?;
                 if !output.approved {
                     break;
                 }
+                if let Some(modified) = output.modified_input.clone() {
+                    current_input.tool_input = modified;
+                }
             }
+        }
+        if output.approved {
+            output.modified_input = Some(current_input.tool_input);
         }
         Ok(output)
     }
@@ -254,11 +314,16 @@ impl PluginManager {
         let mut output = ToolCompleteOutput {
             modified_output: None,
         };
+        let mut current_input = input;
         for hooks in &self.hooks {
             if let Some(hook) = &hooks.on_tool_complete {
-                output = hook(input.clone()).await?;
+                output = hook(current_input.clone()).await?;
+                if let Some(modified) = output.modified_output.clone() {
+                    current_input.tool_output = modified;
+                }
             }
         }
+        output.modified_output = Some(current_input.tool_output);
         Ok(output)
     }
 

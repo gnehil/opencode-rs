@@ -12,6 +12,7 @@ use crate::storage::{init_db, MessageRow, PartRow, SessionRow};
 
 /// Argument for `save_tool_part` — the outcome side of a tool call we want
 /// to persist as a `ToolPart` of the assistant message.
+#[derive(Debug, Clone)]
 pub enum ToolPartResult {
     Completed {
         output: String,

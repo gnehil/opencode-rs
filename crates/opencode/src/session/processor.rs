@@ -5,6 +5,7 @@ use crate::id::{MessageID, SessionID};
 use crate::message::{AssistantMessage, Message, ModelRef, Part, UserMessage, UserTime};
 use crate::message::{AssistantTime, CacheUsage, PathInfo, TokenUsage};
 use crate::provider::{CompletionMessage, CompletionRequest, Provider, ToolDefinition};
+use crate::session::service::ToolPartResult;
 use crate::session::SessionStore;
 use crate::tool::{Tool, ToolContext};
 
@@ -14,6 +15,7 @@ pub struct PromptProcessor {
     tools: Vec<Arc<dyn Tool>>,
     bus: EventBus,
     permission_broker: Option<crate::permission::PermissionBroker>,
+    plugin_manager: Option<Arc<crate::plugin::PluginManager>>,
     max_iterations: usize,
     agent_name: String,
     model_id: Option<String>,
@@ -35,6 +37,7 @@ impl PromptProcessor {
             tools: crate::tool::default_registry(),
             bus: EventBus::new(),
             permission_broker: None,
+            plugin_manager: None,
             max_iterations: 10,
             agent_name: "build".to_string(),
             model_id: None,
@@ -75,6 +78,14 @@ impl PromptProcessor {
 
     pub fn with_permission_broker(mut self, broker: crate::permission::PermissionBroker) -> Self {
         self.permission_broker = Some(broker);
+        self
+    }
+
+    pub fn with_plugin_manager(
+        mut self,
+        plugin_manager: Arc<crate::plugin::PluginManager>,
+    ) -> Self {
+        self.plugin_manager = Some(plugin_manager);
         self
     }
 
@@ -370,36 +381,58 @@ impl PromptProcessor {
                 "subagent_type": task.agent,
                 "command": task.command,
             });
+            let started = std::time::Instant::now();
+            let original_input = input.clone();
+            let (input, prehook_outcome) = match self
+                .apply_tool_execute_before(session_id, "task", &call_id, input)
+                .await
+            {
+                Ok(input) => (input, None),
+                Err(outcome) => (original_input, Some(outcome)),
+            };
             self.bus.publish(Event::tool_start(
                 session_id.to_string(),
                 "task",
                 input.clone(),
             ));
 
-            let outcome = match self.tools.iter().find(|tool| tool.name() == "task") {
-                Some(tool) => {
-                    let ctx = ToolContext {
-                        session_id: session_id.clone(),
-                        working_dir: working_dir.clone(),
-                        permission_rules: crate::agent::get_agent(&task.agent)
-                            .map(|agent| agent.permission)
-                            .unwrap_or_default(),
-                        event_bus: Some(self.bus.clone()),
-                        permission_broker: self.permission_broker.clone(),
-                    };
-                    match tool.execute(input.clone(), ctx).await {
-                        Ok(result) => crate::session::service::ToolPartResult::Completed {
-                            output: result.output,
-                            attachments: result.attachments.unwrap_or_default(),
-                        },
-                        Err(error) => crate::session::service::ToolPartResult::Error {
-                            error: error.to_string(),
-                        },
+            let outcome = if let Some(outcome) = prehook_outcome {
+                outcome
+            } else {
+                let outcome = match self.tools.iter().find(|tool| tool.name() == "task") {
+                    Some(tool) => {
+                        let ctx = ToolContext {
+                            session_id: session_id.clone(),
+                            working_dir: working_dir.clone(),
+                            permission_rules: crate::agent::get_agent(&task.agent)
+                                .map(|agent| agent.permission)
+                                .unwrap_or_default(),
+                            event_bus: Some(self.bus.clone()),
+                            permission_broker: self.permission_broker.clone(),
+                        };
+                        match tool.execute(input.clone(), ctx).await {
+                            Ok(result) => ToolPartResult::Completed {
+                                output: result.output,
+                                attachments: result.attachments.unwrap_or_default(),
+                            },
+                            Err(error) => ToolPartResult::Error {
+                                error: error.to_string(),
+                            },
+                        }
                     }
-                }
-                None => crate::session::service::ToolPartResult::Error {
-                    error: "Unknown tool: task".to_string(),
-                },
+                    None => ToolPartResult::Error {
+                        error: "Unknown tool: task".to_string(),
+                    },
+                };
+                self.apply_tool_execute_after(
+                    session_id,
+                    "task",
+                    &call_id,
+                    &input,
+                    outcome,
+                    started.elapsed(),
+                )
+                .await
             };
 
             self.store
@@ -409,32 +442,19 @@ impl PromptProcessor {
                     "task",
                     &call_id,
                     &input,
-                    match &outcome {
-                        crate::session::service::ToolPartResult::Completed {
-                            output,
-                            attachments,
-                        } => crate::session::service::ToolPartResult::Completed {
-                            output: output.clone(),
-                            attachments: attachments.clone(),
-                        },
-                        crate::session::service::ToolPartResult::Error { error } => {
-                            crate::session::service::ToolPartResult::Error {
-                                error: error.clone(),
-                            }
-                        }
-                    },
+                    outcome.clone(),
                 )
                 .await?;
 
             match &outcome {
-                crate::session::service::ToolPartResult::Completed { output, .. } => {
+                ToolPartResult::Completed { output, .. } => {
                     self.bus.publish(Event::tool_complete(
                         session_id.to_string(),
                         "task",
                         serde_json::json!({ "result": output }),
                     ));
                 }
-                crate::session::service::ToolPartResult::Error { error } => {
+                ToolPartResult::Error { error } => {
                     self.bus.publish(Event::tool_error(
                         session_id.to_string(),
                         "task",
@@ -494,6 +514,72 @@ impl PromptProcessor {
         Ok(())
     }
 
+    async fn apply_tool_execute_before(
+        &self,
+        session_id: &SessionID,
+        tool_name: &str,
+        call_id: &str,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, ToolPartResult> {
+        let Some(plugin_manager) = &self.plugin_manager else {
+            return Ok(input);
+        };
+        let hook_output = plugin_manager
+            .trigger_tool_start(crate::plugin::ToolStartInput {
+                session_id: session_id.to_string(),
+                tool_name: tool_name.to_string(),
+                tool_input: input,
+                call_id: call_id.to_string(),
+            })
+            .await
+            .map_err(|error| ToolPartResult::Error {
+                error: format!("Plugin hook tool.execute.before failed: {error}"),
+            })?;
+        if !hook_output.approved {
+            return Err(ToolPartResult::Error {
+                error: format!("Tool '{tool_name}' rejected by plugin hook"),
+            });
+        }
+        Ok(hook_output
+            .modified_input
+            .unwrap_or_else(|| serde_json::json!({})))
+    }
+
+    async fn apply_tool_execute_after(
+        &self,
+        session_id: &SessionID,
+        tool_name: &str,
+        call_id: &str,
+        input: &serde_json::Value,
+        outcome: ToolPartResult,
+        duration: std::time::Duration,
+    ) -> ToolPartResult {
+        let Some(plugin_manager) = &self.plugin_manager else {
+            return outcome;
+        };
+        match plugin_manager
+            .trigger_tool_complete(crate::plugin::ToolCompleteInput {
+                session_id: session_id.to_string(),
+                tool_name: tool_name.to_string(),
+                tool_output: tool_part_result_to_hook_output(&outcome),
+                call_id: call_id.to_string(),
+                duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+            })
+            .await
+        {
+            Ok(hook_output) => hook_output
+                .modified_output
+                .map(|value| apply_modified_tool_output(outcome.clone(), value))
+                .unwrap_or(outcome),
+            Err(error) => ToolPartResult::Error {
+                error: format!(
+                    "Plugin hook tool.execute.after failed for '{tool_name}' with input {}: {error}",
+                    input
+                ),
+            },
+        }
+    }
+
     async fn execute_and_persist_tool_calls(
         &self,
         session_id: &SessionID,
@@ -501,13 +587,20 @@ impl PromptProcessor {
         tool_calls: &[crate::provider::ToolCall],
         events: &mut Vec<ProcessEvent>,
     ) -> anyhow::Result<()> {
-        use crate::session::service::ToolPartResult;
-
         let working_dir = std::env::current_dir()?;
 
         for tool_call in tool_calls {
             let params: serde_json::Value =
                 serde_json::from_str(&tool_call.arguments).unwrap_or(serde_json::json!({}));
+            let started = std::time::Instant::now();
+            let original_params = params.clone();
+            let (params, prehook_outcome) = match self
+                .apply_tool_execute_before(session_id, &tool_call.name, &tool_call.id, params)
+                .await
+            {
+                Ok(params) => (params, None),
+                Err(outcome) => (original_params, Some(outcome)),
+            };
 
             self.bus.publish(Event::tool_start(
                 session_id.to_string(),
@@ -521,35 +614,48 @@ impl PromptProcessor {
 
             let tool = self.tools.iter().find(|t| t.name() == tool_call.name);
 
-            let outcome = match tool {
-                Some(tool) => {
-                    let ctx = ToolContext {
-                        session_id: session_id.clone(),
-                        working_dir: working_dir.clone(),
-                        // Use the agent's configured permission rules.
-                        // If the agent is unknown (no entry in registry)
-                        // we fall back to an empty ruleset, which
-                        // permits everything — same as before this
-                        // commit but tracked explicitly.
-                        permission_rules: crate::agent::get_agent(&self.agent_name)
-                            .map(|a| a.permission)
-                            .unwrap_or_default(),
-                        event_bus: Some(self.bus.clone()),
-                        permission_broker: self.permission_broker.clone(),
-                    };
-                    match tool.execute(params.clone(), ctx).await {
-                        Ok(tool_result) => ToolPartResult::Completed {
-                            output: tool_result.output,
-                            attachments: tool_result.attachments.unwrap_or_default(),
-                        },
-                        Err(e) => ToolPartResult::Error {
-                            error: e.to_string(),
-                        },
+            let outcome = if let Some(outcome) = prehook_outcome {
+                outcome
+            } else {
+                let outcome = match tool {
+                    Some(tool) => {
+                        let ctx = ToolContext {
+                            session_id: session_id.clone(),
+                            working_dir: working_dir.clone(),
+                            // Use the agent's configured permission rules.
+                            // If the agent is unknown (no entry in registry)
+                            // we fall back to an empty ruleset, which
+                            // permits everything — same as before this
+                            // commit but tracked explicitly.
+                            permission_rules: crate::agent::get_agent(&self.agent_name)
+                                .map(|a| a.permission)
+                                .unwrap_or_default(),
+                            event_bus: Some(self.bus.clone()),
+                            permission_broker: self.permission_broker.clone(),
+                        };
+                        match tool.execute(params.clone(), ctx).await {
+                            Ok(tool_result) => ToolPartResult::Completed {
+                                output: tool_result.output,
+                                attachments: tool_result.attachments.unwrap_or_default(),
+                            },
+                            Err(e) => ToolPartResult::Error {
+                                error: e.to_string(),
+                            },
+                        }
                     }
-                }
-                None => ToolPartResult::Error {
-                    error: format!("Unknown tool: {}", tool_call.name),
-                },
+                    None => ToolPartResult::Error {
+                        error: format!("Unknown tool: {}", tool_call.name),
+                    },
+                };
+                self.apply_tool_execute_after(
+                    session_id,
+                    &tool_call.name,
+                    &tool_call.id,
+                    &params,
+                    outcome,
+                    started.elapsed(),
+                )
+                .await
             };
 
             // Persist BEFORE publishing the complete event so a subscriber
@@ -561,18 +667,7 @@ impl PromptProcessor {
                     &tool_call.name,
                     &tool_call.id,
                     &params,
-                    match &outcome {
-                        ToolPartResult::Completed {
-                            output,
-                            attachments,
-                        } => ToolPartResult::Completed {
-                            output: output.clone(),
-                            attachments: attachments.clone(),
-                        },
-                        ToolPartResult::Error { error } => ToolPartResult::Error {
-                            error: error.clone(),
-                        },
-                    },
+                    outcome.clone(),
                 )
                 .await?;
 
@@ -643,6 +738,73 @@ fn text_part(session_id: &SessionID, message_id: &MessageID, text: &str) -> Part
         time: None,
         metadata: None,
     })
+}
+
+fn tool_part_result_to_hook_output(outcome: &ToolPartResult) -> serde_json::Value {
+    match outcome {
+        ToolPartResult::Completed {
+            output,
+            attachments,
+        } => serde_json::json!({
+            "output": output,
+            "attachments": attachments,
+        }),
+        ToolPartResult::Error { error } => serde_json::json!({
+            "error": error,
+        }),
+    }
+}
+
+fn apply_modified_tool_output(
+    outcome: ToolPartResult,
+    modified: serde_json::Value,
+) -> ToolPartResult {
+    match outcome {
+        ToolPartResult::Completed {
+            mut output,
+            mut attachments,
+        } => {
+            match modified {
+                serde_json::Value::String(value) => output = value,
+                serde_json::Value::Object(mut object) => {
+                    if let Some(error) = object.get("error").and_then(|value| value.as_str()) {
+                        return ToolPartResult::Error {
+                            error: error.to_string(),
+                        };
+                    }
+                    if let Some(value) = object
+                        .remove("output")
+                        .or_else(|| object.remove("result"))
+                        .and_then(|value| value.as_str().map(ToString::to_string))
+                    {
+                        output = value;
+                    }
+                    if let Some(value) = object.remove("attachments") {
+                        if let Ok(parsed) = serde_json::from_value(value) {
+                            attachments = parsed;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            ToolPartResult::Completed {
+                output,
+                attachments,
+            }
+        }
+        ToolPartResult::Error { mut error } => {
+            match modified {
+                serde_json::Value::String(value) => error = value,
+                serde_json::Value::Object(object) => {
+                    if let Some(value) = object.get("error").and_then(|value| value.as_str()) {
+                        error = value.to_string();
+                    }
+                }
+                _ => {}
+            }
+            ToolPartResult::Error { error }
+        }
+    }
 }
 
 pub fn model_id_from_selection(selection: &str) -> Option<String> {
@@ -796,6 +958,55 @@ mod tests {
         }
     }
 
+    struct ToolHookPlugin;
+
+    #[async_trait::async_trait]
+    impl crate::plugin::Plugin for ToolHookPlugin {
+        fn meta(&self) -> crate::plugin::PluginMeta {
+            crate::plugin::PluginMeta {
+                id: "tool-hook-test".to_string(),
+                name: "Tool Hook Test".to_string(),
+                version: "0.0.0".to_string(),
+                description: None,
+                author: None,
+            }
+        }
+
+        async fn initialize(
+            &self,
+            _config: crate::plugin::PluginConfig,
+        ) -> anyhow::Result<crate::plugin::Hooks> {
+            Ok(crate::plugin::Hooks {
+                on_tool_start: Some(Arc::new(|input: crate::plugin::ToolStartInput| {
+                    Box::pin(async move {
+                        let mut modified = input.tool_input.clone();
+                        modified["prompt"] = serde_json::json!("hooked inspect");
+                        Ok(crate::plugin::ToolStartOutput {
+                            approved: true,
+                            modified_input: Some(modified),
+                        })
+                    })
+                })),
+                on_tool_complete: Some(Arc::new(|input: crate::plugin::ToolCompleteInput| {
+                    Box::pin(async move {
+                        let output = input
+                            .tool_output
+                            .get("output")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default();
+                        Ok(crate::plugin::ToolCompleteOutput {
+                            modified_output: Some(serde_json::json!({
+                                "output": format!("after {output}"),
+                                "attachments": []
+                            })),
+                        })
+                    })
+                })),
+                ..crate::plugin::Hooks::default()
+            })
+        }
+    }
+
     #[tokio::test]
     async fn process_stream_executes_subtask_parts_before_provider_turn() {
         let tmp = tempfile::tempdir().unwrap();
@@ -868,5 +1079,75 @@ mod tests {
         assert!(seen
             .iter()
             .any(|message| message.role == "tool" && message.content.contains("task done")));
+    }
+
+    #[tokio::test]
+    async fn process_stream_applies_plugin_tool_hooks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()).await.unwrap());
+        let session = store
+            .create("t", "p", &std::path::PathBuf::from("/tmp"))
+            .await
+            .unwrap();
+        let session_id = SessionID::parse(&session.id).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(FakeProvider {
+            model: ModelInfo {
+                id: Some(ModelID::new("test-model")),
+                name: None,
+                family: None,
+                release_date: None,
+                attachment: None,
+                reasoning: None,
+                temperature: None,
+                tool_call: None,
+                interleaved: None,
+                cost: None,
+                limit: None,
+                modalities: None,
+                experimental: None,
+                status: None,
+                provider: None,
+                options: None,
+                headers: None,
+                variants: None,
+            },
+            seen: seen.clone(),
+        });
+        let mut plugin_manager = crate::plugin::PluginManager::new();
+        plugin_manager
+            .register(
+                Arc::new(ToolHookPlugin),
+                crate::plugin::PluginConfig {
+                    enabled: true,
+                    options: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let processor = PromptProcessor::new(store.clone(), provider)
+            .with_tools(vec![Arc::new(FakeTaskTool)])
+            .with_plugin_manager(Arc::new(plugin_manager));
+        let user_message_id = MessageID::new();
+        let user_parts = vec![Part::Subtask(crate::message::part::SubtaskPart {
+            id: crate::id::PartID::new(),
+            session_id: session_id.clone(),
+            message_id: user_message_id,
+            prompt: "inspect auth".to_string(),
+            description: "Review auth".to_string(),
+            agent: "general".to_string(),
+            model: None,
+            command: Some("review".to_string()),
+        })];
+
+        processor
+            .process_stream_with_parts(&session_id, "", user_message_id, user_parts)
+            .await
+            .unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|message| {
+            message.role == "tool" && message.content.contains("after task done: hooked inspect")
+        }));
     }
 }

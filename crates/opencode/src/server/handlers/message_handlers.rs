@@ -162,6 +162,63 @@ impl UserPartDraft {
             | UserPartDraft::Subtask { .. } => true,
         }
     }
+
+    fn to_hook_value(&self) -> serde_json::Value {
+        match self {
+            UserPartDraft::Text {
+                id,
+                text,
+                synthetic,
+                ignored,
+                time,
+                metadata,
+            } => serde_json::json!({
+                "type": "text",
+                "id": id.as_ref().map(ToString::to_string),
+                "text": text,
+                "synthetic": synthetic,
+                "ignored": ignored,
+                "time": time,
+                "metadata": metadata,
+            }),
+            UserPartDraft::File {
+                id,
+                mime,
+                filename,
+                url,
+                source,
+            } => serde_json::json!({
+                "type": "file",
+                "id": id.as_ref().map(ToString::to_string),
+                "mime": mime,
+                "filename": filename,
+                "url": url,
+                "source": source,
+            }),
+            UserPartDraft::Agent { id, name, source } => serde_json::json!({
+                "type": "agent",
+                "id": id.as_ref().map(ToString::to_string),
+                "name": name,
+                "source": source,
+            }),
+            UserPartDraft::Subtask {
+                id,
+                prompt,
+                description,
+                agent,
+                model,
+                command,
+            } => serde_json::json!({
+                "type": "subtask",
+                "id": id.as_ref().map(ToString::to_string),
+                "prompt": prompt,
+                "description": description,
+                "agent": agent,
+                "model": model,
+                "command": command,
+            }),
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -432,7 +489,7 @@ pub async fn command(
     Path(id): Path<String>,
     Json(req): Json<CommandRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let command_name = req.command.trim().trim_start_matches('/');
+    let command_name = req.command.trim().trim_start_matches('/').to_string();
     if command_name.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -442,8 +499,9 @@ pub async fn command(
         .into_iter()
         .find(|command| command.name == command_name)
         .ok_or(StatusCode::BAD_REQUEST)?;
+    let arguments = req.arguments.clone();
 
-    let turn = prompt_turn_from_command_request(
+    let mut turn = prompt_turn_from_command_request(
         command,
         req,
         &state.workspace_root,
@@ -451,6 +509,17 @@ pub async fn command(
         state.default_agent.as_deref(),
     )
     .await?;
+    apply_command_execute_before(
+        state.plugin_manager.clone(),
+        &id,
+        &command_name,
+        arguments,
+        &mut turn,
+    )
+    .await?;
+    if !turn.has_content() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     run_prompt_turn(state, id, turn)
         .await
         .map(prompt_output_json)
@@ -743,6 +812,7 @@ async fn run_prompt_turn(
     let mut processor = crate::session::PromptProcessor::new(store.clone(), provider)
         .with_bus(state.event_bus.clone())
         .with_permission_broker(state.permission_broker.clone())
+        .with_plugin_manager(state.plugin_manager.clone())
         .with_tools(crate::tool::registry_with(mcp_tools))
         .with_agent(agent_name);
     if let Some(model) = &model_selection {
@@ -858,6 +928,38 @@ fn prompt_turn_from_request(req: PromptRequest) -> Result<PromptTurn, StatusCode
         model_selection: model_selection_from_value(req.model.as_ref()),
         no_reply: req.no_reply.unwrap_or(false),
     })
+}
+
+async fn apply_command_execute_before(
+    plugin_manager: Arc<crate::plugin::PluginManager>,
+    session_id: &str,
+    command: &str,
+    arguments: Option<String>,
+    turn: &mut PromptTurn,
+) -> Result<(), StatusCode> {
+    let parts = turn
+        .parts
+        .iter()
+        .map(UserPartDraft::to_hook_value)
+        .collect::<Vec<_>>();
+    let output = plugin_manager
+        .trigger_command_execute_before(
+            crate::plugin::CommandExecuteBeforeInput {
+                session_id: session_id.to_string(),
+                command: command.to_string(),
+                arguments,
+                parts: Vec::new(),
+            },
+            crate::plugin::CommandExecuteBeforeOutput { parts },
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    turn.parts = parse_user_part_drafts(&Some(output.parts))?;
+    let text = prompt_text_from_drafts(&turn.parts);
+    if !text.is_empty() || turn.parts.is_empty() {
+        turn.text = text;
+    }
+    Ok(())
 }
 
 async fn prompt_turn_from_command_request(
@@ -1029,6 +1131,17 @@ fn prompt_request_parts(req: &PromptRequest) -> Result<Vec<UserPartDraft>, Statu
     Ok(parts)
 }
 
+fn prompt_text_from_drafts(parts: &[UserPartDraft]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            UserPartDraft::Text { text, .. } if !text.is_empty() => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn parse_user_part_drafts(
     parts: &Option<Vec<serde_json::Value>>,
 ) -> Result<Vec<UserPartDraft>, StatusCode> {
@@ -1193,6 +1306,7 @@ fn model_ref_from_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn prompt_request_text_accepts_legacy_message_and_ts_parts() {
@@ -1315,5 +1429,92 @@ mod tests {
             ..command
         };
         assert!(!command_runs_as_subtask(&disabled, None, None, None));
+    }
+
+    struct CommandHookPlugin;
+
+    #[async_trait::async_trait]
+    impl crate::plugin::Plugin for CommandHookPlugin {
+        fn meta(&self) -> crate::plugin::PluginMeta {
+            crate::plugin::PluginMeta {
+                id: "command-hook-test".to_string(),
+                name: "Command Hook Test".to_string(),
+                version: "0.0.0".to_string(),
+                description: None,
+                author: None,
+            }
+        }
+
+        async fn initialize(
+            &self,
+            _config: crate::plugin::PluginConfig,
+        ) -> anyhow::Result<crate::plugin::Hooks> {
+            Ok(crate::plugin::Hooks {
+                on_command_execute_before: Some(Arc::new(
+                    |input: crate::plugin::CommandExecuteBeforeInput| {
+                        Box::pin(async move {
+                            Ok(crate::plugin::CommandExecuteBeforeOutput {
+                                parts: vec![serde_json::json!({
+                                    "type": "text",
+                                    "text": format!(
+                                        "{}:{}",
+                                        input.command,
+                                        input.arguments.unwrap_or_default()
+                                    )
+                                })],
+                            })
+                        })
+                    },
+                )),
+                ..crate::plugin::Hooks::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn command_execute_before_hook_can_replace_parts() {
+        let mut manager = crate::plugin::PluginManager::new();
+        manager
+            .register(
+                Arc::new(CommandHookPlugin),
+                crate::plugin::PluginConfig {
+                    enabled: true,
+                    options: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut turn = PromptTurn {
+            text: "original".to_string(),
+            parts: vec![UserPartDraft::Text {
+                id: None,
+                text: "original".to_string(),
+                synthetic: None,
+                ignored: None,
+                time: None,
+                metadata: None,
+            }],
+            message_id: None,
+            agent: None,
+            model_selection: None,
+            no_reply: false,
+        };
+
+        apply_command_execute_before(
+            Arc::new(manager),
+            "session-1",
+            "review",
+            Some("--cached".to_string()),
+            &mut turn,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(turn.text, "review:--cached");
+        assert_eq!(turn.parts.len(), 1);
+        assert!(matches!(
+            &turn.parts[0],
+            UserPartDraft::Text { text, .. } if text == "review:--cached"
+        ));
     }
 }

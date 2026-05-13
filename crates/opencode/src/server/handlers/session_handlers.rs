@@ -19,6 +19,7 @@ pub struct AppState {
     pub event_bus: EventBus,
     pub permission_broker: crate::permission::PermissionBroker,
     pub mcp_manager: std::sync::Arc<tokio::sync::RwLock<crate::mcp::McpManager>>,
+    pub plugin_manager: std::sync::Arc<crate::plugin::PluginManager>,
     pub default_agent: Option<String>,
     pub default_model: Option<String>,
     pub config: Option<crate::config::Config>,
@@ -41,6 +42,7 @@ impl AppState {
             mcp_manager: std::sync::Arc::new(tokio::sync::RwLock::new(
                 crate::mcp::McpManager::new(),
             )),
+            plugin_manager: std::sync::Arc::new(crate::plugin::PluginManager::new()),
             default_agent: None,
             default_model: None,
             config: None,
@@ -58,6 +60,14 @@ impl AppState {
         provider: std::sync::Arc<dyn crate::provider::Provider>,
     ) -> Self {
         self.provider = Some(provider);
+        self
+    }
+
+    pub fn with_plugin_manager(
+        mut self,
+        plugin_manager: std::sync::Arc<crate::plugin::PluginManager>,
+    ) -> Self {
+        self.plugin_manager = plugin_manager;
         self
     }
 

@@ -1,7 +1,4 @@
-use super::{
-    HookFn, Hooks, PermissionInput, PermissionOutput, Plugin, PluginConfig, PluginMeta,
-    ProviderRequestInput, ProviderRequestOutput,
-};
+use super::{Hooks, Plugin, PluginConfig, PluginMeta, ProviderRequestInput, ProviderRequestOutput};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -25,8 +22,9 @@ impl Plugin for CodexAuthPlugin {
         }
     }
 
-    async fn initialize(&self, config: PluginConfig) -> anyhow::Result<Hooks> {
+    async fn initialize(&self, _config: PluginConfig) -> anyhow::Result<Hooks> {
         Ok(Hooks {
+            on_command_execute_before: None,
             on_provider_request: Some(Arc::new(|input: ProviderRequestInput| {
                 Box::pin(async move {
                     if input.provider == "openai" || input.provider == "codex" {
@@ -81,8 +79,9 @@ impl Plugin for CopilotAuthPlugin {
         }
     }
 
-    async fn initialize(&self, config: PluginConfig) -> anyhow::Result<Hooks> {
+    async fn initialize(&self, _config: PluginConfig) -> anyhow::Result<Hooks> {
         Ok(Hooks {
+            on_command_execute_before: None,
             on_provider_request: Some(Arc::new(|input: ProviderRequestInput| {
                 Box::pin(async move {
                     if input.provider == "copilot" || input.provider == "github-copilot" {
@@ -138,8 +137,9 @@ impl Plugin for GitlabAuthPlugin {
         }
     }
 
-    async fn initialize(&self, config: PluginConfig) -> anyhow::Result<Hooks> {
+    async fn initialize(&self, _config: PluginConfig) -> anyhow::Result<Hooks> {
         Ok(Hooks {
+            on_command_execute_before: None,
             on_provider_request: Some(Arc::new(|input: ProviderRequestInput| {
                 Box::pin(async move {
                     if input.provider == "gitlab" {
@@ -192,8 +192,9 @@ impl Plugin for PoeAuthPlugin {
         }
     }
 
-    async fn initialize(&self, config: PluginConfig) -> anyhow::Result<Hooks> {
+    async fn initialize(&self, _config: PluginConfig) -> anyhow::Result<Hooks> {
         Ok(Hooks {
+            on_command_execute_before: None,
             on_provider_request: Some(Arc::new(|input: ProviderRequestInput| {
                 Box::pin(async move {
                     if input.provider == "poe" {
@@ -246,8 +247,9 @@ impl Plugin for CloudflareWorkersAuthPlugin {
         }
     }
 
-    async fn initialize(&self, config: PluginConfig) -> anyhow::Result<Hooks> {
+    async fn initialize(&self, _config: PluginConfig) -> anyhow::Result<Hooks> {
         Ok(Hooks {
+            on_command_execute_before: None,
             on_provider_request: Some(Arc::new(|input: ProviderRequestInput| {
                 Box::pin(async move {
                     if input.provider == "cloudflare-workers" {
@@ -303,8 +305,9 @@ impl Plugin for CloudflareAIGatewayAuthPlugin {
         }
     }
 
-    async fn initialize(&self, config: PluginConfig) -> anyhow::Result<Hooks> {
+    async fn initialize(&self, _config: PluginConfig) -> anyhow::Result<Hooks> {
         Ok(Hooks {
+            on_command_execute_before: None,
             on_provider_request: Some(Arc::new(|input: ProviderRequestInput| {
                 Box::pin(async move {
                     if input.provider == "cloudflare-ai-gateway" {
@@ -360,8 +363,9 @@ impl Plugin for AzureAuthPlugin {
         }
     }
 
-    async fn initialize(&self, config: PluginConfig) -> anyhow::Result<Hooks> {
+    async fn initialize(&self, _config: PluginConfig) -> anyhow::Result<Hooks> {
         Ok(Hooks {
+            on_command_execute_before: None,
             on_provider_request: Some(Arc::new(|input: ProviderRequestInput| {
                 Box::pin(async move {
                     if input.provider == "azure" {
