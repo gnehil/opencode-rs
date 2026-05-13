@@ -326,7 +326,11 @@ impl PromptProcessor {
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
-        let system = crate::acp::agent::build_system_prompt(&cwd, &self.tools);
+        let system = crate::acp::agent::build_system_prompt_for_agent(
+            &cwd,
+            &self.tools,
+            &self.agent_name,
+        );
 
         Ok(CompletionRequest {
             model: crate::provider::ModelID::new(model_id),

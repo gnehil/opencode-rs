@@ -2,7 +2,7 @@ mod default;
 mod info;
 mod mode;
 mod model;
-mod prompts;
+pub mod prompts;
 
 pub use default::*;
 pub use info::*;

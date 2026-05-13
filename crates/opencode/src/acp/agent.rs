@@ -812,7 +812,17 @@ impl ACPAgent {
                 parameters: t.parameters_schema(),
             }
         }).collect();
-        let system_prompt = build_system_prompt(&cwd, &self.tools);
+        // Per-session agent (defaults to "build") drives both the
+        // permission ruleset and the system-prompt persona.
+        let agent_name = self
+            .store
+            .get(&session_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|row| row.agent)
+            .unwrap_or_else(|| "build".to_string());
+        let system_prompt = build_system_prompt_for_agent(&cwd, &self.tools, &agent_name);
 
         let mut total_input: u64 = 0;
         let mut total_output: u64 = 0;
@@ -1227,12 +1237,30 @@ struct TodoEntry {
     priority: Option<String>,
 }
 
-/// Construct a minimal system prompt that introduces the agent role,
-/// names the working directory, and enumerates available tools. This is
-/// deliberately small — the heavy "agent persona" prompt lives in TS's
-/// session/system.ts and isn't ported yet. Keeping it concise also keeps
-/// token usage predictable until compaction is wired in.
+/// Construct the system prompt the model receives at the start of a
+/// turn.
+///
+/// Composition:
+///   * Generic preamble (role, working directory, "prefer reading
+///     before writing"-style guidance).
+///   * Available tools list.
+///   * Agent-specific persona (`agent::get_agent(name).prompt`) if
+///     the agent has one. The `explore`, `scout`, `compaction`,
+///     `title`, and `summary` agents ship with their own prompts;
+///     `build`/`plan`/`general` use the preamble alone.
+///
+/// Falls back to no agent-specific prompt if the agent name doesn't
+/// resolve in the registry, so callers can pass arbitrary strings
+/// without crashing.
 pub fn build_system_prompt(cwd: &str, tools: &[Arc<dyn crate::tool::Tool>]) -> String {
+    build_system_prompt_for_agent(cwd, tools, "build")
+}
+
+pub fn build_system_prompt_for_agent(
+    cwd: &str,
+    tools: &[Arc<dyn crate::tool::Tool>],
+    agent_name: &str,
+) -> String {
     let mut s = String::new();
     s.push_str("You are an autonomous coding agent operating inside a developer's project.\n");
     s.push_str(&format!("Working directory: {}\n", cwd));
@@ -1242,6 +1270,16 @@ pub fn build_system_prompt(cwd: &str, tools: &[Arc<dyn crate::tool::Tool>]) -> S
         s.push_str("Available tools:\n");
         for tool in tools {
             s.push_str(&format!("- {}: {}\n", tool.name(), tool.description()));
+        }
+        s.push('\n');
+    }
+    if let Some(agent_info) = crate::agent::get_agent(agent_name) {
+        if let Some(persona) = agent_info.prompt.as_ref().filter(|p| !p.trim().is_empty()) {
+            s.push_str("---\n");
+            s.push_str(persona);
+            if !persona.ends_with('\n') {
+                s.push('\n');
+            }
         }
     }
     s
@@ -1419,5 +1457,33 @@ mod tests {
         let prompt = build_system_prompt("/repo/x", &[]);
         assert!(prompt.contains("/repo/x"));
         assert!(!prompt.contains("Available tools:"));
+    }
+
+    #[test]
+    fn system_prompt_includes_agent_persona() {
+        // `explore` agent ships with a persona prompt; verify it gets
+        // appended.
+        let prompt = build_system_prompt_for_agent("/x", &[], "explore");
+        // The explore prompt mentions read/grep/glob tools by name.
+        // Look for any token from the explore.txt prompt header.
+        let explore_persona = crate::agent::prompts::PROMPT_EXPLORE;
+        assert!(prompt.contains(explore_persona), "explore persona not present");
+        assert!(prompt.contains("---")); // separator
+    }
+
+    #[test]
+    fn system_prompt_omits_persona_for_personaless_agent() {
+        // `build` agent has no `prompt` field — the persona section
+        // should not appear.
+        let prompt = build_system_prompt_for_agent("/x", &[], "build");
+        assert!(!prompt.contains("---"));
+    }
+
+    #[test]
+    fn system_prompt_unknown_agent_falls_back_gracefully() {
+        // Unknown agent: still produce the preamble; no panic.
+        let prompt = build_system_prompt_for_agent("/x", &[], "nonexistent-agent");
+        assert!(prompt.contains("/x"));
+        assert!(!prompt.contains("---"));
     }
 }
