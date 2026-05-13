@@ -179,6 +179,25 @@ fn event_properties(event: &BusEvent) -> serde_json::Value {
             "field": e.field,
             "delta": e.delta,
         }),
+        BusEvent::TuiPromptAppend(e) => serde_json::json!({
+            "text": e.text,
+        }),
+        BusEvent::TuiCommandExecute(e) => {
+            let mut props = serde_json::Map::new();
+            insert_optional(&mut props, "command", &e.command);
+            serde_json::Value::Object(props)
+        }
+        BusEvent::TuiToastShow(e) => {
+            let mut props = serde_json::Map::new();
+            insert_optional(&mut props, "title", &e.title);
+            props.insert("message".to_string(), serde_json::json!(e.message));
+            props.insert("variant".to_string(), serde_json::json!(e.variant));
+            props.insert("duration".to_string(), serde_json::json!(e.duration));
+            serde_json::Value::Object(props)
+        }
+        BusEvent::TuiSessionSelect(e) => serde_json::json!({
+            "sessionID": e.session_id,
+        }),
     }
 }
 
@@ -241,5 +260,19 @@ mod tests {
             payload["properties"]["output"],
             serde_json::json!({ "ok": true })
         );
+    }
+
+    #[test]
+    fn tui_event_payload_matches_opencode_bus_shape() {
+        let event = BusEvent::tui_command_execute(Some("prompt.submit".to_string()));
+        let payload = bus_event_payload(&event);
+
+        assert_eq!(payload["type"], "tui.command.execute");
+        assert_eq!(payload["properties"]["command"], "prompt.submit");
+
+        let event = BusEvent::tui_session_select("ses_123");
+        let payload = bus_event_payload(&event);
+        assert_eq!(payload["type"], "tui.session.select");
+        assert_eq!(payload["properties"]["sessionID"], "ses_123");
     }
 }

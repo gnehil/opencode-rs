@@ -1,5 +1,6 @@
 pub mod app;
 pub mod components;
+pub mod control;
 pub mod event;
 pub mod keymap;
 pub mod state;

@@ -186,8 +186,10 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/tui/show-toast", post(tui_handlers::show_toast))
         .route("/tui/open-help", post(tui_handlers::open_help))
         .route("/tui/open-sessions", post(tui_handlers::open_sessions))
+        .route("/tui/open-themes", post(tui_handlers::open_themes))
         .route("/tui/open-models", post(tui_handlers::open_models))
         .route("/tui/select-session", post(tui_handlers::select_session))
+        .route("/tui/publish", post(tui_handlers::publish))
         .route("/tui/control/next", get(tui_handlers::tui_next))
         .route("/tui/control/response", post(tui_handlers::tui_response))
         .route("/workspace", get(workspace_handlers::list_workspaces))
@@ -671,6 +673,145 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tui_routes_publish_events_and_drive_control_queue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = std::sync::Arc::new(
+            AppState::new(tmp.path().join("data")).with_workspace_root(tmp.path().to_path_buf()),
+        );
+        let app = create_router_with_state(state.clone());
+        let mut events = state.event_bus.listener();
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/tui/append-prompt")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "text": "hello" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!(true));
+        match events.recv().await.unwrap() {
+            crate::bus::event::Event::TuiPromptAppend(event) => {
+                assert_eq!(event.text, "hello");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/tui/execute-command")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "command": "messages_page_down" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!(true));
+        match events.recv().await.unwrap() {
+            crate::bus::event::Event::TuiCommandExecute(event) => {
+                assert_eq!(event.command.as_deref(), Some("session.page.down"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/tui/open-themes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!(true));
+        match events.recv().await.unwrap() {
+            crate::bus::event::Event::TuiCommandExecute(event) => {
+                assert_eq!(event.command.as_deref(), Some("session.list"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/tui/publish")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "type": "tui.toast.show",
+                        "properties": { "message": "saved", "variant": "success" }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!(true));
+        match events.recv().await.unwrap() {
+            crate::bus::event::Event::TuiToastShow(event) => {
+                assert_eq!(event.message, "saved");
+                assert_eq!(event.variant, "success");
+                assert_eq!(event.duration, 5000);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        state
+            .tui_control
+            .submit_request(crate::tui::control::TuiRequest {
+                path: "/session".to_string(),
+                body: serde_json::json!({ "limit": 1 }),
+            })
+            .await
+            .unwrap();
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/tui/control/next")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            serde_json::json!({ "path": "/session", "body": { "limit": 1 } })
+        );
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri("/tui/control/response")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "accepted": true }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!(true));
+        assert_eq!(
+            state.tui_control.next_response().await.unwrap(),
+            serde_json::json!({ "accepted": true })
+        );
     }
 
     #[tokio::test]

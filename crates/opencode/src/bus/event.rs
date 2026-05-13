@@ -147,6 +147,35 @@ pub struct MessagePartDeltaEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiPromptAppendEvent {
+    pub id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiCommandExecuteEvent {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiToastShowEvent {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub message: String,
+    pub variant: String,
+    pub duration: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiSessionSelectEvent {
+    pub id: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum Event {
     SessionCreate(SessionEvent),
@@ -167,6 +196,11 @@ pub enum Event {
     PermissionAsked(PermissionAskedEvent),
     MessagePartUpdated(MessagePartUpdatedEvent),
     MessagePartDelta(MessagePartDeltaEvent),
+
+    TuiPromptAppend(TuiPromptAppendEvent),
+    TuiCommandExecute(TuiCommandExecuteEvent),
+    TuiToastShow(TuiToastShowEvent),
+    TuiSessionSelect(TuiSessionSelectEvent),
 }
 
 impl Event {
@@ -186,6 +220,10 @@ impl Event {
             Event::PermissionAsked(e) => e.session_id.clone(),
             Event::MessagePartUpdated(e) => e.session_id.clone(),
             Event::MessagePartDelta(e) => e.session_id.clone(),
+            Event::TuiPromptAppend(_) => String::new(),
+            Event::TuiCommandExecute(_) => String::new(),
+            Event::TuiToastShow(_) => String::new(),
+            Event::TuiSessionSelect(e) => e.session_id.clone(),
         }
     }
 
@@ -205,6 +243,10 @@ impl Event {
             Event::PermissionAsked(e) => e.permission_id.clone(),
             Event::MessagePartUpdated(e) => e.part_id.clone(),
             Event::MessagePartDelta(e) => e.part_id.clone(),
+            Event::TuiPromptAppend(e) => e.id.clone(),
+            Event::TuiCommandExecute(e) => e.id.clone(),
+            Event::TuiToastShow(e) => e.id.clone(),
+            Event::TuiSessionSelect(e) => e.id.clone(),
         }
     }
 
@@ -224,6 +266,10 @@ impl Event {
             Event::PermissionAsked(_) => "permission.asked",
             Event::MessagePartUpdated(_) => "message.part.updated",
             Event::MessagePartDelta(_) => "message.part.delta",
+            Event::TuiPromptAppend(_) => "tui.prompt.append",
+            Event::TuiCommandExecute(_) => "tui.command.execute",
+            Event::TuiToastShow(_) => "tui.toast.show",
+            Event::TuiSessionSelect(_) => "tui.session.select",
         }
     }
 
@@ -381,6 +427,42 @@ impl Event {
             part_id: part_id.into(),
             field: field.into(),
             delta: delta.into(),
+        })
+    }
+
+    pub fn tui_prompt_append(text: impl Into<String>) -> Self {
+        Event::TuiPromptAppend(TuiPromptAppendEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            text: text.into(),
+        })
+    }
+
+    pub fn tui_command_execute(command: Option<impl Into<String>>) -> Self {
+        Event::TuiCommandExecute(TuiCommandExecuteEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            command: command.map(Into::into),
+        })
+    }
+
+    pub fn tui_toast_show(
+        title: Option<impl Into<String>>,
+        message: impl Into<String>,
+        variant: impl Into<String>,
+        duration: u64,
+    ) -> Self {
+        Event::TuiToastShow(TuiToastShowEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: title.map(Into::into),
+            message: message.into(),
+            variant: variant.into(),
+            duration,
+        })
+    }
+
+    pub fn tui_session_select(session_id: impl Into<String>) -> Self {
+        Event::TuiSessionSelect(TuiSessionSelectEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.into(),
         })
     }
 }

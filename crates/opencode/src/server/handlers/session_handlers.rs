@@ -21,6 +21,7 @@ pub struct AppState {
     pub permission_broker: crate::permission::PermissionBroker,
     pub pty_service: std::sync::Arc<crate::pty::PtyService>,
     pub pty_tickets: std::sync::Arc<crate::pty::PtyTicketStore>,
+    pub tui_control: std::sync::Arc<crate::tui::control::TuiControl>,
     pub mcp_manager: std::sync::Arc<tokio::sync::RwLock<crate::mcp::McpManager>>,
     pub plugin_manager: std::sync::Arc<crate::plugin::PluginManager>,
     pub default_agent: Option<String>,
@@ -43,6 +44,7 @@ impl AppState {
             workspace_root,
             pty_service: std::sync::Arc::new(crate::pty::PtyService::new(event_bus.clone())),
             pty_tickets: std::sync::Arc::new(crate::pty::PtyTicketStore::default()),
+            tui_control: std::sync::Arc::new(crate::tui::control::TuiControl::new()),
             event_bus,
             permission_broker: crate::permission::PermissionBroker::new(),
             mcp_manager: std::sync::Arc::new(tokio::sync::RwLock::new(
