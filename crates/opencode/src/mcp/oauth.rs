@@ -1,17 +1,17 @@
+use axum::{
+    extract::Query,
+    http::StatusCode,
+    response::{Html, IntoResponse},
+    routing::get,
+    Router,
+};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use serde::{Deserialize, Serialize};
-use axum::{
-    Router,
-    routing::get,
-    extract::Query,
-    response::{Html, IntoResponse},
-    http::StatusCode,
-};
 use tower_http::cors::CorsLayer;
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthTokens {
@@ -63,7 +63,15 @@ impl McpAuthStore {
 
     pub async fn save(&self) -> anyhow::Result<()> {
         let entries = self.entries.read().await;
-        let content = serde_json::to_string(&*entries)?;
+        self.persist_entries(&entries)?;
+        Ok(())
+    }
+
+    fn persist_entries(&self, entries: &HashMap<String, McpAuthEntry>) -> anyhow::Result<()> {
+        if let Some(parent) = self.filepath.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string(entries)?;
         std::fs::write(&self.filepath, content)?;
         Ok(())
     }
@@ -86,54 +94,82 @@ impl McpAuthStore {
     }
 
     pub async fn set(&self, mcp_name: &str, entry: McpAuthEntry) -> anyhow::Result<()> {
-        let mut entries = self.entries.write().await;
-        entries.insert(mcp_name.to_string(), entry);
-        self.save().await?;
+        let snapshot = {
+            let mut entries = self.entries.write().await;
+            entries.insert(mcp_name.to_string(), entry);
+            entries.clone()
+        };
+        self.persist_entries(&snapshot)?;
         Ok(())
     }
 
     pub async fn remove(&self, mcp_name: &str) -> anyhow::Result<()> {
-        let mut entries = self.entries.write().await;
-        entries.remove(mcp_name);
-        self.save().await?;
+        let snapshot = {
+            let mut entries = self.entries.write().await;
+            entries.remove(mcp_name);
+            entries.clone()
+        };
+        self.persist_entries(&snapshot)?;
         Ok(())
     }
 
-    pub async fn update_tokens(&self, mcp_name: &str, tokens: OAuthTokens, server_url: Option<&str>) -> anyhow::Result<()> {
-        let mut entries = self.entries.write().await;
-        let entry = entries.entry(mcp_name.to_string()).or_default();
-        entry.tokens = Some(tokens);
-        if let Some(url) = server_url {
-            entry.server_url = Some(url.to_string());
-        }
-        self.save().await?;
+    pub async fn update_tokens(
+        &self,
+        mcp_name: &str,
+        tokens: OAuthTokens,
+        server_url: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let snapshot = {
+            let mut entries = self.entries.write().await;
+            let entry = entries.entry(mcp_name.to_string()).or_default();
+            entry.tokens = Some(tokens);
+            if let Some(url) = server_url {
+                entry.server_url = Some(url.to_string());
+            }
+            entries.clone()
+        };
+        self.persist_entries(&snapshot)?;
         Ok(())
     }
 
-    pub async fn update_client_info(&self, mcp_name: &str, client_info: OAuthClientInfo, server_url: Option<&str>) -> anyhow::Result<()> {
-        let mut entries = self.entries.write().await;
-        let entry = entries.entry(mcp_name.to_string()).or_default();
-        entry.client_info = Some(client_info);
-        if let Some(url) = server_url {
-            entry.server_url = Some(url.to_string());
-        }
-        self.save().await?;
+    pub async fn update_client_info(
+        &self,
+        mcp_name: &str,
+        client_info: OAuthClientInfo,
+        server_url: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let snapshot = {
+            let mut entries = self.entries.write().await;
+            let entry = entries.entry(mcp_name.to_string()).or_default();
+            entry.client_info = Some(client_info);
+            if let Some(url) = server_url {
+                entry.server_url = Some(url.to_string());
+            }
+            entries.clone()
+        };
+        self.persist_entries(&snapshot)?;
         Ok(())
     }
 
     pub async fn update_code_verifier(&self, mcp_name: &str, verifier: &str) -> anyhow::Result<()> {
-        let mut entries = self.entries.write().await;
-        let entry = entries.entry(mcp_name.to_string()).or_default();
-        entry.code_verifier = Some(verifier.to_string());
-        self.save().await?;
+        let snapshot = {
+            let mut entries = self.entries.write().await;
+            let entry = entries.entry(mcp_name.to_string()).or_default();
+            entry.code_verifier = Some(verifier.to_string());
+            entries.clone()
+        };
+        self.persist_entries(&snapshot)?;
         Ok(())
     }
 
     pub async fn update_oauth_state(&self, mcp_name: &str, state: &str) -> anyhow::Result<()> {
-        let mut entries = self.entries.write().await;
-        let entry = entries.entry(mcp_name.to_string()).or_default();
-        entry.oauth_state = Some(state.to_string());
-        self.save().await?;
+        let snapshot = {
+            let mut entries = self.entries.write().await;
+            let entry = entries.entry(mcp_name.to_string()).or_default();
+            entry.oauth_state = Some(state.to_string());
+            entries.clone()
+        };
+        self.persist_entries(&snapshot)?;
         Ok(())
     }
 
@@ -171,7 +207,8 @@ const HTML_SUCCESS: &str = r#"<!DOCTYPE html>
 </html>"#;
 
 fn html_error(error: &str) -> String {
-    format!(r#"<!DOCTYPE html>
+    format!(
+        r#"<!DOCTYPE html>
 <html>
 <head>
   <title>OpenCode - Authorization Failed</title>
@@ -190,7 +227,9 @@ fn html_error(error: &str) -> String {
     <div class="error">{}</div>
   </div>
 </body>
-</html>"#, error)
+</html>"#,
+        error
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,12 +269,13 @@ impl OAuthCallbackServer {
         let port = self.port;
 
         let app = Router::new()
-            .route(OAUTH_CALLBACK_PATH, get(move |query: Query<CallbackQuery>| {
-                let pending = pending.clone();
-                async move {
-                    handle_callback(query, pending).await
-                }
-            }))
+            .route(
+                OAUTH_CALLBACK_PATH,
+                get(move |query: Query<CallbackQuery>| {
+                    let pending = pending.clone();
+                    async move { handle_callback(query, pending).await }
+                }),
+            )
             .layer(CorsLayer::permissive());
 
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -256,21 +296,29 @@ impl OAuthCallbackServer {
         Ok(())
     }
 
-    pub async fn wait_for_callback(&self, oauth_state: &str, mcp_name: &str) -> anyhow::Result<String> {
+    pub async fn wait_for_callback(
+        &self,
+        oauth_state: &str,
+        mcp_name: &str,
+    ) -> anyhow::Result<String> {
         let (tx, mut rx) = mpsc::channel::<String>(1);
 
         {
             let mut pending = self.pending.write().await;
-            pending.insert(mcp_name.to_string(), PendingAuth {
-                resolve: tx,
-                oauth_state: oauth_state.to_string(),
-            });
+            pending.insert(
+                mcp_name.to_string(),
+                PendingAuth {
+                    resolve: tx,
+                    oauth_state: oauth_state.to_string(),
+                },
+            );
         }
 
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(CALLBACK_TIMEOUT_MS),
-            rx.recv()
-        ).await?;
+            rx.recv(),
+        )
+        .await?;
 
         {
             let mut pending = self.pending.write().await;
@@ -304,11 +352,17 @@ async fn handle_callback(
     }
 
     if query.state.is_none() {
-        return (StatusCode::BAD_REQUEST, Html(html_error("Missing state parameter")));
+        return (
+            StatusCode::BAD_REQUEST,
+            Html(html_error("Missing state parameter")),
+        );
     }
 
     if query.code.is_none() {
-        return (StatusCode::BAD_REQUEST, Html(html_error("No authorization code provided")));
+        return (
+            StatusCode::BAD_REQUEST,
+            Html(html_error("No authorization code provided")),
+        );
     }
 
     let state = query.state.unwrap();
@@ -319,7 +373,10 @@ async fn handle_callback(
         let matching = pending_map.values().find(|p| p.oauth_state == state);
 
         if matching.is_none() {
-            return (StatusCode::BAD_REQUEST, Html(html_error("Invalid state parameter")));
+            return (
+                StatusCode::BAD_REQUEST,
+                Html(html_error("Invalid state parameter")),
+            );
         }
 
         if let Some(auth) = matching {
@@ -345,7 +402,7 @@ pub fn generate_code_verifier() -> String {
 }
 
 pub fn generate_code_challenge(verifier: &str) -> String {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(verifier.as_bytes());
     let hash = hasher.finalize();
@@ -375,7 +432,10 @@ impl McpOAuthProvider {
     }
 
     pub fn redirect_url(&self) -> String {
-        format!("http://127.0.0.1:{}{}", OAUTH_CALLBACK_PORT, OAUTH_CALLBACK_PATH)
+        format!(
+            "http://127.0.0.1:{}{}",
+            OAUTH_CALLBACK_PORT, OAUTH_CALLBACK_PATH
+        )
     }
 
     pub async fn client_metadata(&self) -> serde_json::Value {
@@ -390,34 +450,48 @@ impl McpOAuthProvider {
     }
 
     pub async fn client_info(&self) -> Option<OAuthClientInfo> {
-        self.auth_store.get_for_url(&self.mcp_name, &self.server_url).await
+        self.auth_store
+            .get_for_url(&self.mcp_name, &self.server_url)
+            .await
             .and_then(|e| e.client_info)
     }
 
     pub async fn save_client_info(&self, client_info: OAuthClientInfo) -> anyhow::Result<()> {
-        self.auth_store.update_client_info(&self.mcp_name, client_info, Some(&self.server_url)).await
+        self.auth_store
+            .update_client_info(&self.mcp_name, client_info, Some(&self.server_url))
+            .await
     }
 
     pub async fn tokens(&self) -> Option<OAuthTokens> {
-        self.auth_store.get_for_url(&self.mcp_name, &self.server_url).await
+        self.auth_store
+            .get_for_url(&self.mcp_name, &self.server_url)
+            .await
             .and_then(|e| e.tokens)
     }
 
     pub async fn save_tokens(&self, tokens: OAuthTokens) -> anyhow::Result<()> {
-        self.auth_store.update_tokens(&self.mcp_name, tokens, Some(&self.server_url)).await
+        self.auth_store
+            .update_tokens(&self.mcp_name, tokens, Some(&self.server_url))
+            .await
     }
 
     pub async fn save_code_verifier(&self, verifier: &str) -> anyhow::Result<()> {
-        self.auth_store.update_code_verifier(&self.mcp_name, verifier).await
+        self.auth_store
+            .update_code_verifier(&self.mcp_name, verifier)
+            .await
     }
 
     pub async fn code_verifier(&self) -> Option<String> {
-        self.auth_store.get(&self.mcp_name).await
+        self.auth_store
+            .get(&self.mcp_name)
+            .await
             .and_then(|e| e.code_verifier)
     }
 
     pub async fn save_state(&self, state: &str) -> anyhow::Result<()> {
-        self.auth_store.update_oauth_state(&self.mcp_name, state).await
+        self.auth_store
+            .update_oauth_state(&self.mcp_name, state)
+            .await
     }
 
     pub async fn state(&self) -> String {
@@ -445,12 +519,18 @@ impl McpOAuthProvider {
         Ok(state)
     }
 
-    pub async fn complete_auth(&self, code: &str, token_endpoint: &str) -> anyhow::Result<OAuthTokens> {
-        let verifier = self.code_verifier().await
+    pub async fn complete_auth(
+        &self,
+        code: &str,
+        token_endpoint: &str,
+    ) -> anyhow::Result<OAuthTokens> {
+        let verifier = self
+            .code_verifier()
+            .await
             .ok_or_else(|| anyhow::anyhow!("No code verifier found"))?;
 
         let redirect_uri = self.redirect_url();
-        
+
         let client = reqwest::Client::new();
         let response = client
             .post(token_endpoint)
@@ -473,9 +553,9 @@ impl McpOAuthProvider {
         let tokens = OAuthTokens {
             access_token: token_response.access_token,
             refresh_token: token_response.refresh_token,
-            expires_at: token_response.expires_in.map(|exp| {
-                chrono::Utc::now().timestamp() + exp as i64
-            }),
+            expires_at: token_response
+                .expires_in
+                .map(|exp| chrono::Utc::now().timestamp() + exp as i64),
             scope: token_response.scope,
         };
 
@@ -484,7 +564,11 @@ impl McpOAuthProvider {
         Ok(tokens)
     }
 
-    pub async fn refresh_tokens(&self, refresh_token: &str, token_endpoint: &str) -> anyhow::Result<OAuthTokens> {
+    pub async fn refresh_tokens(
+        &self,
+        refresh_token: &str,
+        token_endpoint: &str,
+    ) -> anyhow::Result<OAuthTokens> {
         let client = reqwest::Client::new();
         let response = client
             .post(token_endpoint)
@@ -504,10 +588,12 @@ impl McpOAuthProvider {
 
         let tokens = OAuthTokens {
             access_token: token_response.access_token,
-            refresh_token: token_response.refresh_token.or(Some(refresh_token.to_string())),
-            expires_at: token_response.expires_in.map(|exp| {
-                chrono::Utc::now().timestamp() + exp as i64
-            }),
+            refresh_token: token_response
+                .refresh_token
+                .or(Some(refresh_token.to_string())),
+            expires_at: token_response
+                .expires_in
+                .map(|exp| chrono::Utc::now().timestamp() + exp as i64),
             scope: token_response.scope,
         };
 
@@ -524,4 +610,33 @@ struct TokenEndpointResponse {
     expires_in: Option<u32>,
     scope: Option<String>,
     token_type: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn auth_store_persists_updates_without_existing_data_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("missing").join("opencode");
+        let store = McpAuthStore::new(data_dir.clone());
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            store.update_code_verifier("local", "verifier"),
+        )
+        .await
+        .expect("auth store update should not deadlock")
+        .expect("auth store update should persist");
+
+        let text = std::fs::read_to_string(data_dir.join("mcp-auth.json")).unwrap();
+        let data: HashMap<String, McpAuthEntry> = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            data.get("local")
+                .and_then(|entry| entry.code_verifier.as_deref()),
+            Some("verifier")
+        );
+    }
 }

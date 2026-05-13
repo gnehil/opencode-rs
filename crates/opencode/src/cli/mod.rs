@@ -1,4 +1,5 @@
 pub mod args;
+mod local;
 
 use clap::{CommandFactory, Parser};
 use std::net::SocketAddr;
@@ -42,8 +43,23 @@ pub async fn run_async() {
         Some(args::Commands::Run(run_args)) => {
             handle_run(run_args, data_dir).await;
         }
+        Some(args::Commands::Generate) => {
+            exit_on_error(local::handle_generate());
+        }
+        Some(args::Commands::Console { subcommand }) => {
+            exit_on_error(local::handle_console(subcommand));
+        }
         Some(args::Commands::Session { subcommand }) => {
             handle_session(subcommand, data_dir).await;
+        }
+        Some(args::Commands::Agent { subcommand }) => {
+            exit_on_error(local::handle_agent(subcommand).await);
+        }
+        Some(args::Commands::Upgrade(upgrade_args)) => {
+            exit_on_error(local::handle_upgrade(upgrade_args));
+        }
+        Some(args::Commands::Uninstall(uninstall_args)) => {
+            exit_on_error(local::handle_uninstall(uninstall_args, data_dir));
         }
         Some(args::Commands::Models(models_args)) => {
             handle_models(models_args).await;
@@ -54,17 +70,71 @@ pub async fn run_async() {
         Some(args::Commands::Web(network_args)) => {
             handle_serve(network_args, data_dir, true).await;
         }
+        Some(args::Commands::Stats(stats_args)) => {
+            exit_on_error(local::handle_stats(stats_args, data_dir).await);
+        }
+        Some(args::Commands::Debug { subcommand }) => {
+            exit_on_error(local::handle_debug(subcommand).await);
+        }
+        Some(args::Commands::Mcp { subcommand }) => {
+            exit_on_error(local::handle_mcp(subcommand, data_dir).await);
+        }
+        Some(args::Commands::Github { subcommand }) => {
+            exit_on_error(local::handle_github(subcommand));
+        }
+        Some(args::Commands::Export(export_args)) => {
+            exit_on_error(local::handle_export(export_args, data_dir).await);
+        }
+        Some(args::Commands::Import(import_args)) => {
+            exit_on_error(local::handle_import(import_args, data_dir).await);
+        }
+        Some(args::Commands::Pr(pr_args)) => {
+            exit_on_error(local::handle_pr(pr_args));
+        }
         Some(args::Commands::Providers { subcommand }) => {
             handle_providers(subcommand).await;
+        }
+        Some(args::Commands::Plugin(plugin_args)) => {
+            exit_on_error(local::handle_plugin(plugin_args));
+        }
+        Some(args::Commands::Db { subcommand }) => {
+            exit_on_error(local::handle_db(subcommand, data_dir).await);
         }
         Some(args::Commands::Acp(acp_args)) => {
             handle_acp(acp_args, data_dir).await;
         }
-        _ => {
-            eprintln!(
-                "Command not yet implemented. Use 'opencode run <message>' to start a session."
-            );
+        Some(args::Commands::Attach(attach_args)) => {
+            exit_on_error(local::handle_attach(attach_args));
         }
+        None => {
+            handle_tui(
+                args::TuiArgs {
+                    project: None,
+                    r#continue: false,
+                    session: None,
+                    fork: false,
+                    prompt: None,
+                    model: None,
+                    agent: None,
+                    network: args::NetworkArgsMinimal {
+                        port: None,
+                        hostname: None,
+                        mdns: false,
+                        mdns_domain: None,
+                        cors: Vec::new(),
+                    },
+                },
+                data_dir,
+            )
+            .await;
+        }
+    }
+}
+
+fn exit_on_error(result: anyhow::Result<()>) {
+    if let Err(e) = result {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
     }
 }
 
@@ -174,14 +244,18 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
         .as_deref()
         .or_else(|| session.model.as_deref())
         .or(agent_config_model)
-        .or_else(|| project_config.as_ref().and_then(|config| config.model.as_deref()))
+        .or_else(|| {
+            project_config
+                .as_ref()
+                .and_then(|config| config.model.as_deref())
+        })
         .or(env_model.as_deref());
 
-    let provider =
-        build_provider_from_model_config_or_env(selected_model, project_config.as_ref()).unwrap_or_else(|e| {
-        eprintln!("Failed to initialize provider: {}", e);
-        std::process::exit(1);
-    });
+    let provider = build_provider_from_model_config_or_env(selected_model, project_config.as_ref())
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to initialize provider: {}", e);
+            std::process::exit(1);
+        });
 
     println!("Using provider: {}", provider.name());
     println!(
@@ -210,7 +284,8 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
                 std::process::exit(1);
             });
     }
-    if let Some(model) = selected_model.filter(|_| args.model.is_some() || session.model.is_none()) {
+    if let Some(model) = selected_model.filter(|_| args.model.is_some() || session.model.is_none())
+    {
         store
             .set_model(&session_id, model)
             .await
@@ -246,9 +321,15 @@ async fn handle_session(subcommand: args::SessionSubcommand, data_dir: PathBuf) 
                 eprintln!("Failed to list sessions: {}", e);
                 std::process::exit(1);
             });
+            let sessions = local::limit_rows(sessions, list_args.max_count);
 
             if sessions.is_empty() {
                 println!("No sessions found.");
+            } else if matches!(list_args.format, args::OutputFormat::Json) {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&sessions).unwrap_or_else(|_| "[]".to_string())
+                );
             } else {
                 println!("Sessions:");
                 for session in sessions {
@@ -310,12 +391,22 @@ async fn handle_providers(subcommand: args::ProvidersSubcommand) {
             provider,
             method,
         } => {
-            let provider_name = provider.unwrap_or_else(|| "unknown".to_string());
-            println!("Provider login for {} not yet implemented.", provider_name);
+            let provider_name = provider.unwrap_or_else(|| "default".to_string());
+            println!("Provider: {}", provider_name);
+            if let Some(url) = url {
+                println!("URL: {}", url);
+            }
+            if let Some(method) = method {
+                println!("Method: {}", method);
+            }
+            println!("Set the provider API key in opencode.json or the provider-specific environment variable.");
         }
         args::ProvidersSubcommand::Logout { provider } => {
-            let provider_name = provider.unwrap_or_else(|| "unknown".to_string());
-            println!("Provider logout for {} not yet implemented.", provider_name);
+            let provider_name = provider.unwrap_or_else(|| "default".to_string());
+            println!(
+                "Provider logout for {} is local-only: remove its key from opencode.json or unset the environment variable.",
+                provider_name
+            );
         }
     }
 }
@@ -365,7 +456,9 @@ async fn handle_serve(args: args::NetworkArgs, data_dir: PathBuf, open_web: bool
         }
     }
 
-    let selected_model = project_config.as_ref().and_then(|config| config.model.as_deref());
+    let selected_model = project_config
+        .as_ref()
+        .and_then(|config| config.model.as_deref());
     match try_build_provider_from_config_or_env(selected_model, project_config.as_ref()) {
         Ok(Some(provider)) => {
             eprintln!("Using provider: {}", provider.name());
@@ -525,7 +618,10 @@ fn provider_id_from_config(config: Option<&Config>) -> Option<String> {
 
     let disabled = config.disabled_providers.as_deref().unwrap_or(&[]);
     let mut candidates = providers.iter().filter_map(|(id, entry)| {
-        if disabled.iter().any(|item| normalize_provider_id(item) == normalize_provider_id(id)) {
+        if disabled
+            .iter()
+            .any(|item| normalize_provider_id(item) == normalize_provider_id(id))
+        {
             return None;
         }
         if !provider_entry_has_runtime_config(entry) {
@@ -575,9 +671,13 @@ fn build_provider_from_config(
         "gitlab" => {
             api_key.map(|key| Arc::new(GitLabProvider::new(base_url, key)) as Arc<dyn Provider>)
         }
-        "google" | "gemini" => api_key.map(|key| Arc::new(GoogleProvider::new(key)) as Arc<dyn Provider>),
+        "google" | "gemini" => {
+            api_key.map(|key| Arc::new(GoogleProvider::new(key)) as Arc<dyn Provider>)
+        }
         "groq" => api_key.map(|key| Arc::new(GroqProvider::new(key)) as Arc<dyn Provider>),
-        "lmstudio" | "lm-studio" => Some(Arc::new(LMStudioProvider::new(base_url)) as Arc<dyn Provider>),
+        "lmstudio" | "lm-studio" => {
+            Some(Arc::new(LMStudioProvider::new(base_url)) as Arc<dyn Provider>)
+        }
         "mistral" => api_key.map(|key| Arc::new(MistralProvider::new(key)) as Arc<dyn Provider>),
         "ollama" => Some(Arc::new(OllamaProvider::new(base_url)) as Arc<dyn Provider>),
         "openai" => api_key
@@ -589,8 +689,7 @@ fn build_provider_from_config(
                     api_key,
                     base_url,
                     None,
-                ))
-                    as Arc<dyn Provider>
+                )) as Arc<dyn Provider>
             }),
         "openrouter" => {
             api_key.map(|key| Arc::new(OpenRouterProvider::new(key)) as Arc<dyn Provider>)
@@ -619,25 +718,17 @@ fn configured_provider_entry<'a>(
     config: Option<&'a Config>,
     provider_id: &str,
 ) -> Option<(&'a String, &'a ProviderConfigEntry)> {
-    config?.provider.as_ref()?.iter().find(|(id, entry)| {
-        configured_provider_matches(id, entry, provider_id)
-    })
+    config?
+        .provider
+        .as_ref()?
+        .iter()
+        .find(|(id, entry)| configured_provider_matches(id, entry, provider_id))
 }
 
 fn configured_provider_matches(id: &str, entry: &ProviderConfigEntry, provider_id: &str) -> bool {
     normalize_provider_id(id) == provider_id
-        || entry
-            .id
-            .as_deref()
-            .map(normalize_provider_id)
-            .as_deref()
-            == Some(provider_id)
-        || entry
-            .api
-            .as_deref()
-            .map(normalize_provider_id)
-            .as_deref()
-            == Some(provider_id)
+        || entry.id.as_deref().map(normalize_provider_id).as_deref() == Some(provider_id)
+        || entry.api.as_deref().map(normalize_provider_id).as_deref() == Some(provider_id)
         || entry
             .npm
             .as_deref()
@@ -810,7 +901,9 @@ fn open_browser(url: &str) {
     }
 }
 
-async fn load_mcp_tools_from_project(project_path: &std::path::Path) -> Vec<Arc<dyn crate::tool::Tool>> {
+async fn load_mcp_tools_from_project(
+    project_path: &std::path::Path,
+) -> Vec<Arc<dyn crate::tool::Tool>> {
     let config = match crate::config::load_project_config(project_path) {
         Ok(Some(config)) => config,
         Ok(None) => return Vec::new(),
@@ -899,7 +992,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(provider_id_from_config(Some(&config)).as_deref(), Some("openai"));
+        assert_eq!(
+            provider_id_from_config(Some(&config)).as_deref(),
+            Some("openai")
+        );
         let provider = build_provider_from_model_config_or_env(None, Some(&config)).unwrap();
         assert_eq!(provider.name(), "openai");
     }
@@ -919,7 +1015,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(provider_id_from_config(Some(&config)).as_deref(), Some("openai"));
+        assert_eq!(
+            provider_id_from_config(Some(&config)).as_deref(),
+            Some("openai")
+        );
         let provider =
             build_provider_from_model_config_or_env(Some("local/qwen2.5-coder"), Some(&config))
                 .unwrap();
