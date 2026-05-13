@@ -143,6 +143,11 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
                 .delete(pty_handlers::pty_remove),
         )
         .route(
+            "/pty/:id/connect-token",
+            post(pty_handlers::pty_connect_token),
+        )
+        .route("/pty/:id/connect", get(pty_handlers::pty_connect))
+        .route(
             "/mcp",
             get(mcp_handlers::mcp_status).post(mcp_handlers::mcp_add),
         )
@@ -238,7 +243,7 @@ mod tests {
         let state = std::sync::Arc::new(
             AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
         );
-        let app = create_router_with_state(state.clone());
+        let app = create_router_with_state(state);
 
         let response = send(
             app.clone(),
@@ -481,7 +486,7 @@ mod tests {
         let state = std::sync::Arc::new(
             AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
         );
-        let app = create_router_with_state(state);
+        let app = create_router_with_state(state.clone());
 
         let response = send(
             app,
@@ -517,7 +522,7 @@ mod tests {
         let state = std::sync::Arc::new(
             AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
         );
-        let app = create_router_with_state(state);
+        let app = create_router_with_state(state.clone());
 
         let response = send(
             app.clone(),
@@ -599,6 +604,50 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response_json(response).await["title"], "Updated terminal");
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/pty/{pty_id}/connect-token"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/pty/{pty_id}/connect-token"))
+                .header("x-opencode-ticket", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let token = response_json(response).await;
+        assert!(token["ticket"].as_str().unwrap().len() > 16);
+        assert_eq!(token["expires_in"], 60);
+        assert!(
+            state
+                .pty_tickets
+                .consume(
+                    &crate::pty::PtyID(pty_id.clone()),
+                    token["ticket"].as_str().unwrap()
+                )
+                .await
+        );
+        assert!(
+            !state
+                .pty_tickets
+                .consume(
+                    &crate::pty::PtyID(pty_id.clone()),
+                    token["ticket"].as_str().unwrap()
+                )
+                .await
+        );
 
         let response = send(
             app.clone(),

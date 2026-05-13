@@ -1,12 +1,23 @@
 use axum::{
-    extract::{Json, Path, State},
-    http::StatusCode,
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Json, Path, Query, State,
+    },
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
+use futures::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 use super::session_handlers::AppState;
-use crate::pty::{PtyCreateInput, PtyID, PtyInfo, PtyStatus, PtyUpdateInput};
+use crate::pty::{PtyConnectToken, PtyCreateInput, PtyID, PtyInfo, PtyStatus, PtyUpdateInput};
+
+const PTY_CONNECT_TICKET_HEADER: &str = "x-opencode-ticket";
+const PTY_CONNECT_TICKET_HEADER_VALUE: &str = "1";
+const PTY_CONNECT_BUFFER_CHUNK: usize = 64 * 1024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +54,12 @@ pub struct ShellItem {
     path: String,
     name: String,
     acceptable: bool,
+}
+
+#[derive(Default, Deserialize)]
+pub struct PtyConnectQuery {
+    cursor: Option<String>,
+    ticket: Option<String>,
 }
 
 pub async fn pty_shells() -> Json<Vec<ShellItem>> {
@@ -109,6 +126,157 @@ pub async fn pty_remove(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(true))
+}
+
+pub async fn pty_connect_token(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<PtyConnectToken>, StatusCode> {
+    let header_valid = headers
+        .get(PTY_CONNECT_TICKET_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value == PTY_CONNECT_TICKET_HEADER_VALUE)
+        .unwrap_or(false);
+    if !header_valid {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let pty_id = PtyID(id);
+    if state.pty_service.get(&pty_id).await.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok(Json(state.pty_tickets.issue(&pty_id).await))
+}
+
+pub async fn pty_connect(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<PtyConnectQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    let pty_id = PtyID(id);
+    if state.pty_service.get(&pty_id).await.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let Some(ticket) = query.ticket.as_deref() else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if !state.pty_tickets.consume(&pty_id, ticket).await {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let cursor = parse_cursor(query.cursor.as_deref());
+    Ok(ws
+        .on_upgrade(move |socket| handle_pty_socket(state, pty_id, cursor, socket))
+        .into_response())
+}
+
+async fn handle_pty_socket(
+    state: Arc<AppState>,
+    pty_id: PtyID,
+    cursor: Option<i64>,
+    socket: WebSocket,
+) {
+    let Some(mut output_rx) = state.pty_service.subscribe_output(&pty_id).await else {
+        return;
+    };
+    let Some((snapshot, snapshot_end)) = state.pty_service.connect(&pty_id, cursor).await else {
+        return;
+    };
+
+    let (mut sender, mut receiver) = socket.split();
+    if send_snapshot(&mut sender, &snapshot).await.is_err() {
+        return;
+    }
+    if send_meta(&mut sender, snapshot_end).await.is_err() {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            Some(message) = receiver.next() => {
+                match message {
+                    Ok(Message::Text(text)) => {
+                        if state.pty_service.write(&pty_id, text.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Message::Binary(bytes)) => {
+                        if let Ok(text) = String::from_utf8(bytes) {
+                            if state.pty_service.write(&pty_id, text.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(Message::Ping(bytes)) => {
+                        if sender.send(Message::Pong(bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(Message::Pong(_)) => {}
+                }
+            }
+            output = output_rx.recv() => {
+                match output {
+                    Ok(output) => {
+                        if output.end <= snapshot_end {
+                            continue;
+                        }
+                        if send_text_chunk(&mut sender, &output.data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if let Some((_, end)) = state.pty_service.connect(&pty_id, Some(-1)).await {
+                            let _ = send_meta(&mut sender, end).await;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+}
+
+async fn send_snapshot(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    snapshot: &[u8],
+) -> Result<(), axum::Error> {
+    for chunk in snapshot.chunks(PTY_CONNECT_BUFFER_CHUNK) {
+        send_text_chunk(sender, chunk).await?;
+    }
+    Ok(())
+}
+
+async fn send_text_chunk(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    chunk: &[u8],
+) -> Result<(), axum::Error> {
+    if chunk.is_empty() {
+        return Ok(());
+    }
+    sender
+        .send(Message::Text(String::from_utf8_lossy(chunk).into_owned()))
+        .await
+}
+
+async fn send_meta(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    cursor: usize,
+) -> Result<(), axum::Error> {
+    let json = serde_json::json!({ "cursor": cursor }).to_string();
+    let mut frame = Vec::with_capacity(json.len() + 1);
+    frame.push(0);
+    frame.extend_from_slice(json.as_bytes());
+    sender.send(Message::Binary(frame)).await
+}
+
+fn parse_cursor(cursor: Option<&str>) -> Option<i64> {
+    cursor.and_then(|value| value.parse::<i64>().ok())
 }
 
 fn list_shells() -> Vec<ShellItem> {

@@ -1,4 +1,4 @@
-use axum::http::{header, HeaderValue, Method};
+use axum::http::{header, HeaderName, Method};
 use tower_http::cors::{Any, CorsLayer};
 
 pub fn cors_layer() -> CorsLayer {
@@ -11,5 +11,9 @@ pub fn cors_layer() -> CorsLayer {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            HeaderName::from_static("x-opencode-ticket"),
+        ])
 }

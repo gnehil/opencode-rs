@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use std::time::{Duration, Instant};
+use tokio::sync::{broadcast, RwLock};
 
 const BUFFER_LIMIT: usize = 1024 * 1024 * 2;
+pub const PTY_CONNECT_TICKET_TTL_SECS: u64 = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PtyID(pub String);
@@ -72,9 +74,83 @@ pub struct PtySession {
     pub pair: Arc<std::sync::Mutex<Option<PtyPair>>>,
     pub child: Arc<std::sync::Mutex<Option<Box<dyn Child + Send + Sync>>>>,
     pub writer: Arc<std::sync::Mutex<Option<Box<dyn std::io::Write + Send>>>>,
-    output_tx: mpsc::Sender<Vec<u8>>,
+    output_tx: broadcast::Sender<PtyOutput>,
     killed: Arc<AtomicBool>,
     exited: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PtyOutput {
+    pub data: Vec<u8>,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PtyConnectToken {
+    pub ticket: String,
+    pub expires_in: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PtyTicketRecord {
+    pty_id: String,
+    expires_at: Instant,
+}
+
+#[derive(Debug)]
+pub struct PtyTicketStore {
+    tickets: Arc<RwLock<HashMap<String, PtyTicketRecord>>>,
+    ttl: Duration,
+}
+
+impl Default for PtyTicketStore {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(PTY_CONNECT_TICKET_TTL_SECS))
+    }
+}
+
+impl PtyTicketStore {
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            tickets: Arc::new(RwLock::new(HashMap::new())),
+            ttl,
+        }
+    }
+
+    pub async fn issue(&self, pty_id: &PtyID) -> PtyConnectToken {
+        let mut tickets = self.tickets.write().await;
+        let now = Instant::now();
+        tickets.retain(|_, record| record.expires_at > now);
+
+        let ticket = uuid::Uuid::new_v4().to_string();
+        tickets.insert(
+            ticket.clone(),
+            PtyTicketRecord {
+                pty_id: pty_id.0.clone(),
+                expires_at: now + self.ttl,
+            },
+        );
+
+        PtyConnectToken {
+            ticket,
+            expires_in: self.ttl.as_secs().max(1),
+        }
+    }
+
+    pub async fn consume(&self, pty_id: &PtyID, ticket: &str) -> bool {
+        let mut tickets = self.tickets.write().await;
+        let now = Instant::now();
+        tickets.retain(|_, record| record.expires_at > now);
+
+        let valid = tickets
+            .get(ticket)
+            .map(|record| record.pty_id == pty_id.0 && record.expires_at > now)
+            .unwrap_or(false);
+        if valid {
+            tickets.remove(ticket);
+        }
+        valid
+    }
 }
 
 pub struct PtyService {
@@ -146,7 +222,7 @@ impl PtyService {
 
         let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
-        let (output_tx, _output_rx) = mpsc::channel::<Vec<u8>>(256);
+        let (output_tx, _output_rx) = broadcast::channel::<PtyOutput>(256);
 
         let info = PtyInfo {
             id: id.clone(),
@@ -215,7 +291,7 @@ impl PtyService {
                 match reader.read(&mut buf) {
                     Ok(n) if n > 0 => {
                         let data = buf[..n].to_vec();
-                        cursor_reader.fetch_add(n, Ordering::SeqCst);
+                        let end = cursor_reader.fetch_add(n, Ordering::SeqCst) + n;
                         {
                             let mut guard = buffer_reader.lock().unwrap();
                             guard.extend_from_slice(&data);
@@ -225,10 +301,7 @@ impl PtyService {
                                 buffer_cursor_reader.fetch_add(excess, Ordering::SeqCst);
                             }
                         }
-                        // Best-effort: subscribers that have hung up don't
-                        // matter, and we don't want to block reading from the
-                        // PTY if no one is listening.
-                        let _ = output_tx_reader.blocking_send(data);
+                        let _ = output_tx_reader.send(PtyOutput { data, end });
                     }
                     Ok(_) | Err(_) => break,
                 }
@@ -369,18 +442,27 @@ impl PtyService {
     /// If `cursor` is older than the buffer's start (the reader has rotated it
     /// out), the returned data starts from the oldest still-available byte and
     /// callers should treat that as a forced resync.
-    pub async fn connect(&self, id: &PtyID, cursor: Option<usize>) -> Option<(Vec<u8>, usize)> {
+    pub async fn connect(&self, id: &PtyID, cursor: Option<i64>) -> Option<(Vec<u8>, usize)> {
         let sessions = self.sessions.read().await;
         let session = sessions.get(&id.0)?;
 
         let start = session.buffer_cursor.load(Ordering::SeqCst);
         let end = session.cursor.load(Ordering::SeqCst);
-        let from = cursor.unwrap_or(0);
+        let from = match cursor {
+            Some(-1) => end,
+            Some(value) if value >= 0 => value as usize,
+            _ => 0,
+        };
 
         let buffer = session.buffer.lock().unwrap();
         let offset = from.saturating_sub(start).min(buffer.len());
         let data = buffer[offset..].to_vec();
         Some((data, end))
+    }
+
+    pub async fn subscribe_output(&self, id: &PtyID) -> Option<broadcast::Receiver<PtyOutput>> {
+        let sessions = self.sessions.read().await;
+        sessions.get(&id.0).map(|s| s.output_tx.subscribe())
     }
 
     pub async fn kill(&self, id: &PtyID) -> Result<()> {
