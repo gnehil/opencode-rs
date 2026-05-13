@@ -17,6 +17,10 @@ pub struct AppState {
     /// canonicalized under this root. Defaults to the process cwd.
     pub workspace_root: std::path::PathBuf,
     pub event_bus: EventBus,
+    /// Provider available to HTTP `/prompt`. Optional because servers
+    /// that only handle session CRUD (no model dispatch) shouldn't
+    /// require credentials to start.
+    pub provider: Option<std::sync::Arc<dyn crate::provider::Provider>>,
 }
 
 impl AppState {
@@ -28,11 +32,20 @@ impl AppState {
             data_dir,
             workspace_root,
             event_bus: EventBus::new(),
+            provider: None,
         }
     }
 
     pub fn with_workspace_root(mut self, root: std::path::PathBuf) -> Self {
         self.workspace_root = root.canonicalize().unwrap_or(root);
+        self
+    }
+
+    pub fn with_provider(
+        mut self,
+        provider: std::sync::Arc<dyn crate::provider::Provider>,
+    ) -> Self {
+        self.provider = Some(provider);
         self
     }
 

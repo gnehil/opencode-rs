@@ -35,6 +35,12 @@ pub fn create_router(data_dir: std::path::PathBuf) -> Router {
         .route("/api/session/:id/abort", post(session_handlers::abort_session))
         .route("/api/session/:id/messages", get(message_handlers::list_messages))
         .route("/api/session/:id/prompt", post(message_handlers::prompt))
+        // Aliases matching opencode's official server API shape.
+        // `/session/:id/message` is the canonical send-and-wait route;
+        // `/session/:id/message/list` (GET) returns the persisted
+        // history. Same handlers, different paths.
+        .route("/session/:id/message", post(message_handlers::prompt))
+        .route("/session/:id/message", get(message_handlers::list_messages))
         .route("/event", get(event_handlers::sse_events))
         .route("/config", get(config_handlers::get_config))
         .route("/config", patch(config_handlers::update_config))
