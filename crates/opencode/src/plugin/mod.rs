@@ -219,15 +219,61 @@ impl PluginManager {
         }
     }
 
+    pub async fn register_internal_plugins(&mut self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for plugin in internal_plugins() {
+            let meta = plugin.meta();
+            if let Err(error) = self
+                .register(
+                    plugin,
+                    PluginConfig {
+                        enabled: true,
+                        options: HashMap::new(),
+                    },
+                )
+                .await
+            {
+                errors.push(format!("{}: {}", meta.id, error));
+            }
+        }
+        errors
+    }
+
     pub async fn register(
         &mut self,
         plugin: Arc<dyn Plugin>,
         config: PluginConfig,
     ) -> anyhow::Result<()> {
+        if !config.enabled {
+            return Ok(());
+        }
         let hooks = plugin.initialize(config).await?;
         self.plugins.push(plugin);
         self.hooks.push(hooks);
         Ok(())
+    }
+
+    pub fn attach_event_bus(self: &Arc<Self>, bus: &crate::bus::EventBus) -> crate::bus::HandlerId {
+        let manager = Arc::clone(self);
+        bus.subscribe("*", move |event| {
+            let manager = Arc::clone(&manager);
+            let event_type = event.type_name().to_string();
+            let fallback_event_type = event_type.clone();
+            let payload = serde_json::to_value(event).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "event_type": fallback_event_type,
+                    "id": event.id(),
+                })
+            });
+            Box::pin(async move {
+                let _ = manager
+                    .trigger_event(EventInput {
+                        event_type,
+                        payload,
+                    })
+                    .await;
+            })
+        })
     }
 
     pub async fn trigger_session_create(
@@ -346,6 +392,19 @@ impl PluginManager {
         Ok(output)
     }
 
+    pub async fn trigger_config_change(
+        &self,
+        input: ConfigChangeInput,
+    ) -> anyhow::Result<ConfigChangeOutput> {
+        let mut output = ConfigChangeOutput {};
+        for hooks in &self.hooks {
+            if let Some(hook) = &hooks.on_config_change {
+                output = hook(input.clone()).await?;
+            }
+        }
+        Ok(output)
+    }
+
     pub async fn trigger_event(&self, input: EventInput) -> anyhow::Result<EventOutput> {
         for hooks in &self.hooks {
             if let Some(hook) = &hooks.on_event {
@@ -373,3 +432,107 @@ impl Default for PluginManager {
 mod internal;
 
 pub use internal::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct RecordingPlugin {
+        event_tx: tokio::sync::mpsc::UnboundedSender<String>,
+        config_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl Plugin for RecordingPlugin {
+        fn meta(&self) -> PluginMeta {
+            PluginMeta {
+                id: "recording".to_string(),
+                name: "Recording".to_string(),
+                version: "0.0.0".to_string(),
+                description: None,
+                author: None,
+            }
+        }
+
+        async fn initialize(&self, _config: PluginConfig) -> anyhow::Result<Hooks> {
+            let event_tx = self.event_tx.clone();
+            let config_tx = self.config_tx.clone();
+            Ok(Hooks {
+                on_event: Some(Arc::new(move |input: EventInput| {
+                    let event_tx = event_tx.clone();
+                    Box::pin(async move {
+                        let _ = event_tx.send(input.event_type);
+                        Ok(EventOutput {})
+                    })
+                })),
+                on_config_change: Some(Arc::new(move |input: ConfigChangeInput| {
+                    let config_tx = config_tx.clone();
+                    Box::pin(async move {
+                        let _ = config_tx.send(input.config_type);
+                        Ok(ConfigChangeOutput {})
+                    })
+                })),
+                ..Hooks::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_manager_fans_out_bus_events_and_config_changes() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (config_tx, mut config_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = PluginManager::new();
+        manager
+            .register(
+                Arc::new(RecordingPlugin {
+                    event_tx,
+                    config_tx,
+                }),
+                PluginConfig {
+                    enabled: true,
+                    options: HashMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let manager = Arc::new(manager);
+        let bus = crate::bus::EventBus::new();
+        manager.attach_event_bus(&bus);
+        bus.publish(crate::bus::Event::session_create("s1"));
+        manager
+            .trigger_config_change(ConfigChangeInput {
+                config_type: "project".to_string(),
+                old_value: serde_json::Value::Null,
+                new_value: serde_json::json!({"model": "anthropic/claude"}),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(event_rx.recv().await.unwrap(), "session.create");
+        assert_eq!(config_rx.recv().await.unwrap(), "project");
+    }
+
+    #[tokio::test]
+    async fn disabled_plugins_are_not_registered() {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (config_tx, _config_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = PluginManager::new();
+        manager
+            .register(
+                Arc::new(RecordingPlugin {
+                    event_tx,
+                    config_tx,
+                }),
+                PluginConfig {
+                    enabled: false,
+                    options: HashMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(manager.hook_count(), 0);
+        assert!(manager.list().is_empty());
+    }
+}

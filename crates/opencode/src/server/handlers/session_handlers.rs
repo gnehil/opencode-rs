@@ -67,6 +67,7 @@ impl AppState {
         mut self,
         plugin_manager: std::sync::Arc<crate::plugin::PluginManager>,
     ) -> Self {
+        plugin_manager.attach_event_bus(&self.event_bus);
         self.plugin_manager = plugin_manager;
         self
     }

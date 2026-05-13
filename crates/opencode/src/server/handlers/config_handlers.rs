@@ -17,9 +17,25 @@ pub async fn get_config(
 }
 
 pub async fn update_config(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let old_value = state
+        .config
+        .as_ref()
+        .and_then(|config| serde_json::to_value(config).ok())
+        .unwrap_or(serde_json::Value::Null);
+    if let Err(error) = state
+        .plugin_manager
+        .trigger_config_change(crate::plugin::ConfigChangeInput {
+            config_type: "project".to_string(),
+            old_value,
+            new_value: body.clone(),
+        })
+        .await
+    {
+        tracing::warn!("plugin config hook failed: {}", error);
+    }
     Ok(Json(json!({
         "success": true,
         "config": body

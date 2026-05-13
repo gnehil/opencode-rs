@@ -50,13 +50,13 @@ Legend:
 | Tools | `tool/*` | `tool/*` | partial | Validate behavior, output shape, permission integration per tool |
 | Permission ask | `permission/index.ts` | `permission/broker.rs`, `tool/context.rs` | done | Broaden HTTP/UI reply integration |
 | MCP runtime | `mcp/*` | `mcp/*`, `cli/mcp_cli.rs` | partial | OAuth state/status, unauthorized reconnect parity |
-| Plugin runtime | `cli/cmd/tui/plugin/*`, plugin hooks | `plugin/*`, `session/processor.rs`, `message_handlers.rs` | partial | External plugin loading, config/event hooks, and TUI plugin slots |
+| Plugin runtime | `cli/cmd/tui/plugin/*`, plugin hooks | `plugin/*`, `session/processor.rs`, `message_handlers.rs`, `cli/mod.rs` | partial | External JS/TS plugin loading and TUI plugin slots |
 | LSP | `lsp/*` | `lsp/*`, `tool/lsp.rs` | partial | Long-lived pool behavior and diagnostics shape |
 
 ## Current priority queue
 
 1. Run JSON/file/command behavior against the server routes.
-2. External plugin loading plus config/event hook fanout.
+2. External JS/TS plugin loading/runtime compatibility.
 3. Remote TUI attach/control queue and TUI prompt execution.
 4. MCP needs_auth/reconnect parity.
 5. Provider/model/auth dynamic loading and stored credential use beyond API keys.

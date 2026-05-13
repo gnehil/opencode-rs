@@ -531,7 +531,14 @@ async fn handle_serve(args: args::NetworkArgs, data_dir: PathBuf, open_web: bool
 
     let credential_dir = data_dir.clone();
     let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut state = crate::server::AppState::new(data_dir).with_workspace_root(workspace_root);
+    let mut plugin_manager = crate::plugin::PluginManager::new();
+    for error in plugin_manager.register_internal_plugins().await {
+        eprintln!("Warning: failed to load internal plugin: {}", error);
+    }
+    let plugin_manager = Arc::new(plugin_manager);
+    let mut state = crate::server::AppState::new(data_dir)
+        .with_workspace_root(workspace_root)
+        .with_plugin_manager(plugin_manager.clone());
 
     let project_config = match crate::config::load_project_config(&state.workspace_root) {
         Ok(config) => config,
@@ -543,6 +550,16 @@ async fn handle_serve(args: args::NetworkArgs, data_dir: PathBuf, open_web: bool
 
     if let Some(config) = &project_config {
         state = state.with_config_defaults(config);
+        if let Err(error) = plugin_manager
+            .trigger_config_change(crate::plugin::ConfigChangeInput {
+                config_type: "project".to_string(),
+                old_value: serde_json::Value::Null,
+                new_value: serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
+            })
+            .await
+        {
+            eprintln!("Warning: plugin config hook failed: {}", error);
+        }
         let mut manager = state.mcp_manager.write().await;
         manager.start_configured(&config).await;
         let connected = manager
