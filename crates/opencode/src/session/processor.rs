@@ -150,6 +150,7 @@ impl PromptProcessor {
         self.store
             .save_message(session_id, &Message::User(user_msg))
             .await?;
+        let saved_user_parts = user_parts.clone();
         if user_parts.is_empty() {
             self.store
                 .save_text_part(session_id, &user_message_id, prompt)
@@ -164,6 +165,9 @@ impl PromptProcessor {
             user_message_id.to_string(),
             MessageRole::User,
         ));
+
+        self.execute_user_subtasks(session_id, &user_message_id, &saved_user_parts, &model_id)
+            .await?;
 
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
@@ -285,6 +289,209 @@ impl PromptProcessor {
         }
 
         Ok(events)
+    }
+
+    async fn execute_user_subtasks(
+        &self,
+        session_id: &SessionID,
+        user_message_id: &MessageID,
+        user_parts: &[Part],
+        model_id: &str,
+    ) -> anyhow::Result<()> {
+        let subtasks = user_parts
+            .iter()
+            .filter_map(|part| match part {
+                Part::Subtask(task) => Some(task.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if subtasks.is_empty() {
+            return Ok(());
+        }
+
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let working_dir = std::env::current_dir()?;
+
+        for task in subtasks {
+            let assistant_message_id = MessageID::new();
+            let turn_time = chrono::Utc::now().timestamp_millis();
+            let assistant_msg = AssistantMessage {
+                id: assistant_message_id.clone(),
+                session_id: session_id.clone(),
+                role: "assistant".to_string(),
+                time: AssistantTime {
+                    created: turn_time,
+                    completed: Some(turn_time),
+                },
+                error: None,
+                parent_id: user_message_id.to_string(),
+                model_id: task
+                    .model
+                    .as_ref()
+                    .map(|model| model.model_id.clone())
+                    .unwrap_or_else(|| model_id.to_string()),
+                provider_id: task
+                    .model
+                    .as_ref()
+                    .map(|model| model.provider_id.clone())
+                    .unwrap_or_else(|| self.provider.name().to_string()),
+                mode: task.agent.clone(),
+                agent: task.agent.clone(),
+                path: PathInfo {
+                    cwd: cwd.clone(),
+                    root: "/".to_string(),
+                },
+                summary: None,
+                cost: 0.0,
+                tokens: TokenUsage {
+                    input: 0.0,
+                    output: 0.0,
+                    reasoning: 0.0,
+                    total: None,
+                    cache: CacheUsage {
+                        read: 0.0,
+                        write: 0.0,
+                    },
+                },
+                structured: None,
+                variant: None,
+                finish: Some("tool-calls".to_string()),
+            };
+            self.store
+                .save_message(session_id, &Message::Assistant(assistant_msg))
+                .await?;
+
+            let call_id = uuid::Uuid::new_v4().to_string();
+            let input = serde_json::json!({
+                "prompt": task.prompt,
+                "description": task.description,
+                "subagent_type": task.agent,
+                "command": task.command,
+            });
+            self.bus.publish(Event::tool_start(
+                session_id.to_string(),
+                "task",
+                input.clone(),
+            ));
+
+            let outcome = match self.tools.iter().find(|tool| tool.name() == "task") {
+                Some(tool) => {
+                    let ctx = ToolContext {
+                        session_id: session_id.clone(),
+                        working_dir: working_dir.clone(),
+                        permission_rules: crate::agent::get_agent(&task.agent)
+                            .map(|agent| agent.permission)
+                            .unwrap_or_default(),
+                        event_bus: Some(self.bus.clone()),
+                        permission_broker: self.permission_broker.clone(),
+                    };
+                    match tool.execute(input.clone(), ctx).await {
+                        Ok(result) => crate::session::service::ToolPartResult::Completed {
+                            output: result.output,
+                            attachments: result.attachments.unwrap_or_default(),
+                        },
+                        Err(error) => crate::session::service::ToolPartResult::Error {
+                            error: error.to_string(),
+                        },
+                    }
+                }
+                None => crate::session::service::ToolPartResult::Error {
+                    error: "Unknown tool: task".to_string(),
+                },
+            };
+
+            self.store
+                .save_tool_part(
+                    session_id,
+                    &assistant_message_id,
+                    "task",
+                    &call_id,
+                    &input,
+                    match &outcome {
+                        crate::session::service::ToolPartResult::Completed {
+                            output,
+                            attachments,
+                        } => crate::session::service::ToolPartResult::Completed {
+                            output: output.clone(),
+                            attachments: attachments.clone(),
+                        },
+                        crate::session::service::ToolPartResult::Error { error } => {
+                            crate::session::service::ToolPartResult::Error {
+                                error: error.clone(),
+                            }
+                        }
+                    },
+                )
+                .await?;
+
+            match &outcome {
+                crate::session::service::ToolPartResult::Completed { output, .. } => {
+                    self.bus.publish(Event::tool_complete(
+                        session_id.to_string(),
+                        "task",
+                        serde_json::json!({ "result": output }),
+                    ));
+                }
+                crate::session::service::ToolPartResult::Error { error } => {
+                    self.bus.publish(Event::tool_error(
+                        session_id.to_string(),
+                        "task",
+                        error.clone(),
+                    ));
+                }
+            }
+            self.bus.publish(Event::message_create(
+                session_id.to_string(),
+                assistant_message_id.to_string(),
+                MessageRole::Assistant,
+            ));
+
+            if task.command.is_some() {
+                let summary_message_id = MessageID::new();
+                let now = chrono::Utc::now().timestamp_millis();
+                let summary_msg = UserMessage {
+                    id: summary_message_id.clone(),
+                    session_id: session_id.clone(),
+                    role: "user".to_string(),
+                    time: UserTime { created: now },
+                    format: None,
+                    summary: None,
+                    agent: self.agent_name.clone(),
+                    model: ModelRef {
+                        provider_id: self.provider.name().to_string(),
+                        model_id: model_id.to_string(),
+                        variant: None,
+                    },
+                    system: None,
+                    tools: None,
+                };
+                self.store
+                    .save_message(session_id, &Message::User(summary_msg))
+                    .await?;
+                self.store
+                    .save_part(&Part::Text(crate::message::part::TextPart {
+                        id: crate::id::PartID::new(),
+                        session_id: session_id.clone(),
+                        message_id: summary_message_id.clone(),
+                        text: "Summarize the task tool output above and continue with your task."
+                            .to_string(),
+                        synthetic: Some(true),
+                        ignored: None,
+                        time: None,
+                        metadata: None,
+                    }))
+                    .await?;
+                self.bus.publish(Event::message_create(
+                    session_id.to_string(),
+                    summary_message_id.to_string(),
+                    MessageRole::User,
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     async fn execute_and_persist_tool_calls(
@@ -482,7 +689,17 @@ pub fn model_id_from_selection(selection: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::model_id_from_selection;
+    use std::sync::{Arc, Mutex};
+
+    use super::{model_id_from_selection, PromptProcessor};
+    use crate::id::{MessageID, SessionID};
+    use crate::message::{Message, Part};
+    use crate::provider::{
+        CompletionMessage, CompletionRequest, CompletionResponse, EventStream, ModelID, ModelInfo,
+        Provider, ProviderError, ProviderResult, TokenUsage,
+    };
+    use crate::session::SessionStore;
+    use crate::tool::{Tool, ToolContext, ToolResult};
 
     #[test]
     fn model_id_from_selection_strips_provider_prefix() {
@@ -504,5 +721,152 @@ mod tests {
             model_id_from_selection("claude-3-5-sonnet"),
             Some("claude-3-5-sonnet".to_string())
         );
+    }
+
+    struct FakeProvider {
+        model: ModelInfo,
+        seen: Arc<Mutex<Vec<CompletionMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for FakeProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
+            *self.seen.lock().unwrap() = request.messages;
+            Ok(CompletionResponse {
+                content: "summary".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: Some("stop".to_string()),
+                usage: TokenUsage {
+                    input: 1,
+                    output: 1,
+                    cache_read: None,
+                    cache_write: None,
+                },
+                model: "test-model".to_string(),
+            })
+        }
+
+        fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> {
+            Ok(Box::pin(futures::stream::empty::<
+                Result<crate::provider::StreamEvent, ProviderError>,
+            >()))
+        }
+
+        fn models(&self) -> &[ModelInfo] {
+            std::slice::from_ref(&self.model)
+        }
+
+        fn default_model(&self) -> Option<&ModelInfo> {
+            Some(&self.model)
+        }
+    }
+
+    struct FakeTaskTool;
+
+    impl Tool for FakeTaskTool {
+        fn name(&self) -> &str {
+            "task"
+        }
+
+        fn description(&self) -> &str {
+            "fake task"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: ToolContext,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<ToolResult>> + Send + '_>,
+        > {
+            Box::pin(async move {
+                Ok(ToolResult::with_metadata(
+                    format!("task done: {}", params["prompt"].as_str().unwrap_or("")),
+                    serde_json::json!({"status": "completed"}),
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn process_stream_executes_subtask_parts_before_provider_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()).await.unwrap());
+        let session = store
+            .create("t", "p", &std::path::PathBuf::from("/tmp"))
+            .await
+            .unwrap();
+        let session_id = SessionID::parse(&session.id).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(FakeProvider {
+            model: ModelInfo {
+                id: Some(ModelID::new("test-model")),
+                name: None,
+                family: None,
+                release_date: None,
+                attachment: None,
+                reasoning: None,
+                temperature: None,
+                tool_call: None,
+                interleaved: None,
+                cost: None,
+                limit: None,
+                modalities: None,
+                experimental: None,
+                status: None,
+                provider: None,
+                options: None,
+                headers: None,
+                variants: None,
+            },
+            seen: seen.clone(),
+        });
+        let processor =
+            PromptProcessor::new(store.clone(), provider).with_tools(vec![Arc::new(FakeTaskTool)]);
+        let user_message_id = MessageID::new();
+        let user_parts = vec![Part::Subtask(crate::message::part::SubtaskPart {
+            id: crate::id::PartID::new(),
+            session_id: session_id.clone(),
+            message_id: user_message_id,
+            prompt: "inspect auth".to_string(),
+            description: "Review auth".to_string(),
+            agent: "general".to_string(),
+            model: None,
+            command: Some("review".to_string()),
+        })];
+
+        let events = processor
+            .process_stream_with_parts(&session_id, "", user_message_id, user_parts)
+            .await
+            .unwrap();
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, super::ProcessEvent::Done(text) if text == "summary")));
+        let messages = store.get_messages_with_parts(&session_id).await.unwrap();
+        assert!(messages.iter().any(|message| message
+            .parts
+            .iter()
+            .any(|part| { matches!(part, Part::Tool(tool) if tool.tool == "task") })));
+        assert!(messages.iter().any(|message| {
+            matches!(message.info, Message::User(_))
+                && message.parts.iter().any(|part| {
+                    matches!(part, Part::Text(text) if text.synthetic == Some(true)
+                        && text.text.contains("Summarize the task tool output"))
+                })
+        }));
+
+        let seen = seen.lock().unwrap();
+        assert!(seen
+            .iter()
+            .any(|message| message.role == "tool" && message.content.contains("task done")));
     }
 }

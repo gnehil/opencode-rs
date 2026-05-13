@@ -443,38 +443,14 @@ pub async fn command(
         .find(|command| command.name == command_name)
         .ok_or(StatusCode::BAD_REQUEST)?;
 
-    let arguments = req.arguments.as_deref().unwrap_or_default();
-    let text = crate::command::render_template_with_shell(
-        &command.template,
-        arguments,
+    let turn = prompt_turn_from_command_request(
+        command,
+        req,
         &state.workspace_root,
-        state
-            .config
-            .as_ref()
-            .and_then(|config| config.shell.as_deref()),
+        state.config.as_ref(),
+        state.default_agent.as_deref(),
     )
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut parts = vec![UserPartDraft::Text {
-        id: None,
-        text: text.clone(),
-        synthetic: None,
-        ignored: None,
-        time: None,
-        metadata: None,
-    }];
-    parts.extend(parse_user_part_drafts(&req.parts)?);
-
-    let turn = PromptTurn {
-        text,
-        parts,
-        message_id: req.message_id,
-        agent: command.agent.or(req.agent),
-        model_selection: command
-            .model
-            .or_else(|| model_selection_from_value(req.model.as_ref())),
-        no_reply: false,
-    };
+    .await?;
     run_prompt_turn(state, id, turn)
         .await
         .map(prompt_output_json)
@@ -884,6 +860,114 @@ fn prompt_turn_from_request(req: PromptRequest) -> Result<PromptTurn, StatusCode
     })
 }
 
+async fn prompt_turn_from_command_request(
+    command: crate::command::CommandInfo,
+    req: CommandRequest,
+    workspace_root: &std::path::Path,
+    config: Option<&crate::config::Config>,
+    default_agent: Option<&str>,
+) -> Result<PromptTurn, StatusCode> {
+    let arguments = req.arguments.as_deref().unwrap_or_default();
+    let text = crate::command::render_template_with_shell(
+        &command.template,
+        arguments,
+        workspace_root,
+        config.and_then(|config| config.shell.as_deref()),
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let request_model_selection = model_selection_from_value(req.model.as_ref());
+
+    if command_runs_as_subtask(&command, req.agent.as_deref(), config, default_agent) {
+        let task_agent = command
+            .agent
+            .clone()
+            .or_else(|| req.agent.clone())
+            .or_else(|| default_agent.map(ToString::to_string))
+            .unwrap_or_else(|| crate::agent::DEFAULT_AGENT_NAME.to_string());
+        let task_model = command
+            .model
+            .as_deref()
+            .or(request_model_selection.as_deref())
+            .and_then(subtask_model_from_selection);
+        let parts = vec![UserPartDraft::Subtask {
+            id: None,
+            prompt: text.clone(),
+            description: command.description.unwrap_or_default(),
+            agent: task_agent,
+            model: task_model,
+            command: Some(command.name),
+        }];
+        return Ok(PromptTurn {
+            text,
+            parts,
+            message_id: req.message_id,
+            agent: req.agent,
+            model_selection: request_model_selection,
+            no_reply: false,
+        });
+    }
+
+    let mut parts = vec![UserPartDraft::Text {
+        id: None,
+        text: text.clone(),
+        synthetic: None,
+        ignored: None,
+        time: None,
+        metadata: None,
+    }];
+    parts.extend(parse_user_part_drafts(&req.parts)?);
+
+    Ok(PromptTurn {
+        text,
+        parts,
+        message_id: req.message_id,
+        agent: command.agent.or(req.agent),
+        model_selection: command.model.or(request_model_selection),
+        no_reply: false,
+    })
+}
+
+fn command_runs_as_subtask(
+    command: &crate::command::CommandInfo,
+    request_agent: Option<&str>,
+    config: Option<&crate::config::Config>,
+    default_agent: Option<&str>,
+) -> bool {
+    match command.subtask {
+        Some(true) => return true,
+        Some(false) => return false,
+        None => {}
+    }
+
+    let agent = command
+        .agent
+        .as_deref()
+        .or(request_agent)
+        .or(default_agent)
+        .unwrap_or(crate::agent::DEFAULT_AGENT_NAME);
+    agent_mode(agent, config) == Some(crate::agent::AgentMode::Subagent)
+}
+
+fn agent_mode(
+    agent: &str,
+    config: Option<&crate::config::Config>,
+) -> Option<crate::agent::AgentMode> {
+    if let Some(mode) = crate::agent::get_agent(agent).map(|agent| agent.mode) {
+        return Some(mode);
+    }
+    config
+        .and_then(|config| config.agent.as_ref())
+        .and_then(|agents| agents.get(agent))
+        .and_then(|agent| agent.mode.as_deref())
+        .and_then(|mode| match mode {
+            "subagent" => Some(crate::agent::AgentMode::Subagent),
+            "primary" => Some(crate::agent::AgentMode::Primary),
+            "all" => Some(crate::agent::AgentMode::All),
+            _ => None,
+        })
+}
+
 fn prompt_output_json(output: PromptOutput) -> Json<serde_json::Value> {
     let mut value = output
         .with_parts
@@ -1066,6 +1150,20 @@ fn model_selection_from_value(value: Option<&serde_json::Value>) -> Option<Strin
     }
 }
 
+fn subtask_model_from_selection(selection: &str) -> Option<SubtaskModel> {
+    let selection = selection.trim();
+    let (provider, model) = selection.split_once('/')?;
+    let provider = provider.trim();
+    let model = model.trim();
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
+    Some(SubtaskModel {
+        provider_id: provider.to_string(),
+        model_id: model.to_string(),
+    })
+}
+
 fn model_ref_from_selection(
     selection: Option<&str>,
     fallback_provider: &str,
@@ -1147,5 +1245,75 @@ mod tests {
         assert!(matches!(stored[1], Part::File(_)));
         assert!(matches!(stored[2], Part::Agent(_)));
         assert!(matches!(stored[3], Part::Subtask(_)));
+    }
+
+    #[tokio::test]
+    async fn subtask_command_creates_subtask_part_and_keeps_user_agent() {
+        let command = crate::command::CommandInfo {
+            name: "review".to_string(),
+            description: Some("Review changes".to_string()),
+            agent: Some("general".to_string()),
+            model: Some("anthropic/claude-sonnet".to_string()),
+            source: Some("command".to_string()),
+            template: "Review $ARGUMENTS".to_string(),
+            subtask: Some(true),
+            hints: vec!["$ARGUMENTS".to_string()],
+        };
+        let req = CommandRequest {
+            command: "review".to_string(),
+            arguments: Some("--cached".to_string()),
+            agent: Some("build".to_string()),
+            model: Some(serde_json::json!("openai/gpt-4o")),
+            ..Default::default()
+        };
+
+        let turn =
+            prompt_turn_from_command_request(command, req, std::path::Path::new("."), None, None)
+                .await
+                .unwrap();
+
+        assert_eq!(turn.agent.as_deref(), Some("build"));
+        assert_eq!(turn.model_selection.as_deref(), Some("openai/gpt-4o"));
+        assert_eq!(turn.parts.len(), 1);
+        match &turn.parts[0] {
+            UserPartDraft::Subtask {
+                prompt,
+                description,
+                agent,
+                model,
+                command,
+                ..
+            } => {
+                assert_eq!(prompt, "Review --cached");
+                assert_eq!(description, "Review changes");
+                assert_eq!(agent, "general");
+                assert_eq!(command.as_deref(), Some("review"));
+                let model = model.as_ref().unwrap();
+                assert_eq!(model.provider_id, "anthropic");
+                assert_eq!(model.model_id, "claude-sonnet");
+            }
+            _ => panic!("expected subtask part"),
+        }
+    }
+
+    #[test]
+    fn command_with_subagent_mode_defaults_to_subtask_unless_disabled() {
+        let command = crate::command::CommandInfo {
+            name: "audit".to_string(),
+            description: None,
+            agent: Some("explore".to_string()),
+            model: None,
+            source: Some("command".to_string()),
+            template: "Audit".to_string(),
+            subtask: None,
+            hints: Vec::new(),
+        };
+        assert!(command_runs_as_subtask(&command, None, None, None));
+
+        let disabled = crate::command::CommandInfo {
+            subtask: Some(false),
+            ..command
+        };
+        assert!(!command_runs_as_subtask(&disabled, None, None, None));
     }
 }

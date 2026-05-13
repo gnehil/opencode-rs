@@ -32,7 +32,7 @@ Legend:
 | Session list/create/get/update/delete | `server/.../groups/session.ts` | `server/handlers/session_handlers.rs` | partial | Request/response shape and workspace routing parity |
 | Session route compatibility | `SessionPaths` | `server/routes.rs` | partial | Keep adding canonical `/session/...` aliases before `/api/session` legacy paths |
 | Session messages | `SessionPaths.messages/message` | `server/handlers/message_handlers.rs` | partial | Broaden `MessageV2` shape tests and SDK compatibility checks |
-| Session prompt | `prompt`, `prompt_async`, `command`, `shell` | `message_handlers.rs`, `command/*`, `session/history.rs` | partial | Subtask execution semantics and full command hook resolution |
+| Session prompt | `prompt`, `prompt_async`, `command`, `shell` | `message_handlers.rs`, `command/*`, `session/history.rs`, `session/processor.rs` | partial | Full command hook resolution and route-level SDK shape checks |
 | Revert/unrevert | `SessionPaths.revert/unrevert` | `session/service.rs`, `session_handlers.rs` | partial | Full restore semantics after revert, not only clearing the marker |
 | Todo/diff/init | `SessionPaths.todo/diff/init` | mixed | missing | Local-only implementations |
 | Share/unshare | `SessionPaths.share` | none | skip | Cloud share scope |
@@ -56,7 +56,7 @@ Legend:
 ## Current priority queue
 
 1. Run JSON/file/command behavior against the server routes.
-2. Subtask command execution semantics and task-tool handoff parity.
+2. Plugin hook runtime for `command.execute.before` and tool hooks.
 3. Remote TUI attach/control queue and TUI prompt execution.
-4. MCP needs_auth/reconnect and plugin hook runtime.
+4. MCP needs_auth/reconnect parity.
 5. Provider/model/auth dynamic loading and stored credential use beyond API keys.
