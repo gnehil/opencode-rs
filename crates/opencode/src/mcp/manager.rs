@@ -6,7 +6,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use serde::Serialize;
 use tracing::{debug, warn};
 
-use crate::config::{Config, McpConfigEntry, McpServerConfig};
+use crate::config::{Config, McpConfigEntry, McpOAuthConfig, McpServerConfig};
 use crate::mcp::client::McpClient;
 use crate::mcp::oauth::McpAuthStore;
 use crate::mcp::tool::{McpRuntimeTool, McpTool};
@@ -75,12 +75,14 @@ impl McpManager {
                     if let Err(e) = self.start_server(name, server).await {
                         warn!("Failed to start MCP server '{}': {}", name, e);
                         self.remove_client(name);
-                        self.status.insert(
-                            name.clone(),
+                        let status = if supports_oauth(server) && is_unauthorized_error(&e) {
+                            McpServerStatus::NeedsAuth
+                        } else {
                             McpServerStatus::Failed {
                                 error: e.to_string(),
-                            },
-                        );
+                            }
+                        };
+                        self.status.insert(name.clone(), status);
                     }
                 }
             }
@@ -245,6 +247,17 @@ async fn http_headers_for_config(
     Ok(headers)
 }
 
+fn supports_oauth(config: &McpServerConfig) -> bool {
+    config.url.is_some() && !matches!(config.oauth, Some(McpOAuthConfig::Enabled(false)))
+}
+
+fn is_unauthorized_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("401") || message.contains("unauthorized")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +306,36 @@ mod tests {
                 .unwrap(),
             "Bearer token-123"
         );
+    }
+
+    #[tokio::test]
+    async fn remote_oauth_unauthorized_status_maps_to_needs_auth() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::get(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let config: Config = serde_json::from_value(json!({
+            "mcp": {
+                "remote": {
+                    "type": "remote",
+                    "url": format!("http://{addr}/mcp")
+                }
+            }
+        }))
+        .unwrap();
+
+        let mut manager = McpManager::new();
+        manager.start_configured(&config).await;
+
+        assert!(matches!(
+            manager.status().get("remote"),
+            Some(McpServerStatus::NeedsAuth)
+        ));
+        server.abort();
     }
 }
