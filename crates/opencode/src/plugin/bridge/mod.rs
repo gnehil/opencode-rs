@@ -5,8 +5,10 @@
 //! a small JS host (`host.mjs`) in a node/bun subprocess and exchanges
 //! newline-delimited JSON-RPC with it (see [`protocol`]).
 
+pub mod process;
 pub mod protocol;
 
+pub use process::{detect_js_runtime, JsRuntime, PluginBridge};
 pub use protocol::{
     HostEvent, HostRequest, LoadedPlugin, PluginInputData, PluginLoadError, PluginToLoad,
     HOST_SCRIPT,
