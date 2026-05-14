@@ -6,6 +6,8 @@
 // stderr is left for the runtime's own noise and is not part of the protocol.
 
 import { createInterface } from "node:readline"
+import { createRequire } from "node:module"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
 // Loaded plugins, in registration order. Each entry: { spec, hooks }.
 const plugins = []
@@ -24,15 +26,35 @@ function errorText(err) {
   return String(err)
 }
 
-function pluginInput(data) {
+// Build the opencode SDK `client` for a plugin by resolving `@opencode-ai/sdk`
+// from the plugin's own location. Real opencode plugins depend on the SDK, so
+// resolving relative to the plugin entry finds the version it was built
+// against. Returns `undefined` when the SDK is not installed near the plugin;
+// plugins that only use lifecycle hooks do not need it.
+async function buildClient(data, entry) {
+  try {
+    const base = entry.startsWith("file://") ? fileURLToPath(entry) : entry
+    const require = createRequire(base)
+    const sdkPath = require.resolve("@opencode-ai/sdk")
+    const sdk = await import(pathToFileURL(sdkPath).href)
+    if (typeof sdk.createOpencodeClient !== "function") return undefined
+    return sdk.createOpencodeClient({
+      baseUrl: data.server_url,
+      directory: data.directory,
+    })
+  } catch (err) {
+    log("warn", `plugin ${entry}: opencode SDK client unavailable: ${errorText(err)}`)
+    return undefined
+  }
+}
+
+async function pluginInput(data, entry) {
   let serverUrl = data.server_url
   try {
     serverUrl = new URL(data.server_url)
   } catch {}
   return {
-    // The SDK client is wired by the Rust bridge in a later stage; plugins
-    // that only use lifecycle hooks do not need it.
-    client: undefined,
+    client: await buildClient(data, entry),
     project: data.project,
     directory: data.directory,
     worktree: data.worktree,
@@ -62,11 +84,13 @@ function extractPluginFn(mod) {
 }
 
 async function init(msg) {
-  const input = pluginInput(msg.input)
   const loaded = []
   const errors = []
   for (const plugin of msg.plugins) {
     try {
+      // The SDK client is resolved per plugin so each gets a client built
+      // against the `@opencode-ai/sdk` shipped alongside it.
+      const input = await pluginInput(msg.input, plugin.entry)
       const mod = await import(plugin.entry)
       const fn = extractPluginFn(mod)
       if (!fn) throw new Error("plugin export is not a function")

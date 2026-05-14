@@ -865,6 +865,19 @@ async fn handle_serve(args: args::NetworkArgs, data_dir: PathBuf, open_web: bool
         }
     };
 
+    // Bind the listener up front so the real port is known before external
+    // plugins are loaded — their SDK client needs a reachable server URL.
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to bind server on {}: {}", addr, e);
+            std::process::exit(1);
+        });
+    let local_addr = listener.local_addr().unwrap_or(addr);
+    // Plugins connect back over the loopback interface regardless of the
+    // bind host (a `0.0.0.0` bind is not itself a connectable address).
+    let plugin_server_url = format!("http://127.0.0.1:{}", local_addr.port());
+
     if let Some(config) = &project_config {
         state = state.with_config_defaults(config);
         if let Err(error) = plugin_manager
@@ -885,7 +898,7 @@ async fn handle_serve(args: args::NetworkArgs, data_dir: PathBuf, open_web: bool
                 directory: state.workspace_root.to_string_lossy().to_string(),
                 worktree: state.workspace_root.to_string_lossy().to_string(),
                 project: serde_json::json!({}),
-                server_url: format!("http://{}", addr),
+                server_url: plugin_server_url.clone(),
             };
             match crate::plugin::bridge::load_external_plugins(specs, input).await {
                 Ok(Some(bridge)) => {
@@ -943,13 +956,6 @@ async fn handle_serve(args: args::NetworkArgs, data_dir: PathBuf, open_web: bool
     }
 
     let router = crate::server::create_router_with_state(Arc::new(state));
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to bind server on {}: {}", addr, e);
-            std::process::exit(1);
-        });
-    let local_addr = listener.local_addr().unwrap_or(addr);
     let display_host = if hostname == "0.0.0.0" {
         "localhost"
     } else {
