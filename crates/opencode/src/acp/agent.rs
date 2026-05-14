@@ -1182,6 +1182,11 @@ impl ACPAgent {
                         permission_rules: permission_rules.clone(),
                         event_bus: Some(self.event_bus.clone()),
                         permission_broker: None,
+                        provider: None,
+                        store: None,
+                        config: None,
+                        agent_name: Some(agent_name.clone()),
+                        model_id: None,
                     };
                     match tool.execute(params.clone(), ctx).await {
                         Ok(r) => ToolPartResult::Completed {

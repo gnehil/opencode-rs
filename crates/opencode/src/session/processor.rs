@@ -20,6 +20,7 @@ pub struct PromptProcessor {
     agent_name: String,
     config: Option<crate::config::Config>,
     model_id: Option<String>,
+    session_permission_rules: crate::permission::Ruleset,
 }
 
 pub enum ProcessEvent {
@@ -43,6 +44,7 @@ impl PromptProcessor {
             agent_name: "build".to_string(),
             config: None,
             model_id: None,
+            session_permission_rules: Vec::new(),
         }
     }
 
@@ -68,6 +70,11 @@ impl PromptProcessor {
 
     pub fn with_model(mut self, model_id: impl Into<String>) -> Self {
         self.model_id = Some(model_id.into());
+        self
+    }
+
+    pub fn with_session_permission_rules(mut self, rules: crate::permission::Ruleset) -> Self {
+        self.session_permission_rules = rules;
         self
     }
 
@@ -411,9 +418,14 @@ impl PromptProcessor {
                         let ctx = ToolContext {
                             session_id: session_id.clone(),
                             working_dir: working_dir.clone(),
-                            permission_rules: self.agent_permission_rules(&task.agent),
+                            permission_rules: self.agent_permission_rules(&self.agent_name),
                             event_bus: Some(self.bus.clone()),
                             permission_broker: self.permission_broker.clone(),
+                            provider: Some(self.provider.clone()),
+                            store: Some(self.store.clone()),
+                            config: self.config.clone(),
+                            agent_name: Some(self.agent_name.clone()),
+                            model_id: Some(model_id.to_string()),
                         };
                         match tool.execute(input.clone(), ctx).await {
                             Ok(result) => ToolPartResult::Completed {
@@ -632,6 +644,11 @@ impl PromptProcessor {
                             permission_rules: self.agent_permission_rules(&self.agent_name),
                             event_bus: Some(self.bus.clone()),
                             permission_broker: self.permission_broker.clone(),
+                            provider: Some(self.provider.clone()),
+                            store: Some(self.store.clone()),
+                            config: self.config.clone(),
+                            agent_name: Some(self.agent_name.clone()),
+                            model_id: self.model_id.clone(),
                         };
                         match tool.execute(params.clone(), ctx).await {
                             Ok(tool_result) => ToolPartResult::Completed {
@@ -742,9 +759,12 @@ impl PromptProcessor {
     }
 
     fn agent_permission_rules(&self, name: &str) -> crate::permission::Ruleset {
-        self.agent_info(name)
+        let mut rules = self
+            .agent_info(name)
             .map(|agent| agent.permission)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        rules.extend(self.session_permission_rules.clone());
+        rules
     }
 }
 

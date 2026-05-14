@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::id::{MessageID, PartID, SessionID};
@@ -11,6 +12,11 @@ pub struct ToolContext {
     pub permission_rules: crate::permission::Ruleset,
     pub event_bus: Option<crate::bus::EventBus>,
     pub permission_broker: Option<crate::permission::PermissionBroker>,
+    pub provider: Option<Arc<dyn crate::provider::Provider>>,
+    pub store: Option<Arc<crate::session::SessionStore>>,
+    pub config: Option<crate::config::Config>,
+    pub agent_name: Option<String>,
+    pub model_id: Option<String>,
 }
 
 impl ToolContext {
@@ -160,6 +166,11 @@ mod tests {
             permission_rules: rules,
             event_bus: None,
             permission_broker: None,
+            provider: None,
+            store: None,
+            config: None,
+            agent_name: None,
+            model_id: None,
         }
     }
 

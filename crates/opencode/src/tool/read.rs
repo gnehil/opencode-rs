@@ -276,6 +276,11 @@ mod tests {
             permission_rules: crate::permission::Ruleset::default(),
             event_bus: None,
             permission_broker: None,
+            provider: None,
+            store: None,
+            config: None,
+            agent_name: None,
+            model_id: None,
         }
     }
 
