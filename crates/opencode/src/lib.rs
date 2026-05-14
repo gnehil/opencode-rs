@@ -9,6 +9,7 @@ pub mod file;
 pub mod git;
 pub mod global;
 pub mod id;
+pub mod ide;
 pub mod image;
 pub mod lsp;
 pub mod mcp;
