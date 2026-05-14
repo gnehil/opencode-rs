@@ -8,6 +8,7 @@
 use serde_json::Value;
 
 use crate::config::PluginSpec;
+use crate::plugin::npm::install_npm_plugin;
 use crate::plugin::spec::{
     is_deprecated_plugin, plugin_source, resolve_path_plugin_target, PluginSource,
 };
@@ -31,24 +32,30 @@ pub async fn load_external_plugins(
             tracing::debug!("skipping deprecated built-in plugin spec: {specifier}");
             continue;
         }
+        let options = spec
+            .options()
+            .map(|opts| Value::Object(opts.clone().into_iter().collect()));
         match plugin_source(specifier) {
             PluginSource::File => match resolve_path_plugin_target(specifier) {
                 Ok(entry) => to_load.push(PluginToLoad {
                     spec: specifier.to_string(),
                     entry,
-                    options: spec.options().map(|opts| {
-                        Value::Object(opts.clone().into_iter().collect())
-                    }),
+                    options,
                 }),
                 Err(error) => {
                     tracing::warn!("failed to resolve plugin {specifier}: {error}");
                 }
             },
-            PluginSource::Npm => {
-                tracing::warn!(
-                    "npm plugin '{specifier}' skipped: on-demand npm install is not yet supported"
-                );
-            }
+            PluginSource::Npm => match install_npm_plugin(specifier).await {
+                Ok(entry) => to_load.push(PluginToLoad {
+                    spec: specifier.to_string(),
+                    entry,
+                    options,
+                }),
+                Err(error) => {
+                    tracing::warn!("failed to install npm plugin {specifier}: {error}");
+                }
+            },
         }
     }
 
@@ -94,15 +101,6 @@ mod tests {
     #[tokio::test]
     async fn empty_specs_load_nothing() {
         assert!(load_external_plugins(&[], sample_input())
-            .await
-            .unwrap()
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn npm_specs_are_skipped_for_now() {
-        let specs = vec![PluginSpec::Bare("@opencode-ai/some-plugin".to_string())];
-        assert!(load_external_plugins(&specs, sample_input())
             .await
             .unwrap()
             .is_none());

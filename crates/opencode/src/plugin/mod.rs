@@ -490,9 +490,11 @@ impl Default for PluginManager {
 
 pub mod bridge;
 mod internal;
+pub mod npm;
 pub mod spec;
 
 pub use internal::*;
+pub use npm::install_npm_plugin;
 pub use spec::{
     is_deprecated_plugin, is_path_plugin_spec, parse_plugin_specifier, plugin_source,
     resolve_path_plugin_target, PackageSpecifier, PluginSource,
