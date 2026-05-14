@@ -49,10 +49,17 @@ Legend:
 | --- | --- | --- | --- | --- |
 | Providers/model auth | `provider/*`, `auth/index.ts` | `provider/*`, `auth.rs`, `cli/provider_auth.rs` | partial | Per-provider auth schema and live smoke tests |
 | Tools | `tool/*` | `tool/*` | partial | Validate behavior, output shape, permission integration per tool |
+| External directory guard | `tool/external-directory.ts` | `tool/external_directory.rs` | partial | Guard wired into read/write/edit/glob/grep/lsp/apply_patch; `bypass` (reference module) and richer permission metadata still missing |
+| `repo_clone`/`repo_overview` tools | `tool/repo_clone.ts`, `tool/repo_overview.ts` | `tool/repo_search.rs`, `tool/repo_tools.rs` | partial | Tool names/behavior diverge from TS; reconcile or document the mapping |
+| `mcp-websearch` tool | `tool/mcp-websearch.ts` | `tool/websearch.rs` | partial | TS routes websearch through MCP; Rust uses its own implementation |
 | Permission ask | `permission/index.ts` | `permission/broker.rs`, `tool/context.rs` | done | Broaden HTTP/UI reply integration |
 | MCP runtime | `mcp/*` | `mcp/*`, `cli/mcp_cli.rs` | partial | Browser-open authenticate UX and dynamic registration status edge cases |
 | Plugin runtime | `cli/cmd/tui/plugin/*`, plugin hooks | `plugin/*`, `session/processor.rs`, `message_handlers.rs`, `cli/mod.rs` | partial | External JS/TS plugin loading and TUI plugin slots |
 | LSP | `lsp/*` | `lsp/*`, `tool/lsp.rs` | partial | Long-lived pool behavior and diagnostics shape |
+| IDE integration | `ide/index.ts` | none | missing | Install opencode extension into VSCode/Cursor/Windsurf/VSCodium and emit `ide.installed` |
+| Image processing | `image/image.ts` | `provider/request.rs`, `message/part.rs` | partial | Rust passes image parts through raw; no resize/compress/auto-resize pipeline, large images fail |
+| OTEL / trace export | `cli/cmd/run/otel.ts`, `cli/cmd/run/trace.ts` | local `tracing` only | missing | No OpenTelemetry export; only local tracing subscriber |
+| Session projectors | `session/projectors.ts`, `projectors-next.ts`, `instruction.ts`, `system.ts` | `session/*` (different layout) | partial | Verify system-prompt assembly and event projection equivalence |
 
 ## Current priority queue
 
@@ -61,3 +68,5 @@ Legend:
 3. Remote TUI attach/control queue and TUI prompt execution.
 4. MCP browser-open authenticate UX.
 5. Provider/model/auth dynamic loading and stored credential use beyond API keys.
+6. Image resize/compress pipeline.
+7. IDE integration (`ide` module + CLI command).

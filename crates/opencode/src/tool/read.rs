@@ -56,6 +56,14 @@ impl Tool for ReadTool {
                 .map_err(|e| anyhow::anyhow!("Invalid read parameters: {}", e))?;
 
             let path = resolve_read_path(&ctx.working_dir, &params.file_path);
+
+            let kind = if path.is_dir() {
+                super::ExternalKind::Directory
+            } else {
+                super::ExternalKind::File
+            };
+            super::assert_external_directory(&ctx, &path, kind, false).await?;
+
             let permission_pattern = permission_pattern(&ctx.working_dir, &path);
             ctx.check_permission("read", &permission_pattern).await?;
 

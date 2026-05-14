@@ -121,6 +121,9 @@ impl Tool for LspTool {
                 ctx.working_dir.join(&params.file_path)
             };
 
+            super::assert_external_directory(&ctx, &file_path, super::ExternalKind::File, false)
+                .await?;
+
             if !file_path.exists() {
                 return Err(anyhow::anyhow!("File not found: {}", file_path.display()));
             }

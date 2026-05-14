@@ -70,6 +70,12 @@ impl Tool for GrepTool {
 
             let search_dir = params.path.unwrap_or_else(|| ctx.working_dir.clone());
             let path = Path::new(&search_dir);
+            let kind = if path.is_dir() {
+                super::ExternalKind::Directory
+            } else {
+                super::ExternalKind::File
+            };
+            super::assert_external_directory(&ctx, path, kind, false).await?;
             if !path.exists() {
                 return Err(anyhow::anyhow!(
                     "Search path not found: {}",

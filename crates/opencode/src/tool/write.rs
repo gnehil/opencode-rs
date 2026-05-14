@@ -45,9 +45,10 @@ impl Tool for WriteTool {
             let params: WriteParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid write parameters: {}", e))?;
 
-            ctx.check_permission("edit", &params.file_path).await?;
-
             let path = Path::new(&params.file_path);
+            super::assert_external_directory(&ctx, path, super::ExternalKind::File, false).await?;
+
+            ctx.check_permission("edit", &params.file_path).await?;
 
             if let Some(parent) = path.parent() {
                 if let Err(e) = fs::create_dir_all(parent) {

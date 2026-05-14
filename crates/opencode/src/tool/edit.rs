@@ -54,6 +54,13 @@ impl Tool for EditTool {
             let params: EditParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid edit parameters: {}", e))?;
 
+            super::assert_external_directory(
+                &ctx,
+                Path::new(&params.file_path),
+                super::ExternalKind::File,
+                false,
+            )
+            .await?;
             ctx.check_permission("edit", &params.file_path).await?;
 
             if params.old_string == params.new_string {

@@ -49,6 +49,13 @@ impl Tool for GlobTool {
                 .map_err(|e| anyhow::anyhow!("Invalid glob parameters: {}", e))?;
 
             let search_dir = params.path.unwrap_or_else(|| ctx.working_dir.clone());
+            super::assert_external_directory(
+                &ctx,
+                &search_dir,
+                super::ExternalKind::Directory,
+                false,
+            )
+            .await?;
             let path = Path::new(&search_dir);
             if !path.exists() {
                 return Err(anyhow::anyhow!(

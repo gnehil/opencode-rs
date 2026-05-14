@@ -59,6 +59,13 @@ impl Tool for ApplyPatchTool {
 
             for hunk in &hunks {
                 let file_path = ctx.working_dir.join(&hunk.path);
+                super::assert_external_directory(
+                    &ctx,
+                    &file_path,
+                    super::ExternalKind::File,
+                    false,
+                )
+                .await?;
 
                 match hunk.operation.as_str() {
                     "add" => {
