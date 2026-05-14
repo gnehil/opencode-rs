@@ -950,14 +950,32 @@ async fn apply_command_execute_before(
             crate::plugin::CommandExecuteBeforeInput {
                 session_id: session_id.to_string(),
                 command: command.to_string(),
-                arguments,
+                arguments: arguments.clone(),
                 parts: Vec::new(),
             },
             crate::plugin::CommandExecuteBeforeOutput { parts },
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    turn.parts = parse_user_part_drafts(&Some(output.parts))?;
+
+    // External JS/TS plugins see the same hook: input `{ command, sessionID,
+    // arguments }`, output `{ parts }` they may rewrite.
+    let bridge_output = plugin_manager
+        .trigger_bridge(
+            "command.execute.before",
+            serde_json::json!({
+                "command": command,
+                "sessionID": session_id,
+                "arguments": arguments.unwrap_or_default(),
+            }),
+            serde_json::json!({ "parts": output.parts }),
+        )
+        .await;
+    let final_parts = bridge_output
+        .get("parts")
+        .and_then(|parts| serde_json::from_value(parts.clone()).ok())
+        .unwrap_or(output.parts);
+    turn.parts = parse_user_part_drafts(&Some(final_parts))?;
     let text = prompt_text_from_drafts(&turn.parts);
     if !text.is_empty() || turn.parts.is_empty() {
         turn.text = text;
