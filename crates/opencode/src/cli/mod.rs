@@ -1312,9 +1312,9 @@ fn provider_id_from_credentials(credentials: Option<&ProviderCredentials>) -> Op
     let mut ids = credentials
         .iter()
         .filter_map(|(id, credential)| match credential {
-            provider_auth::ProviderCredential::Api { .. } => Some(normalize_provider_id(id)),
-            provider_auth::ProviderCredential::Wellknown { .. }
-            | provider_auth::ProviderCredential::Oauth { .. } => None,
+            provider_auth::ProviderCredential::Api { .. }
+            | provider_auth::ProviderCredential::Oauth { .. } => Some(normalize_provider_id(id)),
+            provider_auth::ProviderCredential::Wellknown { .. } => None,
         });
     let first = ids.next()?;
     if ids.next().is_some() {
@@ -1338,8 +1338,13 @@ fn provider_api_key_from_credentials(
             provider_auth::ProviderCredential::Api { key, .. } => {
                 Some(key.clone()).filter(|key| !key.trim().is_empty())
             }
+            // A stored OAuth credential exposes its short-lived `access`
+            // token, which doubles as the bearer key for OpenAI-compatible
+            // providers. Refreshing an expired token is handled separately.
+            provider_auth::ProviderCredential::Oauth { access, .. } => {
+                Some(access.clone()).filter(|access| !access.trim().is_empty())
+            }
             provider_auth::ProviderCredential::Wellknown { .. } => None,
-            provider_auth::ProviderCredential::Oauth { .. } => None,
         }
     })
 }
@@ -1697,5 +1702,59 @@ mod tests {
             crate::message::Part::Text(part) => assert_eq!(part.text, "prompt text"),
             _ => panic!("expected text part"),
         }
+    }
+
+    #[test]
+    fn oauth_credential_resolves_access_token_as_provider_key() {
+        let credentials: ProviderCredentials = std::collections::BTreeMap::from([(
+            "openai".to_string(),
+            provider_auth::ProviderCredential::Oauth {
+                refresh: "refresh-token".to_string(),
+                access: "access-token".to_string(),
+                expires: Some(1),
+                extra: Default::default(),
+            },
+        )]);
+
+        assert_eq!(
+            provider_api_key_from_credentials("openai", Some(&credentials)).as_deref(),
+            Some("access-token")
+        );
+    }
+
+    #[test]
+    fn oauth_only_credentials_select_the_provider() {
+        let credentials: ProviderCredentials = std::collections::BTreeMap::from([(
+            "openai".to_string(),
+            provider_auth::ProviderCredential::Oauth {
+                refresh: "refresh-token".to_string(),
+                access: "access-token".to_string(),
+                expires: None,
+                extra: Default::default(),
+            },
+        )]);
+
+        assert_eq!(
+            provider_id_from_credentials(Some(&credentials)).as_deref(),
+            Some("openai")
+        );
+    }
+
+    #[test]
+    fn blank_oauth_access_token_is_ignored() {
+        let credentials: ProviderCredentials = std::collections::BTreeMap::from([(
+            "openai".to_string(),
+            provider_auth::ProviderCredential::Oauth {
+                refresh: "refresh-token".to_string(),
+                access: "   ".to_string(),
+                expires: None,
+                extra: Default::default(),
+            },
+        )]);
+
+        assert_eq!(
+            provider_api_key_from_credentials("openai", Some(&credentials)),
+            None
+        );
     }
 }
