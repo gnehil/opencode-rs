@@ -205,7 +205,9 @@ impl PromptProcessor {
             let history =
                 crate::session::build_completion_messages(self.store.as_ref(), session_id).await?;
 
-            let request = self.build_request_from_history(&model_id, history)?;
+            let request = self
+                .build_request_from_history(session_id, &model_id, history)
+                .await?;
 
             let response = match crate::session::complete_with_retry(
                 self.provider.as_ref(),
@@ -757,12 +759,13 @@ impl PromptProcessor {
         Ok(())
     }
 
-    fn build_request_from_history(
+    async fn build_request_from_history(
         &self,
+        session_id: &SessionID,
         model_id: &str,
         messages: Vec<CompletionMessage>,
     ) -> anyhow::Result<CompletionRequest> {
-        let tools: Vec<ToolDefinition> = self
+        let mut tools: Vec<ToolDefinition> = self
             .tools
             .iter()
             .map(|t| ToolDefinition {
@@ -771,6 +774,29 @@ impl PromptProcessor {
                 parameters: t.parameters_schema(),
             })
             .collect();
+
+        // External plugins can rewrite each tool's description/parameters
+        // before they are sent to the model (TS `tool.definition` hook).
+        if let Some(plugin_manager) = &self.plugin_manager {
+            for tool in &mut tools {
+                let updated = plugin_manager
+                    .trigger_bridge(
+                        "tool.definition",
+                        serde_json::json!({ "toolID": tool.name }),
+                        serde_json::json!({
+                            "description": tool.description,
+                            "parameters": tool.parameters,
+                        }),
+                    )
+                    .await;
+                if let Some(description) = updated.get("description").and_then(|v| v.as_str()) {
+                    tool.description = description.to_string();
+                }
+                if let Some(parameters) = updated.get("parameters") {
+                    tool.parameters = parameters.clone();
+                }
+            }
+        }
 
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
@@ -782,7 +808,7 @@ impl PromptProcessor {
             agent.as_ref(),
         );
 
-        Ok(CompletionRequest {
+        let mut request = CompletionRequest {
             model: crate::provider::ModelID::new(model_id),
             messages,
             system: Some(system),
@@ -791,7 +817,38 @@ impl PromptProcessor {
             temperature: None,
             top_p: None,
             stop_sequences: None,
-        })
+        };
+
+        // External plugins can tune sampling parameters per turn
+        // (TS `chat.params` hook).
+        if let Some(plugin_manager) = &self.plugin_manager {
+            let params = plugin_manager
+                .trigger_bridge(
+                    "chat.params",
+                    serde_json::json!({
+                        "sessionID": session_id.to_string(),
+                        "agent": self.agent_name,
+                        "model": { "providerID": self.provider.name(), "modelID": model_id },
+                    }),
+                    serde_json::json!({
+                        "temperature": request.temperature,
+                        "topP": request.top_p,
+                        "maxOutputTokens": request.max_tokens,
+                    }),
+                )
+                .await;
+            if let Some(temperature) = params.get("temperature").and_then(|v| v.as_f64()) {
+                request.temperature = Some(temperature);
+            }
+            if let Some(top_p) = params.get("topP").and_then(|v| v.as_f64()) {
+                request.top_p = Some(top_p);
+            }
+            if let Some(max_tokens) = params.get("maxOutputTokens").and_then(|v| v.as_u64()) {
+                request.max_tokens = Some(max_tokens);
+            }
+        }
+
+        Ok(request)
     }
 
     fn agent_info(&self, name: &str) -> Option<crate::agent::AgentInfo> {
@@ -1084,7 +1141,8 @@ mod tests {
             .with_agent("reviewer");
 
         let request = processor
-            .build_request_from_history("test-model", Vec::new())
+            .build_request_from_history(&SessionID::new(), "test-model", Vec::new())
+            .await
             .unwrap();
         assert!(request.system.unwrap().contains("CUSTOM REVIEW PERSONA"));
 
@@ -1323,6 +1381,93 @@ mod tests {
         assert!(seen.iter().any(|message| {
             message.role == "tool" && message.content.contains("after task done: hooked inspect")
         }));
+    }
+
+    #[tokio::test]
+    async fn build_request_applies_external_plugin_definition_and_params_hooks() {
+        use crate::plugin::bridge;
+        let Some((runtime, _)) = bridge::detect_js_runtime() else {
+            eprintln!("skipping: no JS runtime available");
+            return;
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_path = tmp.path().join("plugin.mjs");
+        std::fs::write(
+            &plugin_path,
+            r#"export default async function () {
+                return {
+                    "tool.definition": async (input, output) => {
+                        output.description = "rewritten: " + input.toolID
+                    },
+                    "chat.params": async (input, output) => {
+                        output.temperature = 0.42
+                        output.maxOutputTokens = 1234
+                    },
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()).await.unwrap());
+        let provider = Arc::new(FakeProvider {
+            model: ModelInfo {
+                id: Some(ModelID::new("test-model")),
+                name: None,
+                family: None,
+                release_date: None,
+                attachment: None,
+                reasoning: None,
+                temperature: None,
+                tool_call: None,
+                interleaved: None,
+                cost: None,
+                limit: None,
+                modalities: None,
+                experimental: None,
+                status: None,
+                provider: None,
+                options: None,
+                headers: None,
+                variants: None,
+            },
+            seen: Arc::new(Mutex::new(Vec::new())),
+        });
+
+        let plugin_bridge = bridge::PluginBridge::spawn(
+            runtime,
+            vec![bridge::PluginToLoad {
+                spec: "./plugin.mjs".to_string(),
+                entry: format!("file://{}", plugin_path.to_string_lossy()),
+                options: None,
+            }],
+            bridge::PluginInputData {
+                directory: "/tmp".to_string(),
+                worktree: "/tmp".to_string(),
+                project: serde_json::json!({}),
+                server_url: "http://localhost:4096".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plugin_manager = crate::plugin::PluginManager::new();
+        plugin_manager.set_bridge(Arc::new(plugin_bridge));
+
+        let processor = PromptProcessor::new(store, provider)
+            .with_tools(vec![Arc::new(FakeTaskTool)])
+            .with_plugin_manager(Arc::new(plugin_manager));
+
+        let request = processor
+            .build_request_from_history(&SessionID::new(), "test-model", Vec::new())
+            .await
+            .unwrap();
+
+        assert_eq!(request.temperature, Some(0.42));
+        assert_eq!(request.max_tokens, Some(1234));
+        assert!(request
+            .tools
+            .iter()
+            .any(|tool| tool.description == "rewritten: task"));
     }
 
     #[tokio::test]
