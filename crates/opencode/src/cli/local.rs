@@ -397,12 +397,7 @@ fn os_release() -> String {
 }
 
 fn plugin_specifier(plugin: &crate::config::PluginSpec) -> String {
-    plugin
-        .name
-        .clone()
-        .or_else(|| plugin.path.clone())
-        .or_else(|| plugin.url.clone())
-        .unwrap_or_else(|| "<unknown>".to_string())
+    plugin.specifier().to_string()
 }
 
 fn debug_path_rows() -> Vec<(&'static str, PathBuf)> {

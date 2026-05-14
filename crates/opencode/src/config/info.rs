@@ -359,16 +359,34 @@ pub struct WatcherConfig {
     pub ignore: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginSpec {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
+/// A user-config plugin declaration. Matches the TypeScript
+/// `ConfigPlugin.Spec`: either a bare identifier string, or a `[identifier,
+/// options]` pair carrying inline options. The identifier is an npm package
+/// spec or a path-like local spec (`./plugin.ts`, an absolute path, or a
+/// `file://` URL).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PluginSpec {
+    Bare(String),
+    WithOptions(String, std::collections::BTreeMap<String, serde_json::Value>),
+}
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
+impl PluginSpec {
+    /// The plugin identifier — answers "what should we load?".
+    pub fn specifier(&self) -> &str {
+        match self {
+            PluginSpec::Bare(spec) => spec,
+            PluginSpec::WithOptions(spec, _) => spec,
+        }
+    }
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    /// Inline options attached to the spec, if any.
+    pub fn options(&self) -> Option<&std::collections::BTreeMap<String, serde_json::Value>> {
+        match self {
+            PluginSpec::Bare(_) => None,
+            PluginSpec::WithOptions(_, options) => Some(options),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

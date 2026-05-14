@@ -54,7 +54,7 @@ Legend:
 | `mcp-websearch` tool | `tool/mcp-websearch.ts` | `tool/websearch.rs` | partial | TS routes websearch through MCP; Rust uses its own implementation |
 | Permission ask | `permission/index.ts` | `permission/broker.rs`, `tool/context.rs` | done | Broaden HTTP/UI reply integration |
 | MCP runtime | `mcp/*` | `mcp/*`, `cli/mcp_cli.rs` | partial | Browser-open authenticate UX and dynamic registration status edge cases |
-| Plugin runtime | `cli/cmd/tui/plugin/*`, plugin hooks | `plugin/*`, `session/processor.rs`, `message_handlers.rs`, `cli/mod.rs` | partial | External JS/TS plugin loading and TUI plugin slots |
+| Plugin runtime | `cli/cmd/tui/plugin/*`, plugin hooks | `plugin/*`, `session/processor.rs`, `message_handlers.rs`, `cli/mod.rs` | partial | External JS/TS plugin loading in progress (subprocess bridge): spec parsing done; bridge protocol + JS host, subprocess manager, and PluginManager wiring still pending. TUI plugin slots still missing |
 | LSP | `lsp/*` | `lsp/*`, `tool/lsp.rs` | partial | Long-lived pool behavior and diagnostics shape |
 | IDE integration | `ide/index.ts` | `ide/mod.rs` | done | `detect`/`already_installed`/`install` ported with tests; `ide.installed` bus event skipped (TS defines it but has no publisher/subscriber) |
 | Image processing | `image/image.ts` | `image/mod.rs`, `session/processor.rs` | done | Resize/recompress pipeline wired into tool-attachment handling; uses the `image` crate instead of Photon WASM |
