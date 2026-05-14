@@ -209,6 +209,10 @@ pub trait Plugin: Send + Sync {
 pub struct PluginManager {
     plugins: Vec<Arc<dyn Plugin>>,
     hooks: Vec<Hooks>,
+    /// External JS/TS plugins, loaded once at startup via the subprocess
+    /// bridge. Set-once so the shared `Arc<PluginManager>` can gain a bridge
+    /// after the config that declares the plugins has been read.
+    bridge: std::sync::OnceLock<Arc<bridge::PluginBridge>>,
 }
 
 impl PluginManager {
@@ -216,6 +220,56 @@ impl PluginManager {
         Self {
             plugins: Vec::new(),
             hooks: Vec::new(),
+            bridge: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Attach the external-plugin bridge. Idempotent: a second call is
+    /// ignored, since the bridge is established once at startup.
+    pub fn set_bridge(&self, bridge: Arc<bridge::PluginBridge>) {
+        let _ = self.bridge.set(bridge);
+    }
+
+    /// The external-plugin bridge, if one was attached.
+    pub fn bridge(&self) -> Option<&Arc<bridge::PluginBridge>> {
+        self.bridge.get()
+    }
+
+    /// Route a trigger-style hook to external plugins. Returns `output`
+    /// unchanged when no bridge is attached, no external plugin registered
+    /// `hook`, or the bridge call fails (failures are logged, not fatal).
+    pub async fn trigger_bridge(
+        &self,
+        hook: &str,
+        input: serde_json::Value,
+        output: serde_json::Value,
+    ) -> serde_json::Value {
+        let Some(bridge) = self.bridge.get() else {
+            return output;
+        };
+        if !bridge.has_hook(hook) {
+            return output;
+        }
+        match bridge.trigger(hook, input, output.clone()).await {
+            Ok(updated) => updated,
+            Err(error) => {
+                tracing::warn!("external plugin hook '{hook}' failed: {error}");
+                output
+            }
+        }
+    }
+
+    /// Route a one-way notification hook (`event`, `config`) to external
+    /// plugins. A no-op when no bridge is attached or no plugin wants `hook`.
+    pub async fn notify_bridge(&self, hook: &str, input: serde_json::Value) {
+        let Some(bridge) = self.bridge.get() else {
+            return;
+        };
+        if !bridge.has_hook(hook) {
+            return;
+        }
+        if let Err(error) = bridge.notify(hook, input).await {
+            tracing::warn!("external plugin notification '{hook}' failed: {error}");
         }
     }
 
@@ -269,8 +323,13 @@ impl PluginManager {
                 let _ = manager
                     .trigger_event(EventInput {
                         event_type,
-                        payload,
+                        payload: payload.clone(),
                     })
+                    .await;
+                // External plugins receive the same bus events through their
+                // `event` hook, shaped as `{ event }` to match the TS API.
+                manager
+                    .notify_bridge("event", serde_json::json!({ "event": payload }))
                     .await;
             })
         })
@@ -517,6 +576,84 @@ mod tests {
 
         assert_eq!(event_rx.recv().await.unwrap(), "session.create");
         assert_eq!(config_rx.recv().await.unwrap(), "project");
+    }
+
+    fn write_plugin(dir: &std::path::Path, name: &str, body: &str) -> String {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        format!("file://{}", path.to_string_lossy())
+    }
+
+    async fn spawn_test_bridge(entry: String) -> Option<bridge::PluginBridge> {
+        let (runtime, _) = bridge::detect_js_runtime()?;
+        Some(
+            bridge::PluginBridge::spawn(
+                runtime,
+                vec![bridge::PluginToLoad {
+                    spec: "test".to_string(),
+                    entry,
+                    options: None,
+                }],
+                bridge::PluginInputData {
+                    directory: "/work".to_string(),
+                    worktree: "/work".to_string(),
+                    project: serde_json::json!({}),
+                    server_url: "http://localhost:4096".to_string(),
+                },
+            )
+            .await
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn trigger_bridge_without_a_bridge_returns_output_unchanged() {
+        let manager = PluginManager::new();
+        let output = serde_json::json!({ "args": { "x": 1 } });
+        let result = manager
+            .trigger_bridge("tool.execute.before", serde_json::json!({}), output.clone())
+            .await;
+        assert_eq!(result, output);
+    }
+
+    #[tokio::test]
+    async fn trigger_bridge_routes_through_external_plugins() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = write_plugin(
+            dir.path(),
+            "plugin.mjs",
+            r#"export default async function () {
+                return {
+                    "tool.execute.before": async (input, output) => {
+                        output.args.tool = input.tool
+                    },
+                }
+            }"#,
+        );
+        let Some(bridge) = spawn_test_bridge(entry).await else {
+            eprintln!("skipping: no JS runtime available");
+            return;
+        };
+
+        let manager = PluginManager::new();
+        manager.set_bridge(Arc::new(bridge));
+
+        // A hook the external plugin registered is routed through the bridge.
+        let result = manager
+            .trigger_bridge(
+                "tool.execute.before",
+                serde_json::json!({ "tool": "bash" }),
+                serde_json::json!({ "args": {} }),
+            )
+            .await;
+        assert_eq!(result["args"]["tool"], "bash");
+
+        // A hook nothing registered passes the output straight through.
+        let untouched = serde_json::json!({ "args": { "y": 2 } });
+        let result = manager
+            .trigger_bridge("chat.params", serde_json::json!({}), untouched.clone())
+            .await;
+        assert_eq!(result, untouched);
     }
 
     #[tokio::test]

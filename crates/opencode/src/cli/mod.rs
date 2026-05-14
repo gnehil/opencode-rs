@@ -877,6 +877,33 @@ async fn handle_serve(args: args::NetworkArgs, data_dir: PathBuf, open_web: bool
         {
             eprintln!("Warning: plugin config hook failed: {}", error);
         }
+
+        // Load external JS/TS plugins declared in config through the
+        // subprocess bridge, then hand them their initial `config` payload.
+        if let Some(specs) = &config.plugin {
+            let input = crate::plugin::bridge::PluginInputData {
+                directory: state.workspace_root.to_string_lossy().to_string(),
+                worktree: state.workspace_root.to_string_lossy().to_string(),
+                project: serde_json::json!({}),
+                server_url: format!("http://{}", addr),
+            };
+            match crate::plugin::bridge::load_external_plugins(specs, input).await {
+                Ok(Some(bridge)) => {
+                    plugin_manager.set_bridge(Arc::new(bridge));
+                    plugin_manager
+                        .notify_bridge(
+                            "config",
+                            serde_json::to_value(config)
+                                .unwrap_or(serde_json::Value::Null),
+                        )
+                        .await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Warning: failed to load external plugins: {}", error);
+                }
+            }
+        }
         let mut manager = state.mcp_manager.write().await;
         manager.start_configured(&config).await;
         let connected = manager
