@@ -22,7 +22,8 @@ pub struct ToolContext {
 impl ToolContext {
     /// Resolve whether `permission` should be granted for `pattern`. Empty
     /// rulesets allow by default so that callers (CLI, tests) that haven't
-    /// loaded any rules don't break. Deny rules always win over Allow.
+    /// loaded any rules don't break. Matching uses the last applicable rule,
+    /// mirroring the TypeScript implementation's override order.
     /// An `Ask` decision is routed through the permission broker when the
     /// caller provided one. Without a broker, Ask remains an error so
     /// non-interactive contexts fail closed instead of silently executing.
@@ -31,8 +32,11 @@ impl ToolContext {
         if self.permission_rules.is_empty() {
             return Ok(());
         }
-        let decision =
-            crate::permission::evaluate(permission, pattern, &[self.permission_rules.clone()]);
+        let decision = crate::permission::evaluate(
+            permission,
+            pattern,
+            std::slice::from_ref(&self.permission_rules),
+        );
         match decision.action {
             Action::Allow => Ok(()),
             Action::Deny => Err(anyhow::anyhow!(
@@ -58,7 +62,7 @@ impl ToolContext {
         metadata.insert("pattern".to_string(), serde_json::json!(pattern));
         let request = crate::permission::PermissionRequest {
             id: permission_id,
-            session_id: self.session_id.clone(),
+            session_id: self.session_id,
             permission: permission.to_string(),
             patterns: vec![pattern.to_string()],
             metadata,

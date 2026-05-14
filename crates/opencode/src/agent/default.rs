@@ -14,15 +14,40 @@ fn default_permissions() -> Vec<PermissionRule> {
         },
         PermissionRule::ask_tool("doom_loop"),
         PermissionRule::deny_tool("question"),
+        PermissionRule::deny_tool("plan_enter"),
+        PermissionRule::deny_tool("plan_exit"),
+        PermissionRule::deny_tool("repo_clone"),
+        PermissionRule::deny_tool("repo_overview"),
+        PermissionRule {
+            permission: "read".to_string(),
+            pattern: "*.env".to_string(),
+            action: Action::Ask,
+        },
+        PermissionRule {
+            permission: "read".to_string(),
+            pattern: "*.env.*".to_string(),
+            action: Action::Ask,
+        },
+        PermissionRule {
+            permission: "read".to_string(),
+            pattern: "*.env.example".to_string(),
+            action: Action::Allow,
+        },
     ]
 }
 
+fn build_permissions() -> Vec<PermissionRule> {
+    let mut rules = default_permissions();
+    rules.push(PermissionRule::allow_tool("question"));
+    rules.push(PermissionRule::allow_tool("plan_enter"));
+    rules
+}
+
 fn plan_permissions() -> Vec<PermissionRule> {
-    let global_deny_all = PermissionRule {
-        permission: "*".to_string(),
-        pattern: "*".to_string(),
-        action: Action::Deny,
-    };
+    let mut rules = default_permissions();
+    rules.push(PermissionRule::allow_tool("question"));
+    rules.push(PermissionRule::allow_tool("plan_exit"));
+    rules.push(PermissionRule::deny_tool("edit"));
     let allow_plan_files = PermissionRule {
         permission: "edit".to_string(),
         pattern: ".opencode/plans/*.md".to_string(),
@@ -33,7 +58,15 @@ fn plan_permissions() -> Vec<PermissionRule> {
         pattern: "data/plans/*.md".to_string(),
         action: Action::Allow,
     };
-    vec![global_deny_all, allow_plan_files, allow_data_plans]
+    rules.push(allow_plan_files);
+    rules.push(allow_data_plans);
+    rules
+}
+
+fn general_permissions() -> Vec<PermissionRule> {
+    let mut rules = default_permissions();
+    rules.push(PermissionRule::deny_tool("todowrite"));
+    rules
 }
 
 fn opts() -> HashMap<String, serde_json::Value> {
@@ -52,7 +85,7 @@ pub fn build_agent() -> AgentInfo {
         top_p: None,
         temperature: None,
         color: None,
-        permission: default_permissions(),
+        permission: build_permissions(),
         model: None,
         variant: None,
         prompt: None,
@@ -90,7 +123,7 @@ pub fn general_agent() -> AgentInfo {
         top_p: None,
         temperature: None,
         color: None,
-        permission: default_permissions(),
+        permission: general_permissions(),
         model: None,
         variant: None,
         prompt: None,
@@ -101,7 +134,9 @@ pub fn general_agent() -> AgentInfo {
 
 pub fn explore_agent() -> AgentInfo {
     let desc = r#"Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase. When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis."#;
-    let perm = vec![
+    let mut perm = default_permissions();
+    perm.extend(vec![
+        PermissionRule::deny_tool("*"),
         PermissionRule::allow_tool("grep"),
         PermissionRule::allow_tool("glob"),
         PermissionRule::allow_tool("list"),
@@ -109,7 +144,7 @@ pub fn explore_agent() -> AgentInfo {
         PermissionRule::allow_tool("webfetch"),
         PermissionRule::allow_tool("websearch"),
         PermissionRule::allow_tool("read"),
-    ];
+    ]);
     AgentInfo {
         name: "explore".to_string(),
         description: Some(desc.to_string()),
@@ -130,13 +165,17 @@ pub fn explore_agent() -> AgentInfo {
 
 pub fn scout_agent() -> AgentInfo {
     let desc = r#"Docs and dependency-source specialist. Use this when you need to inspect external documentation, clone dependency repositories into the managed cache, and research library implementation details without modifying the user's workspace."#;
-    let perm = vec![
+    let mut perm = default_permissions();
+    perm.extend(vec![
+        PermissionRule::deny_tool("*"),
         PermissionRule::allow_tool("grep"),
         PermissionRule::allow_tool("glob"),
         PermissionRule::allow_tool("webfetch"),
         PermissionRule::allow_tool("websearch"),
         PermissionRule::allow_tool("read"),
-    ];
+        PermissionRule::allow_tool("repo_clone"),
+        PermissionRule::allow_tool("repo_overview"),
+    ]);
     AgentInfo {
         name: "scout".to_string(),
         description: Some(desc.to_string()),
@@ -217,5 +256,48 @@ pub fn summary_agent() -> AgentInfo {
         prompt: Some(super::prompts::PROMPT_SUMMARY.to_owned()),
         options: opts(),
         steps: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decision(agent: &AgentInfo, permission: &str, pattern: &str) -> Action {
+        crate::permission::evaluate(permission, pattern, std::slice::from_ref(&agent.permission))
+            .action
+    }
+
+    #[test]
+    fn build_permissions_match_default_tool_policy() {
+        let agent = build_agent();
+
+        assert_eq!(decision(&agent, "bash", "git status"), Action::Allow);
+        assert_eq!(decision(&agent, "question", "*"), Action::Allow);
+        assert_eq!(decision(&agent, "repo_clone", "*"), Action::Deny);
+    }
+
+    #[test]
+    fn plan_permissions_are_read_only_with_plan_file_exception() {
+        let agent = plan_agent();
+
+        assert_eq!(decision(&agent, "read", "src/main.rs"), Action::Allow);
+        assert_eq!(decision(&agent, "edit", "src/main.rs"), Action::Deny);
+        assert_eq!(
+            decision(&agent, "edit", ".opencode/plans/feature.md"),
+            Action::Allow
+        );
+        assert_eq!(decision(&agent, "question", "*"), Action::Allow);
+    }
+
+    #[test]
+    fn subagent_permissions_limit_tools_like_typescript() {
+        let general = general_agent();
+        assert_eq!(decision(&general, "bash", "git status"), Action::Allow);
+        assert_eq!(decision(&general, "todowrite", "*"), Action::Deny);
+
+        let explore = explore_agent();
+        assert_eq!(decision(&explore, "read", "src/main.rs"), Action::Allow);
+        assert_eq!(decision(&explore, "edit", "src/main.rs"), Action::Deny);
     }
 }

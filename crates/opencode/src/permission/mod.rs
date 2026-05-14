@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use glob_match::glob_match;
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 
 pub mod action;
@@ -75,14 +75,19 @@ pub fn from_config(config: HashMap<String, ConfigPermissionValue>) -> Ruleset {
 }
 
 pub fn merge(rulesets: &[Ruleset]) -> Ruleset {
-    rulesets.iter().cloned().flatten().collect()
+    rulesets
+        .iter()
+        .flat_map(|ruleset| ruleset.iter().cloned())
+        .collect()
 }
 
 pub fn evaluate(permission: &str, pattern: &str, rulesets: &[Ruleset]) -> PermissionRule {
     let mut result: Option<PermissionRule> = None;
     for ruleset in rulesets {
         for rule in ruleset {
-            if rule.permission == permission && glob_match(&rule.pattern, pattern) {
+            if wildcard_match(permission, &rule.permission)
+                && wildcard_match(pattern, &rule.pattern)
+            {
                 result = Some(rule.clone());
             }
         }
@@ -92,6 +97,77 @@ pub fn evaluate(permission: &str, pattern: &str, rulesets: &[Ruleset]) -> Permis
         pattern: pattern.to_owned(),
         action: Action::Ask,
     })
+}
+
+fn wildcard_match(input: &str, pattern: &str) -> bool {
+    let input = input.replace('\\', "/");
+    let pattern = pattern.replace('\\', "/");
+    let mut escaped = String::new();
+    for ch in pattern.chars() {
+        match ch {
+            '*' => escaped.push_str(".*"),
+            '?' => escaped.push('.'),
+            _ => escaped.push_str(&regex::escape(&ch.to_string())),
+        }
+    }
+    if escaped.ends_with(" .*") {
+        escaped.truncate(escaped.len() - 3);
+        escaped.push_str("( .*)?");
+    }
+    RegexBuilder::new(&format!("^{escaped}$"))
+        .case_insensitive(cfg!(windows))
+        .dot_matches_new_line(true)
+        .build()
+        .map(|re| re.is_match(&input))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wildcard_permission_matches_any_tool() {
+        let rules = vec![PermissionRule {
+            permission: "*".to_string(),
+            pattern: "*".to_string(),
+            action: Action::Allow,
+        }];
+
+        let decision = evaluate("bash", "git status", &[rules]);
+
+        assert_eq!(decision.action, Action::Allow);
+        assert_eq!(decision.permission, "*");
+    }
+
+    #[test]
+    fn later_specific_rule_overrides_wildcard_permission() {
+        let rules = vec![
+            PermissionRule {
+                permission: "*".to_string(),
+                pattern: "*".to_string(),
+                action: Action::Allow,
+            },
+            PermissionRule {
+                permission: "edit".to_string(),
+                pattern: "*".to_string(),
+                action: Action::Deny,
+            },
+        ];
+
+        let decision = evaluate("edit", "src/main.rs", &[rules]);
+
+        assert_eq!(decision.action, Action::Deny);
+        assert_eq!(decision.permission, "edit");
+    }
+
+    #[test]
+    fn wildcard_patterns_match_typescript_semantics() {
+        assert!(wildcard_match("src/main.rs", "*"));
+        assert!(wildcard_match("src/.env", "*.env"));
+        assert!(wildcard_match("ls", "ls *"));
+        assert!(wildcard_match("ls -la", "ls *"));
+    }
 }
 
 pub fn disabled(tools: &[String], ruleset: &Ruleset) -> HashSet<String> {
@@ -105,7 +181,7 @@ pub fn disabled(tools: &[String], ruleset: &Ruleset) -> HashSet<String> {
         if let Some(rule) = ruleset
             .iter()
             .rev()
-            .find(|r| glob_match(&r.permission, perm))
+            .find(|r| wildcard_match(perm, &r.permission))
         {
             if rule.pattern == "*" && rule.action == Action::Deny {
                 result.insert(tool.clone());

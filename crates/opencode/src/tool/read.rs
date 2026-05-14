@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -55,13 +55,16 @@ impl Tool for ReadTool {
             let params: ReadParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid read parameters: {}", e))?;
 
-            let path = Path::new(&params.file_path);
+            let path = resolve_read_path(&ctx.working_dir, &params.file_path);
+            let permission_pattern = permission_pattern(&ctx.working_dir, &path);
+            ctx.check_permission("read", &permission_pattern).await?;
+
             if !path.exists() {
                 return Err(anyhow::anyhow!("File not found: {}", params.file_path));
             }
 
             if path.is_dir() {
-                return read_directory(path, &params);
+                return read_directory(&path, &params);
             }
 
             // Image files are not readable as text. Emit them as a
@@ -69,13 +72,29 @@ impl Tool for ReadTool {
             // URL so the surrounding plumbing (history rebuild → provider
             // serializer) can surface them as vision-input on the next
             // turn.
-            if let Some(mime) = image_mime_for(path) {
-                return read_image(path, mime, &ctx);
+            if let Some(mime) = image_mime_for(&path) {
+                return read_image(&path, mime, &ctx);
             }
 
-            read_file(path, &params)
+            read_file(&path, &params)
         })
     }
+}
+
+fn resolve_read_path(working_dir: &Path, file_path: &str) -> PathBuf {
+    let path = Path::new(file_path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        working_dir.join(path)
+    }
+}
+
+fn permission_pattern(working_dir: &Path, path: &Path) -> String {
+    path.strip_prefix(working_dir)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn image_mime_for(path: &Path) -> Option<&'static str> {
@@ -116,7 +135,7 @@ fn read_image(path: &Path, mime: &str, ctx: &ToolContext) -> Result<ToolResult> 
 
     let attachment = crate::message::part::FilePart {
         id: crate::id::PartID::new(),
-        session_id: ctx.session_id.clone(),
+        session_id: ctx.session_id,
         // ToolPart's attachments live on the assistant message that
         // emitted the tool call. We don't know its id from here, so we
         // synthesize a fresh one — history rebuild only cares about the
@@ -269,11 +288,11 @@ mod tests {
     use super::*;
     use crate::tool::Tool;
 
-    fn ctx() -> ToolContext {
+    fn ctx_with(working_dir: std::path::PathBuf, rules: crate::permission::Ruleset) -> ToolContext {
         ToolContext {
             session_id: crate::id::SessionID::new(),
-            working_dir: std::path::PathBuf::from("/tmp"),
-            permission_rules: crate::permission::Ruleset::default(),
+            working_dir,
+            permission_rules: rules,
             event_bus: None,
             permission_broker: None,
             provider: None,
@@ -282,6 +301,13 @@ mod tests {
             agent_name: None,
             model_id: None,
         }
+    }
+
+    fn ctx() -> ToolContext {
+        ctx_with(
+            std::path::PathBuf::from("/tmp"),
+            crate::permission::Ruleset::default(),
+        )
     }
 
     #[test]
@@ -311,5 +337,30 @@ mod tests {
         assert_eq!(attachments[0].mime, "image/png");
         assert!(attachments[0].url.starts_with("data:image/png;base64,"));
         assert!(result.output.contains("<type>image</type>"));
+    }
+
+    #[tokio::test]
+    async fn read_checks_relative_permission_pattern() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join(".env");
+        std::fs::write(&p, b"SECRET=1").unwrap();
+
+        let tool = ReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({"filePath": ".env"}),
+                ctx_with(
+                    tmp.path().to_path_buf(),
+                    vec![crate::permission::PermissionRule {
+                        permission: "read".to_string(),
+                        pattern: "*.env".to_string(),
+                        action: crate::permission::Action::Ask,
+                    }],
+                ),
+            )
+            .await;
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("explicit user approval"), "got: {err}");
     }
 }

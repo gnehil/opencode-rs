@@ -366,9 +366,7 @@ mod tests {
         assert!(rules
             .iter()
             .any(|rule| rule.permission == "edit" && rule.action == Action::Deny));
-        assert!(rules
-            .iter()
-            .any(|rule| rule.permission == "todowrite" && rule.action == Action::Deny));
+        assert!(!rules.iter().any(|rule| rule.permission == "todowrite"));
         assert!(rules
             .iter()
             .any(|rule| rule.permission == "task" && rule.action == Action::Deny));
