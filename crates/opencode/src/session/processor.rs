@@ -559,9 +559,27 @@ impl PromptProcessor {
                 error: format!("Tool '{tool_name}' rejected by plugin hook"),
             });
         }
-        Ok(hook_output
+        let mut tool_input = hook_output
             .modified_input
-            .unwrap_or_else(|| serde_json::json!({})))
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        // External JS/TS plugins see the same hook with the TS-shaped
+        // payload: input `{ tool, sessionID, callID }`, output `{ args }`.
+        let bridge_output = plugin_manager
+            .trigger_bridge(
+                "tool.execute.before",
+                serde_json::json!({
+                    "tool": tool_name,
+                    "sessionID": session_id.to_string(),
+                    "callID": call_id,
+                }),
+                serde_json::json!({ "args": tool_input }),
+            )
+            .await;
+        if let Some(args) = bridge_output.get("args") {
+            tool_input = args.clone();
+        }
+        Ok(tool_input)
     }
 
     async fn apply_tool_execute_after(
@@ -576,7 +594,7 @@ impl PromptProcessor {
         let Some(plugin_manager) = &self.plugin_manager else {
             return outcome;
         };
-        match plugin_manager
+        let outcome = match plugin_manager
             .trigger_tool_complete(crate::plugin::ToolCompleteInput {
                 session_id: session_id.to_string(),
                 tool_name: tool_name.to_string(),
@@ -590,13 +608,31 @@ impl PromptProcessor {
                 .modified_output
                 .map(|value| apply_modified_tool_output(outcome.clone(), value))
                 .unwrap_or(outcome),
-            Err(error) => ToolPartResult::Error {
-                error: format!(
-                    "Plugin hook tool.execute.after failed for '{tool_name}' with input {}: {error}",
-                    input
-                ),
-            },
-        }
+            Err(error) => {
+                return ToolPartResult::Error {
+                    error: format!(
+                        "Plugin hook tool.execute.after failed for '{tool_name}' with input {}: {error}",
+                        input
+                    ),
+                }
+            }
+        };
+
+        // External JS/TS plugins see the same hook: input `{ tool, sessionID,
+        // callID, args }`, output the tool result payload they may rewrite.
+        let bridge_output = plugin_manager
+            .trigger_bridge(
+                "tool.execute.after",
+                serde_json::json!({
+                    "tool": tool_name,
+                    "sessionID": session_id.to_string(),
+                    "callID": call_id,
+                    "args": input,
+                }),
+                tool_part_result_to_hook_output(&outcome),
+            )
+            .await;
+        apply_modified_tool_output(outcome, bridge_output)
     }
 
     async fn execute_and_persist_tool_calls(
@@ -1286,6 +1322,108 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert!(seen.iter().any(|message| {
             message.role == "tool" && message.content.contains("after task done: hooked inspect")
+        }));
+    }
+
+    #[tokio::test]
+    async fn process_stream_applies_external_plugin_tool_hooks() {
+        use crate::plugin::bridge;
+        let Some((runtime, _)) = bridge::detect_js_runtime() else {
+            eprintln!("skipping: no JS runtime available");
+            return;
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_path = tmp.path().join("plugin.mjs");
+        std::fs::write(
+            &plugin_path,
+            r#"export default async function () {
+                return {
+                    "tool.execute.before": async (input, output) => {
+                        output.args.prompt = "bridge inspect"
+                    },
+                    "tool.execute.after": async (input, output) => {
+                        output.output = "bridge after: " + output.output
+                    },
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()).await.unwrap());
+        let session = store
+            .create("t", "p", &std::path::PathBuf::from("/tmp"))
+            .await
+            .unwrap();
+        let session_id = SessionID::parse(&session.id).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(FakeProvider {
+            model: ModelInfo {
+                id: Some(ModelID::new("test-model")),
+                name: None,
+                family: None,
+                release_date: None,
+                attachment: None,
+                reasoning: None,
+                temperature: None,
+                tool_call: None,
+                interleaved: None,
+                cost: None,
+                limit: None,
+                modalities: None,
+                experimental: None,
+                status: None,
+                provider: None,
+                options: None,
+                headers: None,
+                variants: None,
+            },
+            seen: seen.clone(),
+        });
+
+        let plugin_bridge = bridge::PluginBridge::spawn(
+            runtime,
+            vec![bridge::PluginToLoad {
+                spec: "./plugin.mjs".to_string(),
+                entry: format!("file://{}", plugin_path.to_string_lossy()),
+                options: None,
+            }],
+            bridge::PluginInputData {
+                directory: "/tmp".to_string(),
+                worktree: "/tmp".to_string(),
+                project: serde_json::json!({}),
+                server_url: "http://localhost:4096".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plugin_manager = crate::plugin::PluginManager::new();
+        plugin_manager.set_bridge(Arc::new(plugin_bridge));
+
+        let processor = PromptProcessor::new(store.clone(), provider)
+            .with_tools(vec![Arc::new(FakeTaskTool)])
+            .with_plugin_manager(Arc::new(plugin_manager));
+        let user_message_id = MessageID::new();
+        let user_parts = vec![Part::Subtask(crate::message::part::SubtaskPart {
+            id: crate::id::PartID::new(),
+            session_id: session_id.clone(),
+            message_id: user_message_id,
+            prompt: "inspect auth".to_string(),
+            description: "Review auth".to_string(),
+            agent: "general".to_string(),
+            model: None,
+            command: Some("review".to_string()),
+        })];
+
+        processor
+            .process_stream_with_parts(&session_id, "", user_message_id, user_parts)
+            .await
+            .unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|message| {
+            message.role == "tool"
+                && message.content.contains("bridge after: task done: bridge inspect")
         }));
     }
 }
