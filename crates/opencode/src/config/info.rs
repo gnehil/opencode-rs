@@ -100,22 +100,43 @@ pub struct Config {
 }
 
 pub fn load_project_config(start: &Path) -> anyhow::Result<Option<Config>> {
-    let files = project_config_files(start);
-    if files.is_empty() {
-        return Ok(None);
-    }
-
+    let dirs = project_config_dirs(start);
     let mut merged = serde_json::Value::Object(serde_json::Map::new());
-    for file in files {
-        let text = std::fs::read_to_string(&file)?;
-        let value = parse_config_value(&text, &file)?;
-        merge_json(&mut merged, value);
+    let mut found = false;
+    for dir in dirs {
+        for config_dir in [dir.clone(), dir.join(".opencode")] {
+            for name in ["opencode.json", "opencode.jsonc"] {
+                let file = config_dir.join(name);
+                if !file.is_file() {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&file)?;
+                let value = parse_config_value(&text, &file)?;
+                merge_json(&mut merged, value);
+                found = true;
+            }
+        }
+
+        let agents = load_agent_markdown_configs(&dir)?;
+        if !agents.is_empty() {
+            merge_json(
+                &mut merged,
+                serde_json::json!({
+                    "agent": agents,
+                }),
+            );
+            found = true;
+        }
     }
 
-    Ok(Some(serde_json::from_value(merged)?))
+    if found {
+        Ok(Some(serde_json::from_value(merged)?))
+    } else {
+        Ok(None)
+    }
 }
 
-fn project_config_files(start: &Path) -> Vec<PathBuf> {
+fn project_config_dirs(start: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut current = if start.is_file() {
         start.parent().map(Path::to_path_buf)
@@ -128,17 +149,93 @@ fn project_config_files(start: &Path) -> Vec<PathBuf> {
         current = dir.parent().map(Path::to_path_buf);
     }
     dirs.reverse();
+    dirs
+}
 
-    let mut files = Vec::new();
-    for dir in dirs {
-        for name in ["opencode.json", "opencode.jsonc"] {
-            let path = dir.join(name);
-            if path.is_file() {
-                files.push(path);
-            }
+fn load_agent_markdown_configs(
+    dir: &Path,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let mut agents = serde_json::Map::new();
+    for base in [dir.to_path_buf(), dir.join(".opencode")] {
+        load_agent_markdown_dir(&base.join("agent"), &mut agents, false, false)?;
+        load_agent_markdown_dir(&base.join("agents"), &mut agents, false, false)?;
+        load_agent_markdown_dir(&base.join("mode"), &mut agents, true, true)?;
+        load_agent_markdown_dir(&base.join("modes"), &mut agents, true, true)?;
+    }
+    Ok(agents)
+}
+
+fn load_agent_markdown_dir(
+    root: &Path,
+    agents: &mut serde_json::Map<String, serde_json::Value>,
+    force_primary_mode: bool,
+    shallow: bool,
+) -> anyhow::Result<()> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let walker = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .min_depth(1)
+        .max_depth(if shallow { 1 } else { usize::MAX })
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("md"));
+
+    for entry in walker {
+        let path = entry.path();
+        let text = std::fs::read_to_string(path)?;
+        let (frontmatter, prompt) = parse_markdown_config(&text)?;
+        let mut object = frontmatter.as_object().cloned().unwrap_or_default();
+        let path_name = markdown_entry_name(root, path);
+        object
+            .entry("name".to_string())
+            .or_insert_with(|| serde_json::Value::String(path_name));
+        if force_primary_mode {
+            object.insert(
+                "mode".to_string(),
+                serde_json::Value::String("primary".to_string()),
+            );
+        }
+        object.insert("prompt".to_string(), serde_json::Value::String(prompt));
+        let name = object
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string);
+        if let Some(name) = name {
+            agents.insert(name, serde_json::Value::Object(object));
         }
     }
-    files
+    Ok(())
+}
+
+fn markdown_entry_name(root: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let without_ext = relative.with_extension("");
+    without_ext
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn parse_markdown_config(text: &str) -> anyhow::Result<(serde_json::Value, String)> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with("---") {
+        return Ok((serde_json::json!({}), trimmed.to_string()));
+    }
+    let Some(end_marker_idx) = trimmed[3..].find("---") else {
+        return Ok((serde_json::json!({}), trimmed.to_string()));
+    };
+    let frontmatter = trimmed[3..end_marker_idx + 3].trim();
+    let body = trimmed[end_marker_idx + 6..].trim().to_string();
+    let frontmatter = if frontmatter.is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_yaml::from_str(frontmatter)?
+    };
+    Ok((frontmatter, body))
 }
 
 fn parse_config_value(text: &str, source: &Path) -> anyhow::Result<serde_json::Value> {
@@ -692,6 +789,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let child = temp.path().join("child");
         std::fs::create_dir(&child).unwrap();
+        let child_opencode = child.join(".opencode");
+        std::fs::create_dir(&child_opencode).unwrap();
 
         std::fs::write(
             temp.path().join("opencode.jsonc"),
@@ -718,6 +817,18 @@ mod tests {
             }"#,
         )
         .unwrap();
+        std::fs::write(
+            child_opencode.join("opencode.jsonc"),
+            r#"{
+              "mcp": {
+                "local": {
+                  "type": "local",
+                  "command": "local-cmd"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
 
         let config = load_project_config(&child)
             .unwrap()
@@ -725,5 +836,67 @@ mod tests {
         let mcp = config.mcp.unwrap();
         assert!(mcp.contains_key("parent"));
         assert!(mcp.contains_key("child"));
+        assert!(mcp.contains_key("local"));
+    }
+
+    #[test]
+    fn load_project_config_discovers_agent_and_mode_markdown() {
+        let temp = tempfile::tempdir().unwrap();
+        let opencode = temp.path().join(".opencode");
+        let agent_dir = opencode.join("agents").join("review");
+        let mode_dir = opencode.join("mode");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&mode_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("security.md"),
+            r#"---
+description: Review security issues
+mode: subagent
+model: openai/gpt-4.1
+permission:
+  bash: deny
+---
+Inspect the code for security problems.
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            mode_dir.join("architect.md"),
+            r#"---
+description: Architecture planning
+---
+Plan the implementation.
+"#,
+        )
+        .unwrap();
+
+        let config = load_project_config(temp.path())
+            .unwrap()
+            .expect("markdown agents should produce config");
+        let agents = config.agent.unwrap();
+        let security = agents.get("review/security").unwrap();
+        assert_eq!(
+            security.description.as_deref(),
+            Some("Review security issues")
+        );
+        assert_eq!(security.mode.as_deref(), Some("subagent"));
+        assert_eq!(security.model.as_deref(), Some("openai/gpt-4.1"));
+        assert_eq!(
+            security.prompt.as_deref(),
+            Some("Inspect the code for security problems.")
+        );
+        assert_eq!(security.name.as_deref(), Some("review/security"));
+        let permission = security.permission.as_ref().unwrap();
+        match permission.rules.get("bash").unwrap() {
+            PermissionRuleValue::Action(action) => assert_eq!(action, "deny"),
+            PermissionRuleValue::Object(_) => panic!("bash should parse as shorthand action"),
+        }
+
+        let architect = agents.get("architect").unwrap();
+        assert_eq!(architect.mode.as_deref(), Some("primary"));
+        assert_eq!(
+            architect.prompt.as_deref(),
+            Some("Plan the implementation.")
+        );
     }
 }
