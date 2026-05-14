@@ -90,6 +90,8 @@ impl Tool for TaskTool {
             let params: TaskParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid task parameters: {}", e))?;
 
+            ctx.check_permission("task", &params.subagent_type).await?;
+
             let Some(agent) = resolve_task_agent(&params.subagent_type, ctx.config.as_ref()) else {
                 return Ok(ToolResult::with_metadata(
                     format!(
@@ -316,6 +318,21 @@ mod tests {
     use super::*;
     use crate::permission::{Action, PermissionRule};
 
+    fn ctx_with_rules(rules: Vec<PermissionRule>) -> ToolContext {
+        ToolContext {
+            session_id: SessionID::new(),
+            working_dir: std::path::PathBuf::from("/tmp"),
+            permission_rules: rules,
+            event_bus: None,
+            permission_broker: None,
+            provider: None,
+            store: None,
+            config: None,
+            agent_name: None,
+            model_id: None,
+        }
+    }
+
     #[test]
     fn task_schema_accepts_dynamic_subagent_names() {
         let schema = TaskTool.parameters_schema();
@@ -370,5 +387,28 @@ mod tests {
         assert!(rules
             .iter()
             .any(|rule| rule.permission == "task" && rule.action == Action::Deny));
+    }
+
+    #[tokio::test]
+    async fn task_permission_deny_blocks_subagent_launch() {
+        let rule = PermissionRule {
+            permission: "task".to_string(),
+            pattern: "general".to_string(),
+            action: Action::Deny,
+        };
+
+        let result = TaskTool
+            .execute(
+                serde_json::json!({
+                    "description": "Review code",
+                    "prompt": "Review this code.",
+                    "subagent_type": "general"
+                }),
+                ctx_with_rules(vec![rule]),
+            )
+            .await;
+
+        let err = result.expect_err("task permission should block execution");
+        assert!(err.to_string().contains("Tool 'task' denied"));
     }
 }
