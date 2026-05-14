@@ -3,9 +3,10 @@ mod local_process;
 
 use local_process::{
     attach_select_session_endpoint, cross_repo_pr_commands, github_workflow_contents,
-    github_workflow_file, normalize_upgrade_target, opencode_start_command,
+    github_workflow_file, join_run_message, normalize_upgrade_target, opencode_start_command,
     parse_imported_session_id, parse_opencode_session_url, pr_checkout_command, pr_view_command,
-    resolve_upgrade_method, upgrade_plan, CommandSpec, InstallMethod, UpgradeAction,
+    resolve_run_input, resolve_upgrade_method, upgrade_plan, CommandSpec, InstallMethod,
+    UpgradeAction,
 };
 
 #[test]
@@ -169,4 +170,30 @@ fn attach_select_session_endpoint_normalizes_base_url() {
         attach_select_session_endpoint("http://127.0.0.1:4096/", "ses_123"),
         "http://127.0.0.1:4096/tui/select-session"
     );
+}
+
+#[test]
+fn run_message_join_quotes_arguments_like_typescript() {
+    assert_eq!(
+        join_run_message(&[
+            "review".to_string(),
+            "src/main.rs".to_string(),
+            "with context".to_string(),
+            "say \"hi\"".to_string(),
+        ]),
+        "review src/main.rs \"with context\" \"say \\\"hi\\\"\""
+    );
+}
+
+#[test]
+fn run_input_merges_stdin_after_message() {
+    assert_eq!(
+        resolve_run_input("summarize", Some("piped text")),
+        Some("summarize\npiped text".to_string())
+    );
+    assert_eq!(
+        resolve_run_input("", Some("piped text")),
+        Some("piped text".to_string())
+    );
+    assert_eq!(resolve_run_input("", None), None);
 }

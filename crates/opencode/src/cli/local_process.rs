@@ -215,6 +215,30 @@ pub fn attach_select_session_endpoint(base_url: &str, _session_id: &str) -> Stri
     format!("{}/tui/select-session", base_url.trim_end_matches('/'))
 }
 
+pub fn join_run_message(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            if arg.contains(' ') {
+                format!("\"{}\"", arg.replace('"', "\\\""))
+            } else {
+                arg.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn resolve_run_input(value: &str, piped: Option<&str>) -> Option<String> {
+    if value.is_empty() {
+        return piped.filter(|input| !input.is_empty()).map(str::to_string);
+    }
+
+    match piped.filter(|input| !input.is_empty()) {
+        Some(piped) => Some(format!("{value}\n{piped}")),
+        None => Some(value.to_string()),
+    }
+}
+
 fn upgrade_action(method: InstallMethod, target: &str) -> UpgradeAction {
     match method {
         InstallMethod::Curl | InstallMethod::SelfUpdate | InstallMethod::Unknown => {

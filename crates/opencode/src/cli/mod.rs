@@ -5,6 +5,7 @@ pub(crate) mod mcp_cli;
 pub(crate) mod provider_auth;
 
 use clap::{CommandFactory, Parser};
+use std::io::{IsTerminal, Read};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -178,7 +179,29 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     };
 
-    let message = args.message.join(" ");
+    if args.fork && !args.r#continue && args.session.is_none() {
+        eprintln!("--fork requires --continue or --session");
+        std::process::exit(1);
+    }
+    if args.interactive && args.command.is_some() {
+        eprintln!("--interactive cannot be used with --command");
+        std::process::exit(1);
+    }
+    if args.interactive && matches!(args.format, args::RunFormat::Json) {
+        eprintln!("--interactive cannot be used with --format json");
+        std::process::exit(1);
+    }
+
+    let piped = read_piped_stdin().unwrap_or_else(|e| {
+        eprintln!("Failed to read stdin: {}", e);
+        std::process::exit(1);
+    });
+    let mut message = local_process::join_run_message(&args.message);
+    message = local_process::resolve_run_input(&message, piped.as_deref()).unwrap_or_default();
+    if message.trim().is_empty() && args.command.is_none() && !args.interactive {
+        eprintln!("You must provide a message or a command");
+        std::process::exit(1);
+    }
 
     let store = SessionStore::new(data_dir.clone())
         .await
@@ -194,24 +217,69 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
             None
         }
     };
-    let session = if let Some(session_id_str) = &args.session {
+    let run_command = match args.command.as_deref() {
+        Some(command) => Some(
+            resolve_run_command(command, &message, &project_path, project_config.as_ref())
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Failed to resolve command '{}': {}", command, e);
+                    std::process::exit(1);
+                }),
+        ),
+        None => None,
+    };
+    let prompt_text = run_command
+        .as_ref()
+        .map(|command| command.prompt.as_str())
+        .unwrap_or(message.as_str());
+    let session = if let Some(existing) = if let Some(session_id_str) = &args.session {
         let session_id = crate::id::SessionID::parse(session_id_str).unwrap_or_else(|_| {
             eprintln!("Invalid session ID: {}", session_id_str);
             std::process::exit(1);
         });
+        Some(
+            store
+                .get(&session_id)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Failed to get session: {}", e);
+                    std::process::exit(1);
+                })
+                .unwrap_or_else(|| {
+                    eprintln!("Session not found: {}", session_id_str);
+                    std::process::exit(1);
+                }),
+        )
+    } else if args.r#continue {
         store
-            .get(&session_id)
+            .list(None)
             .await
             .unwrap_or_else(|e| {
-                eprintln!("Failed to get session: {}", e);
+                eprintln!("Failed to list sessions: {}", e);
                 std::process::exit(1);
             })
-            .unwrap_or_else(|| {
-                eprintln!("Session not found: {}", session_id_str);
-                std::process::exit(1);
-            })
+            .into_iter()
+            .next()
     } else {
-        let title = format!("Session: {}", message.chars().take(50).collect::<String>());
+        None
+    } {
+        if args.fork {
+            store
+                .create(
+                    &format!("{} (fork)", existing.title),
+                    &existing.project_id,
+                    &PathBuf::from(&existing.directory),
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Failed to fork session: {}", e);
+                    std::process::exit(1);
+                })
+        } else {
+            existing
+        }
+    } else {
+        let title = run_session_title(args.title.as_deref(), prompt_text);
         store
             .create(&title, "default", &project_path)
             .await
@@ -221,8 +289,11 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
             })
     };
 
-    println!("Session ID: {}", session.id);
-    println!("Title: {}", session.title);
+    let json_output = matches!(args.format, args::RunFormat::Json);
+    if !json_output {
+        println!("Session ID: {}", session.id);
+        println!("Title: {}", session.title);
+    }
 
     let session_id = crate::id::SessionID::parse(&session.id).unwrap_or_else(|_| {
         eprintln!("Invalid session ID in database: {}", session.id);
@@ -235,6 +306,11 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
     let agent_name = args
         .agent
         .as_deref()
+        .or_else(|| {
+            run_command
+                .as_ref()
+                .and_then(|command| command.agent.as_deref())
+        })
         .or_else(|| session.agent.as_deref())
         .or(config_default_agent)
         .unwrap_or(crate::agent::DEFAULT_AGENT_NAME);
@@ -247,6 +323,11 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
     let selected_model = args
         .model
         .as_deref()
+        .or_else(|| {
+            run_command
+                .as_ref()
+                .and_then(|command| command.model.as_deref())
+        })
         .or_else(|| session.model.as_deref())
         .or(agent_config_model)
         .or_else(|| {
@@ -267,14 +348,16 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
         std::process::exit(1);
     });
 
-    println!("Using provider: {}", provider.name());
-    println!(
-        "Default model: {}",
-        provider
-            .default_model()
-            .map(|m| m.id.as_ref().map(|i| i.to_string()).unwrap_or_default())
-            .unwrap_or_default()
-    );
+    if !json_output {
+        println!("Using provider: {}", provider.name());
+        println!(
+            "Default model: {}",
+            provider
+                .default_model()
+                .map(|m| m.id.as_ref().map(|i| i.to_string()).unwrap_or_default())
+                .unwrap_or_default()
+        );
+    }
 
     let store = Arc::new(store);
     let mcp_tools = load_mcp_tools_from_project(&project_path, &data_dir).await;
@@ -308,17 +391,248 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
             });
     }
 
-    println!("Processing: {}", message);
-    let result = processor.process(&session_id, &message).await;
+    let user_message_id = crate::id::MessageID::new();
+    let user_parts = build_run_user_parts(
+        &session_id,
+        &user_message_id,
+        prompt_text,
+        args.command
+            .is_none()
+            .then_some(args.file.as_deref())
+            .flatten(),
+        &project_path,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    });
+
+    if !json_output {
+        println!("Processing: {}", prompt_text);
+    }
+    let result = processor
+        .process_stream_with_parts(&session_id, prompt_text, user_message_id, user_parts)
+        .await;
 
     match result {
-        Ok(response) => {
-            println!("\nResponse:\n{}", response);
+        Ok(events) => {
+            if let Err(e) = emit_run_events(&args.format, &session_id, &events) {
+                eprintln!("Error processing prompt: {}", e);
+                std::process::exit(1);
+            }
         }
         Err(e) => {
             eprintln!("Error processing prompt: {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+struct RunCommandInput {
+    prompt: String,
+    agent: Option<String>,
+    model: Option<String>,
+}
+
+async fn resolve_run_command(
+    command_name: &str,
+    arguments: &str,
+    project_path: &std::path::Path,
+    config: Option<&Config>,
+) -> anyhow::Result<RunCommandInput> {
+    let name = command_name.trim().trim_start_matches('/');
+    if name.is_empty() {
+        anyhow::bail!("command name cannot be empty");
+    }
+    let commands = crate::command::load_commands(project_path, config)?;
+    let command = commands
+        .into_iter()
+        .find(|command| command.name == name)
+        .ok_or_else(|| anyhow::anyhow!("unknown command"))?;
+    let prompt = crate::command::render_template_with_shell(
+        &command.template,
+        arguments,
+        project_path,
+        config.and_then(|config| config.shell.as_deref()),
+    )
+    .await?;
+    Ok(RunCommandInput {
+        prompt,
+        agent: command.agent,
+        model: command.model,
+    })
+}
+
+fn read_piped_stdin() -> anyhow::Result<Option<String>> {
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Ok(None);
+    }
+    let mut input = String::new();
+    stdin.read_to_string(&mut input)?;
+    Ok(Some(input))
+}
+
+fn run_session_title(title: Option<&str>, prompt: &str) -> String {
+    match title {
+        Some(title) if !title.is_empty() => title.to_string(),
+        Some(_) => truncate_title(prompt),
+        None => format!("Session: {}", truncate_title(prompt)),
+    }
+}
+
+fn truncate_title(prompt: &str) -> String {
+    let mut title = prompt.chars().take(50).collect::<String>();
+    if prompt.chars().count() > 50 {
+        title.push_str("...");
+    }
+    title
+}
+
+fn build_run_user_parts(
+    session_id: &crate::id::SessionID,
+    message_id: &crate::id::MessageID,
+    text: &str,
+    files: Option<&[String]>,
+    base_dir: &std::path::Path,
+) -> anyhow::Result<Vec<crate::message::Part>> {
+    let mut parts = Vec::new();
+    for file in files.unwrap_or_default() {
+        parts.push(crate::message::Part::File(run_file_part(
+            session_id, message_id, file, base_dir,
+        )?));
+    }
+    parts.push(crate::message::Part::Text(crate::message::TextPart {
+        id: crate::id::PartID::new(),
+        session_id: session_id.clone(),
+        message_id: message_id.clone(),
+        text: text.to_string(),
+        synthetic: None,
+        ignored: None,
+        time: None,
+        metadata: None,
+    }));
+    Ok(parts)
+}
+
+fn run_file_part(
+    session_id: &crate::id::SessionID,
+    message_id: &crate::id::MessageID,
+    file: &str,
+    base_dir: &std::path::Path,
+) -> anyhow::Result<crate::message::FilePart> {
+    let input = std::path::PathBuf::from(file);
+    let resolved = if input.is_absolute() {
+        input
+    } else {
+        base_dir.join(input)
+    };
+    if !resolved.exists() {
+        anyhow::bail!("File not found: {}", file);
+    }
+    let resolved = resolved.canonicalize().unwrap_or(resolved);
+    let mime = if resolved.is_dir() {
+        "application/x-directory"
+    } else {
+        "text/plain"
+    };
+    let source = if mime == "text/plain" {
+        std::fs::read_to_string(&resolved)
+            .ok()
+            .map(|text| crate::message::FilePartSource::File {
+                path: resolved.to_string_lossy().to_string(),
+                text: crate::message::SourceText {
+                    start: 0.0,
+                    end: text.len() as f64,
+                    value: text,
+                },
+            })
+    } else {
+        None
+    };
+    Ok(crate::message::FilePart {
+        id: crate::id::PartID::new(),
+        session_id: session_id.clone(),
+        message_id: message_id.clone(),
+        mime: mime.to_string(),
+        filename: resolved
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(ToString::to_string),
+        url: crate::lsp::diagnostics::path_to_uri(&resolved)?,
+        source,
+    })
+}
+
+fn emit_run_events(
+    format: &args::RunFormat,
+    session_id: &crate::id::SessionID,
+    events: &[crate::session::processor::ProcessEvent],
+) -> anyhow::Result<()> {
+    if matches!(format, args::RunFormat::Json) {
+        for event in events {
+            println!("{}", run_event_json(session_id, event));
+        }
+    } else {
+        let mut response = None;
+        for event in events {
+            match event {
+                crate::session::processor::ProcessEvent::Done(text) => response = Some(text),
+                crate::session::processor::ProcessEvent::Error(error) => {
+                    anyhow::bail!(error.clone());
+                }
+                _ => {}
+            }
+        }
+        println!("\nResponse:\n{}", response.cloned().unwrap_or_default());
+    }
+    if let Some(error) = events.iter().find_map(|event| match event {
+        crate::session::processor::ProcessEvent::Error(error) => Some(error),
+        _ => None,
+    }) {
+        anyhow::bail!(error.clone());
+    }
+    Ok(())
+}
+
+fn run_event_json(
+    session_id: &crate::id::SessionID,
+    event: &crate::session::processor::ProcessEvent,
+) -> serde_json::Value {
+    let timestamp = chrono::Utc::now().timestamp_millis();
+    match event {
+        crate::session::processor::ProcessEvent::TextDelta(delta) => serde_json::json!({
+            "type": "text_delta",
+            "timestamp": timestamp,
+            "sessionID": session_id.to_string(),
+            "delta": delta,
+        }),
+        crate::session::processor::ProcessEvent::ToolStart(tool, input) => serde_json::json!({
+            "type": "tool_start",
+            "timestamp": timestamp,
+            "sessionID": session_id.to_string(),
+            "tool": tool,
+            "input": input,
+        }),
+        crate::session::processor::ProcessEvent::ToolComplete(tool, output) => serde_json::json!({
+            "type": "tool_complete",
+            "timestamp": timestamp,
+            "sessionID": session_id.to_string(),
+            "tool": tool,
+            "output": output,
+        }),
+        crate::session::processor::ProcessEvent::Done(text) => serde_json::json!({
+            "type": "done",
+            "timestamp": timestamp,
+            "sessionID": session_id.to_string(),
+            "text": text,
+        }),
+        crate::session::processor::ProcessEvent::Error(error) => serde_json::json!({
+            "type": "error",
+            "timestamp": timestamp,
+            "sessionID": session_id.to_string(),
+            "error": error,
+        }),
     }
 }
 
@@ -1329,5 +1643,59 @@ mod tests {
         assert_eq!(infer_provider_id(None, false, true), "openai");
         assert_eq!(infer_provider_id(None, true, false), "anthropic");
         assert_eq!(infer_provider_id(None, false, false), "anthropic");
+    }
+
+    #[test]
+    fn run_session_title_matches_title_flag_rules() {
+        assert_eq!(
+            run_session_title(Some("Custom"), "ignored prompt"),
+            "Custom".to_string()
+        );
+        assert_eq!(
+            run_session_title(Some(""), "short prompt"),
+            "short prompt".to_string()
+        );
+        assert_eq!(
+            run_session_title(None, "short prompt"),
+            "Session: short prompt".to_string()
+        );
+    }
+
+    #[test]
+    fn run_user_parts_attach_files_before_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "attached text").unwrap();
+        let session_id = crate::id::SessionID::new();
+        let message_id = crate::id::MessageID::new();
+
+        let parts = build_run_user_parts(
+            &session_id,
+            &message_id,
+            "prompt text",
+            Some(&["note.txt".to_string()]),
+            dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(parts.len(), 2);
+        match &parts[0] {
+            crate::message::Part::File(part) => {
+                assert_eq!(part.mime, "text/plain");
+                assert_eq!(part.filename.as_deref(), Some("note.txt"));
+                assert!(part.url.starts_with("file://"));
+                match &part.source {
+                    Some(crate::message::FilePartSource::File { text, .. }) => {
+                        assert_eq!(text.value, "attached text");
+                    }
+                    _ => panic!("expected file source"),
+                }
+            }
+            _ => panic!("expected file part first"),
+        }
+        match &parts[1] {
+            crate::message::Part::Text(part) => assert_eq!(part.text, "prompt text"),
+            _ => panic!("expected text part"),
+        }
     }
 }
