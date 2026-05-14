@@ -429,6 +429,7 @@ impl Default for PluginManager {
     }
 }
 
+pub mod bridge;
 mod internal;
 pub mod spec;
 
