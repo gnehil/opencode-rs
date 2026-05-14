@@ -57,7 +57,7 @@ Legend:
 | Plugin runtime | `cli/cmd/tui/plugin/*`, plugin hooks | `plugin/*`, `session/processor.rs`, `message_handlers.rs`, `cli/mod.rs` | partial | External JS/TS plugin loading and TUI plugin slots |
 | LSP | `lsp/*` | `lsp/*`, `tool/lsp.rs` | partial | Long-lived pool behavior and diagnostics shape |
 | IDE integration | `ide/index.ts` | none | missing | Install opencode extension into VSCode/Cursor/Windsurf/VSCodium and emit `ide.installed` |
-| Image processing | `image/image.ts` | `provider/request.rs`, `message/part.rs` | partial | Rust passes image parts through raw; no resize/compress/auto-resize pipeline, large images fail |
+| Image processing | `image/image.ts` | `image/mod.rs`, `session/processor.rs` | done | Resize/recompress pipeline wired into tool-attachment handling; uses the `image` crate instead of Photon WASM |
 | OTEL / trace export | `cli/cmd/run/otel.ts`, `cli/cmd/run/trace.ts` | local `tracing` only | missing | No OpenTelemetry export; only local tracing subscriber |
 | Session projectors | `session/projectors.ts`, `projectors-next.ts`, `instruction.ts`, `system.ts` | `session/*` (different layout) | partial | Verify system-prompt assembly and event projection equivalence |
 
@@ -68,5 +68,4 @@ Legend:
 3. Remote TUI attach/control queue and TUI prompt execution.
 4. MCP browser-open authenticate UX.
 5. Provider/model/auth dynamic loading and stored credential use beyond API keys.
-6. Image resize/compress pipeline.
-7. IDE integration (`ide` module + CLI command).
+6. IDE integration (`ide` module + CLI command).

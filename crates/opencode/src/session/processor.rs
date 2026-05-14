@@ -430,7 +430,9 @@ impl PromptProcessor {
                         match tool.execute(input.clone(), ctx).await {
                             Ok(result) => ToolPartResult::Completed {
                                 output: result.output,
-                                attachments: result.attachments.unwrap_or_default(),
+                                attachments: self.normalize_attachments(
+                                    result.attachments.unwrap_or_default(),
+                                ),
                             },
                             Err(error) => ToolPartResult::Error {
                                 error: error.to_string(),
@@ -653,7 +655,9 @@ impl PromptProcessor {
                         match tool.execute(params.clone(), ctx).await {
                             Ok(tool_result) => ToolPartResult::Completed {
                                 output: tool_result.output,
-                                attachments: tool_result.attachments.unwrap_or_default(),
+                                attachments: self.normalize_attachments(
+                                    tool_result.attachments.unwrap_or_default(),
+                                ),
                             },
                             Err(e) => ToolPartResult::Error {
                                 error: e.to_string(),
@@ -765,6 +769,35 @@ impl PromptProcessor {
             .unwrap_or_default();
         rules.extend(self.session_permission_rules.clone());
         rules
+    }
+
+    /// Resize/recompress image attachments before they enter session history,
+    /// so oversized images don't get rejected by the provider. Non-image
+    /// attachments pass through; an image that can't be brought under the
+    /// configured limits is dropped (mirroring the TypeScript processor).
+    fn normalize_attachments(
+        &self,
+        attachments: Vec<crate::message::part::FilePart>,
+    ) -> Vec<crate::message::part::FilePart> {
+        attachments
+            .into_iter()
+            .filter_map(|attachment| {
+                if !attachment.mime.starts_with("image/") {
+                    return Some(attachment);
+                }
+                match crate::image::normalize(&attachment, self.config.as_ref()) {
+                    Ok(normalized) => Some(normalized),
+                    Err(error) => {
+                        tracing::warn!(
+                            "dropping image attachment {:?}: {}",
+                            attachment.filename,
+                            error
+                        );
+                        None
+                    }
+                }
+            })
+            .collect()
     }
 }
 

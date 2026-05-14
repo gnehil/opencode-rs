@@ -94,6 +94,9 @@ shell-words = "1"
 # Markdown
 pulldown-cmark = "0.9"
 
+# Image processing (attachment resize/recompress)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
 # Diff handling
 diffy = "0.3"
 

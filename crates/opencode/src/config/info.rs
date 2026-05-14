@@ -682,7 +682,19 @@ pub enum PermissionRuleValue {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub image_max_bytes: Option<u64>,
+    pub image: Option<ImageAttachmentConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageAttachmentConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_resize: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_base64_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
