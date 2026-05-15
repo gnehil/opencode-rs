@@ -882,9 +882,19 @@ impl PromptProcessor {
         model_id: &str,
         messages: Vec<CompletionMessage>,
     ) -> anyhow::Result<CompletionRequest> {
+        // Match TS `registry.ts`: GPT-5/o3/o4 family models use the
+        // `apply_patch` tool exclusively; everyone else gets the standard
+        // `edit`/`write` pair. This keeps Codex-trained models from
+        // double-binding two file-editing interfaces.
+        let use_patch = is_apply_patch_model(model_id);
         let mut tools: Vec<ToolDefinition> = self
             .tools
             .iter()
+            .filter(|t| match t.name() {
+                "apply_patch" => use_patch,
+                "edit" | "write" => !use_patch,
+                _ => true,
+            })
             .map(|t| ToolDefinition {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
@@ -1146,6 +1156,14 @@ fn apply_modified_tool_output(
     }
 }
 
+/// Match the TS `registry.ts` heuristic for `apply_patch` exposure: GPT-5/
+/// o3/o4 family models prefer `apply_patch`; the older `gpt-4` family and
+/// open-weight variants stay on `edit`/`write`.
+pub fn is_apply_patch_model(model_id: &str) -> bool {
+    let id = model_id.to_ascii_lowercase();
+    id.contains("gpt-") && !id.contains("oss") && !id.contains("gpt-4")
+}
+
 pub fn model_id_from_selection(selection: &str) -> Option<String> {
     let raw = selection.trim();
     if raw.is_empty() {
@@ -1212,6 +1230,24 @@ mod tests {
             model_id_from_selection("openrouter/anthropic/claude-3.5-sonnet").as_deref(),
             Some("anthropic/claude-3.5-sonnet")
         );
+    }
+
+    #[test]
+    fn is_apply_patch_model_matches_ts_heuristic() {
+        use super::is_apply_patch_model;
+        // GPT-5 family prefers apply_patch.
+        assert!(is_apply_patch_model("gpt-5"));
+        assert!(is_apply_patch_model("gpt-5-mini"));
+        assert!(is_apply_patch_model("gpt-5-nano"));
+        // GPT-4 family and open-weights stay on edit/write.
+        assert!(!is_apply_patch_model("gpt-4"));
+        assert!(!is_apply_patch_model("gpt-4o"));
+        assert!(!is_apply_patch_model("gpt-oss-20b"));
+        // Non-OpenAI models also stay on edit/write — the TS check keys off
+        // the literal "gpt-" prefix, so non-OpenAI ids never match.
+        assert!(!is_apply_patch_model("claude-3-5-sonnet-20241022"));
+        assert!(!is_apply_patch_model("gemini-2.0-flash"));
+        assert!(!is_apply_patch_model("o3"));
     }
 
     #[test]
