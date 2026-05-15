@@ -232,7 +232,7 @@ mod tests {
         let payload = bus_event_payload(&event);
 
         assert_eq!(payload["id"], "msg_456");
-        assert_eq!(payload["type"], "message.create");
+        assert_eq!(payload["type"], "message.updated");
         assert_eq!(payload["properties"]["sessionID"], "ses_123");
         assert_eq!(payload["properties"]["messageID"], "msg_456");
         assert_eq!(payload["properties"]["role"], "assistant");

@@ -155,7 +155,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
 
         bus.subscribe(
-            "session.create",
+            "session.created",
             Box::new(move |event: &Event| -> BoxFuture {
                 let tx = tx.clone();
                 let id = event.id();
@@ -175,7 +175,7 @@ mod tests {
         let bus = EventBus::new();
 
         let _id = bus.subscribe(
-            "session.create",
+            "session.created",
             Box::new(|_: &Event| -> BoxFuture { Box::pin(async {}) }),
         );
         assert_eq!(bus.handler_count(), 1);

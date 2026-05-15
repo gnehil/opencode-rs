@@ -576,7 +576,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(event_rx.recv().await.unwrap(), "session.create");
+        assert_eq!(event_rx.recv().await.unwrap(), "session.created");
         assert_eq!(config_rx.recv().await.unwrap(), "project");
     }
 

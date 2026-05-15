@@ -252,17 +252,20 @@ impl Event {
 
     pub fn type_name(&self) -> &'static str {
         match self {
-            Event::SessionCreate(_) => "session.create",
-            Event::SessionUpdate(_) => "session.update",
-            Event::SessionDelete(_) => "session.delete",
-            Event::MessageCreate(_) => "message.create",
+            // Past-tense forms match the TypeScript `session.ts` SyncEvent
+            // and `message-v2.ts` schemas so SDK consumers see identical
+            // topic names.
+            Event::SessionCreate(_) => "session.created",
+            Event::SessionUpdate(_) => "session.updated",
+            Event::SessionDelete(_) => "session.deleted",
+            Event::MessageCreate(_) => "message.updated",
             Event::MessageStream(_) => "message.stream",
             Event::ToolStart(_) => "tool.start",
             Event::ToolComplete(_) => "tool.complete",
             Event::ToolError(_) => "tool.error",
             Event::McpConnected(_) => "mcp.connected",
             Event::McpDisconnected(_) => "mcp.disconnected",
-            Event::McpToolsChanged(_) => "mcp.tools_changed",
+            Event::McpToolsChanged(_) => "mcp.tools.changed",
             Event::PermissionAsked(_) => "permission.asked",
             Event::MessagePartUpdated(_) => "message.part.updated",
             Event::MessagePartDelta(_) => "message.part.delta",
