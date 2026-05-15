@@ -419,7 +419,17 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
 
     match result {
         Ok(events) => {
-            if let Err(e) = emit_run_events(&args.format, &session_id, &events) {
+            let thinking = args.thinking.unwrap_or(false);
+            let filtered: Vec<_> = events
+                .into_iter()
+                .filter(|event| {
+                    !matches!(
+                        event,
+                        crate::session::processor::ProcessEvent::Reasoning(_)
+                    ) || thinking
+                })
+                .collect();
+            if let Err(e) = emit_run_events(&args.format, &session_id, &filtered) {
                 eprintln!("Error processing prompt: {}", e);
                 std::process::exit(1);
             }

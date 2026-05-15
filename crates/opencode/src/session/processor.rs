@@ -350,6 +350,27 @@ impl PromptProcessor {
             self.store
                 .save_message(session_id, &Message::Assistant(assistant_msg))
                 .await?;
+            // Persist any reasoning channel as a ReasoningPart before the
+            // text part so history rebuilds keep reasoning ordered ahead of
+            // the visible answer.
+            if let Some(reasoning) = response.reasoning.as_deref() {
+                let reasoning = reasoning.trim();
+                if !reasoning.is_empty() {
+                    self.store
+                        .save_part(&Part::Reasoning(crate::message::part::ReasoningPart {
+                            id: crate::id::PartID::new(),
+                            session_id: session_id.clone(),
+                            message_id: assistant_message_id.clone(),
+                            text: reasoning.to_string(),
+                            metadata: None,
+                            time: crate::message::part::ReasoningTime {
+                                start: turn_time,
+                                end: Some(turn_time),
+                            },
+                        }))
+                        .await?;
+                }
+            }
             if !response.content.is_empty() {
                 self.store
                     .save_text_part(session_id, &assistant_message_id, &response.content)
@@ -1523,6 +1544,104 @@ mod tests {
                 _ => None,
             });
         assert_eq!(assistant_variant, Some(Some("high".to_string())));
+    }
+
+    /// Provider that always returns a reasoning payload, so we can test
+    /// reasoning persistence through the processor without needing a live
+    /// thinking model.
+    struct ReasoningProvider {
+        model: ModelInfo,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ReasoningProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> ProviderResult<CompletionResponse> {
+            Ok(CompletionResponse {
+                content: "answer".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: Some("stop".to_string()),
+                usage: TokenUsage {
+                    input: 1,
+                    output: 1,
+                    cache_read: None,
+                    cache_write: None,
+                },
+                model: "test-model".to_string(),
+                reasoning: Some("step one\nstep two".to_string()),
+            })
+        }
+
+        fn stream(&self, _request: CompletionRequest) -> ProviderResult<EventStream> {
+            Ok(Box::pin(futures::stream::empty::<
+                Result<crate::provider::StreamEvent, ProviderError>,
+            >()))
+        }
+
+        fn models(&self) -> &[ModelInfo] {
+            std::slice::from_ref(&self.model)
+        }
+
+        fn default_model(&self) -> Option<&ModelInfo> {
+            Some(&self.model)
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_payload_persists_as_reasoning_part() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()).await.unwrap());
+        let session = store
+            .create("t", "p", &std::path::PathBuf::from("/tmp"))
+            .await
+            .unwrap();
+        let session_id = SessionID::parse(&session.id).unwrap();
+        let provider = Arc::new(ReasoningProvider {
+            model: ModelInfo {
+                id: Some(ModelID::new("test-model")),
+                name: None,
+                family: None,
+                release_date: None,
+                attachment: None,
+                reasoning: None,
+                temperature: None,
+                tool_call: None,
+                interleaved: None,
+                cost: None,
+                limit: None,
+                modalities: None,
+                experimental: None,
+                status: None,
+                provider: None,
+                options: None,
+                headers: None,
+                variants: None,
+            },
+        });
+
+        let processor = PromptProcessor::new(store.clone(), provider);
+        let user_message_id = MessageID::new();
+        processor
+            .process_stream_with_parts(&session_id, "hi", user_message_id, Vec::new())
+            .await
+            .unwrap();
+
+        let messages = store.get_messages_with_parts(&session_id).await.unwrap();
+        let reasoning_text = messages.iter().find_map(|with_parts| {
+            matches!(&with_parts.info, Message::Assistant(_)).then(|| {
+                with_parts.parts.iter().find_map(|part| match part {
+                    Part::Reasoning(r) => Some(r.text.clone()),
+                    _ => None,
+                })
+            })?
+        });
+        assert_eq!(reasoning_text.as_deref(), Some("step one\nstep two"));
     }
 
     #[tokio::test]
