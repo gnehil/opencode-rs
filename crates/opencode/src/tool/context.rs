@@ -19,6 +19,11 @@ pub struct ToolContext {
     pub model_id: Option<String>,
     pub plugin_manager: Option<Arc<crate::plugin::PluginManager>>,
     pub question_broker: Option<crate::question::QuestionBroker>,
+    /// `run --dangerously-skip-permissions` and equivalent attach-mode
+    /// flag. When set, any `Ask` permission decision (including those
+    /// surfaced by the `permission.ask` plugin hook with `status: "ask"`)
+    /// resolves to `Once` without going through the broker.
+    pub skip_permissions: bool,
 }
 
 impl ToolContext {
@@ -51,6 +56,12 @@ impl ToolContext {
     }
 
     async fn ask_permission(&self, permission: &str, pattern: &str) -> anyhow::Result<()> {
+        // `run --dangerously-skip-permissions` short-circuits before the
+        // plugin hook and the broker: every Ask resolves to Once.
+        if self.skip_permissions {
+            return Ok(());
+        }
+
         // External plugins get first say via the `permission.ask` hook: they
         // can resolve the request to `allow`/`deny` before it ever reaches
         // the interactive broker. A `status` left at `ask` falls through.
@@ -207,6 +218,7 @@ mod tests {
             model_id: None,
             plugin_manager: None,
             question_broker: None,
+            skip_permissions: false,
         }
     }
 
@@ -226,6 +238,20 @@ mod tests {
             .check_permission("bash", "rm -rf /")
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn skip_permissions_short_circuits_ask_decisions() {
+        // An Ask rule with no broker normally errors out. With
+        // skip_permissions on it must resolve to Once silently.
+        let rule = PermissionRule {
+            permission: "bash".to_string(),
+            pattern: "git *".to_string(),
+            action: Action::Ask,
+        };
+        let mut ctx = ctx(vec![rule]);
+        ctx.skip_permissions = true;
+        assert!(ctx.check_permission("bash", "git status").await.is_ok());
     }
 
     #[tokio::test]

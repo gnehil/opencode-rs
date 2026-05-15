@@ -1190,6 +1190,7 @@ impl ACPAgent {
                         model_id: None,
                         plugin_manager: None,
                         question_broker: None,
+                        skip_permissions: false,
                     };
                     match tool.execute(params.clone(), ctx).await {
                         Ok(r) => ToolPartResult::Completed {

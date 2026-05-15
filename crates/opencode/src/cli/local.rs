@@ -474,6 +474,7 @@ async fn handle_debug_agent(debug_args: args::DebugAgentArgs) -> Result<()> {
             model_id: agent.model.as_ref().map(|model| model.model_id.clone()),
             plugin_manager: None,
             question_broker: None,
+            skip_permissions: false,
         };
         let result = tool.execute(params.clone(), ctx).await?;
         println!(

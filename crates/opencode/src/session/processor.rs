@@ -16,6 +16,7 @@ pub struct PromptProcessor {
     bus: EventBus,
     permission_broker: Option<crate::permission::PermissionBroker>,
     question_broker: Option<crate::question::QuestionBroker>,
+    skip_permissions: bool,
     plugin_manager: Option<Arc<crate::plugin::PluginManager>>,
     max_iterations: usize,
     agent_name: String,
@@ -56,6 +57,7 @@ impl PromptProcessor {
             bus: EventBus::new(),
             permission_broker: None,
             question_broker: None,
+            skip_permissions: false,
             plugin_manager: None,
             max_iterations: 10,
             agent_name: "build".to_string(),
@@ -126,6 +128,11 @@ impl PromptProcessor {
 
     pub fn with_question_broker(mut self, broker: crate::question::QuestionBroker) -> Self {
         self.question_broker = Some(broker);
+        self
+    }
+
+    pub fn with_skip_permissions(mut self, skip: bool) -> Self {
+        self.skip_permissions = skip;
         self
     }
 
@@ -543,6 +550,7 @@ impl PromptProcessor {
                             model_id: Some(model_id.to_string()),
                             plugin_manager: self.plugin_manager.clone(),
                             question_broker: self.question_broker.clone(),
+                            skip_permissions: self.skip_permissions,
                         };
                         match tool.execute(input.clone(), ctx).await {
                             Ok(result) => ToolPartResult::Completed {
@@ -806,6 +814,7 @@ impl PromptProcessor {
                             model_id: self.model_id.clone(),
                             plugin_manager: self.plugin_manager.clone(),
                             question_broker: self.question_broker.clone(),
+                            skip_permissions: self.skip_permissions,
                         };
                         match tool.execute(params.clone(), ctx).await {
                             Ok(tool_result) => ToolPartResult::Completed {

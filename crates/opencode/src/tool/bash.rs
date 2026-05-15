@@ -202,6 +202,7 @@ mod tests {
             model_id: None,
             plugin_manager: None,
             question_broker: None,
+            skip_permissions: false,
         }
     }
 

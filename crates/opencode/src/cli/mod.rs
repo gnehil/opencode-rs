@@ -373,6 +373,9 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
     if let Some(variant) = args.variant.as_deref().filter(|v| !v.is_empty()) {
         processor = processor.with_variant(variant);
     }
+    if args.dangerously_skip_permissions {
+        processor = processor.with_skip_permissions(true);
+    }
 
     if args.agent.is_some() || (session.agent.is_none() && config_default_agent.is_some()) {
         store
