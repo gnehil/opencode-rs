@@ -20,6 +20,10 @@ pub struct PromptProcessor {
     agent_name: String,
     config: Option<crate::config::Config>,
     model_id: Option<String>,
+    /// Per-turn provider variant (e.g. `high`, `max`, `minimal`) — stamped on
+    /// the user/assistant message ModelRef and propagated to the provider
+    /// request so reasoning-enabled models pick up the requested effort.
+    variant: Option<String>,
     session_permission_rules: crate::permission::Ruleset,
 }
 
@@ -55,8 +59,20 @@ impl PromptProcessor {
             agent_name: "build".to_string(),
             config: None,
             model_id: None,
+            variant: None,
             session_permission_rules: Vec::new(),
         }
+    }
+
+    /// Set the per-turn variant (`high`, `max`, `minimal`, …) so it can be
+    /// stamped on persisted messages and surfaced to providers that vary
+    /// reasoning effort.
+    pub fn with_variant(mut self, variant: impl Into<String>) -> Self {
+        let variant = variant.into();
+        if !variant.is_empty() {
+            self.variant = Some(variant);
+        }
+        self
     }
 
     /// Override the agent. The agent name selects:
@@ -181,7 +197,7 @@ impl PromptProcessor {
             model: ModelRef {
                 provider_id: self.provider.name().to_string(),
                 model_id: model_id.clone(),
-                variant: None,
+                variant: self.variant.clone(),
             },
             system: None,
             tools: None,
@@ -209,6 +225,7 @@ impl PromptProcessor {
                             "modelID": model_id,
                         },
                         "messageID": user_message_id.to_string(),
+                        "variant": self.variant,
                     }),
                     serde_json::json!({
                         "message": user_message_json,
@@ -327,7 +344,7 @@ impl PromptProcessor {
                     },
                 },
                 structured: None,
-                variant: None,
+                variant: self.variant.clone(),
                 finish: None,
             };
             self.store
@@ -1396,6 +1413,61 @@ mod tests {
         assert!(seen
             .iter()
             .any(|message| message.role == "tool" && message.content.contains("task done")));
+    }
+
+    #[tokio::test]
+    async fn variant_is_stamped_on_persisted_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()).await.unwrap());
+        let session = store
+            .create("t", "p", &std::path::PathBuf::from("/tmp"))
+            .await
+            .unwrap();
+        let session_id = SessionID::parse(&session.id).unwrap();
+        let provider = Arc::new(FakeProvider {
+            model: ModelInfo {
+                id: Some(ModelID::new("test-model")),
+                name: None,
+                family: None,
+                release_date: None,
+                attachment: None,
+                reasoning: None,
+                temperature: None,
+                tool_call: None,
+                interleaved: None,
+                cost: None,
+                limit: None,
+                modalities: None,
+                experimental: None,
+                status: None,
+                provider: None,
+                options: None,
+                headers: None,
+                variants: None,
+            },
+            seen: Arc::new(Mutex::new(Vec::new())),
+        });
+
+        let processor = PromptProcessor::new(store.clone(), provider).with_variant("high");
+        let user_message_id = MessageID::new();
+        processor
+            .process_stream_with_parts(&session_id, "hi", user_message_id, Vec::new())
+            .await
+            .unwrap();
+
+        let messages = store.get_messages_with_parts(&session_id).await.unwrap();
+        let user_variant = messages.iter().find_map(|with_parts| match &with_parts.info {
+            Message::User(user) => Some(user.model.variant.clone()),
+            _ => None,
+        });
+        assert_eq!(user_variant, Some(Some("high".to_string())));
+
+        let assistant_variant =
+            messages.iter().find_map(|with_parts| match &with_parts.info {
+                Message::Assistant(asst) => Some(asst.variant.clone()),
+                _ => None,
+            });
+        assert_eq!(assistant_variant, Some(Some("high".to_string())));
     }
 
     #[tokio::test]
