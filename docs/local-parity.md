@@ -30,7 +30,7 @@ Legend:
 | Area | TS reference | Rust reference | Status | Next work |
 | --- | --- | --- | --- | --- |
 | Session list/create/get/update/delete | `server/.../groups/session.ts` | `server/handlers/session_handlers.rs` | partial | Request/response shape and workspace routing parity |
-| Session route compatibility | `SessionPaths` | `server/routes.rs` | partial | Keep adding canonical `/session/...` aliases before `/api/session` legacy paths |
+| Session route compatibility | `SessionPaths` | `server/routes.rs` | partial | Canonical `/session/:id/permissions/:permission_id` (TS `permissionRespond`) wired with `{response}` payload. Still missing: `/session/:id/summarize` (no Rust summarize action), `/session/:id/share` (cloud scope) |
 | Session messages | `SessionPaths.messages/message` | `server/handlers/message_handlers.rs` | partial | Broaden `MessageV2` shape tests and SDK compatibility checks |
 | Session prompt | `prompt`, `prompt_async`, `command`, `shell` | `message_handlers.rs`, `command/*`, `session/history.rs`, `session/processor.rs`, `plugin/*` | partial | Route-level SDK shape checks and broader prompt variant parity |
 | Revert/unrevert | `SessionPaths.revert/unrevert` | `session/service.rs`, `session_handlers.rs` | partial | Full restore semantics after revert, not only clearing the marker |

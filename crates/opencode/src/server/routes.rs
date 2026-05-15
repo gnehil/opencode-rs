@@ -120,6 +120,13 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
             "/session/:id/message/:message_id/part/:part_id",
             delete(message_handlers::delete_part).patch(message_handlers::update_part),
         )
+        // TS canonical `permissionRespond` route: reply to a permission
+        // request scoped to a session. The session segment is informational
+        // (permission IDs are unique); the payload is `{ response }`.
+        .route(
+            "/session/:id/permissions/:permission_id",
+            post(permission_handlers::respond_session_permission),
+        )
         .route("/event", get(event_handlers::sse_events))
         .route("/config", get(config_handlers::get_config))
         .route("/config", patch(config_handlers::update_config))
@@ -1578,5 +1585,82 @@ new file mode 100644
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn session_permissions_route_dispatches_response_to_broker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = std::sync::Arc::new(
+            AppState::new(tmp.path().join("data")).with_workspace_root(tmp.path().to_path_buf()),
+        );
+
+        // Register a pending permission request so the route has something
+        // to reply to. The broker keys on permission id alone; the session
+        // path segment is informational.
+        let request = crate::permission::PermissionRequest {
+            id: crate::permission::PermissionID::new(),
+            session_id: crate::id::SessionID::new(),
+            permission: "bash".to_string(),
+            patterns: vec!["ls".to_string()],
+            metadata: Default::default(),
+            always: vec!["ls".to_string()],
+            tool: None,
+        };
+        let permission_id = request.id.to_string();
+        let broker = state.permission_broker.clone();
+        let waiter = broker.register(request).await;
+
+        let app = create_router_with_state(state);
+        let response = send(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/session/{}/permissions/{}",
+                    crate::id::SessionID::new(),
+                    permission_id
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "response": "once" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!(true));
+
+        // The broker should have produced the reply we sent.
+        assert!(matches!(
+            waiter.await.unwrap(),
+            crate::permission::Reply::Once
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_permissions_route_returns_404_for_unknown_permission() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = std::sync::Arc::new(
+            AppState::new(tmp.path().join("data")).with_workspace_root(tmp.path().to_path_buf()),
+        );
+        let app = create_router_with_state(state);
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/session/{}/permissions/{}",
+                    crate::id::SessionID::new(),
+                    crate::permission::PermissionID::new()
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "response": "once" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

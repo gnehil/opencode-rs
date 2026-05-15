@@ -76,6 +76,36 @@ pub async fn reject_permission(
     })))
 }
 
+/// Payload for the canonical `/session/:sessionID/permissions/:permissionID`
+/// route. Matches TS `PermissionResponsePayload`: `{ response: "once" | ... }`.
+#[derive(Deserialize)]
+pub struct PermissionRespondBody {
+    response: String,
+}
+
+/// Reply to a permission request via the canonical `/session/.../permissions/...`
+/// path. The `sessionID` segment is informational — the broker is keyed by
+/// `permissionID`, which is globally unique — so we accept and ignore it for
+/// shape parity with the TS server.
+pub async fn respond_session_permission(
+    State(state): State<Arc<AppState>>,
+    Path((_session_id, permission_id)): Path<(String, String)>,
+    Json(body): Json<PermissionRespondBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let reply = match body.response.as_str() {
+        "allow" => crate::permission::Reply::Once,
+        other => crate::permission::Reply::from_str(other).map_err(|_| StatusCode::BAD_REQUEST)?,
+    };
+    if !state
+        .permission_broker
+        .reply(&permission_id, reply)
+        .await
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(json!(true)))
+}
+
 #[derive(Deserialize)]
 pub struct QuestionQuery {
     session_id: Option<String>,
