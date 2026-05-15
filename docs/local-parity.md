@@ -47,7 +47,7 @@ Legend:
 
 | Area | TS reference | Rust reference | Status | Next work |
 | --- | --- | --- | --- | --- |
-| Providers/model auth | `provider/*`, `auth/index.ts` | `provider/*`, `auth.rs`, `cli/provider_auth.rs` | partial | Stored OAuth `access` tokens now resolve as the provider key; still missing: OAuth token refresh on expiry, OAuth login flows (Anthropic Claude Pro/Max etc.), provider-side bearer/beta-header auth, Wellknown credential consumption |
+| Providers/model auth | `provider/*`, `auth/index.ts` | `provider/*`, `auth.rs`, `cli/provider_auth.rs` | partial | Stored OAuth `access` tokens resolve as the provider key; Wellknown credentials are exported into the process environment at startup so well-known/custom enterprise providers pick them up. Still missing: OAuth token refresh on expiry (lives in TS plugins, needs plugin `auth` hook integration), provider-side bearer/beta-header auth |
 | Tools | `tool/*` | `tool/*` | partial | Validate behavior, output shape, permission integration per tool |
 | External directory guard | `tool/external-directory.ts` | `tool/external_directory.rs` | partial | Guard wired into read/write/edit/glob/grep/lsp/apply_patch; `bypass` (reference module) and richer permission metadata still missing |
 | `repo_clone`/`repo_overview` tools | `tool/repo_clone.ts`, `tool/repo_overview.ts` | `tool/repo_search.rs`, `tool/repo_tools.rs` | partial | Tool names/behavior diverge from TS; reconcile or document the mapping |

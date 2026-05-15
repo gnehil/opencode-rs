@@ -1087,9 +1087,27 @@ fn infer_provider_id(model: Option<&str>, has_anthropic_key: bool, has_openai_ke
 type ProviderCredentials = std::collections::BTreeMap<String, provider_auth::ProviderCredential>;
 
 fn load_provider_credentials(data_dir: &PathBuf) -> ProviderCredentials {
-    provider_auth::ProviderAuthStore::new(data_dir.clone())
+    let credentials = provider_auth::ProviderAuthStore::new(data_dir.clone())
         .load()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    apply_wellknown_credentials(&credentials);
+    credentials
+}
+
+/// Export `Wellknown` credentials into the process environment so provider
+/// constructors that read API keys from env vars (e.g. custom enterprise
+/// providers discovered via `.well-known/opencode`) pick them up
+/// transparently. Existing env values win — operators can still override a
+/// stored credential by setting the env var before launching opencode.
+fn apply_wellknown_credentials(credentials: &ProviderCredentials) {
+    for credential in credentials.values() {
+        if let provider_auth::ProviderCredential::Wellknown { key, token } = credential {
+            if key.trim().is_empty() || std::env::var_os(key).is_some() {
+                continue;
+            }
+            std::env::set_var(key, token);
+        }
+    }
 }
 
 fn build_provider_from_model_or_env(model: Option<&str>) -> anyhow::Result<Arc<dyn Provider>> {
@@ -1840,6 +1858,42 @@ mod tests {
         assert_eq!(event["type"], "reasoning");
         assert_eq!(event["part"]["type"], "reasoning");
         assert_eq!(event["part"]["text"], "thinking it through");
+    }
+
+    #[test]
+    fn wellknown_credentials_export_their_env_vars() {
+        // Unique key per test run so parallel tests do not collide.
+        let key = format!("OPENCODE_WELLKNOWN_TEST_{}", uuid::Uuid::new_v4().simple());
+        std::env::remove_var(&key);
+        let credentials: ProviderCredentials = std::collections::BTreeMap::from([(
+            "https://auth.example.com".to_string(),
+            provider_auth::ProviderCredential::Wellknown {
+                key: key.clone(),
+                token: "secret-token".to_string(),
+            },
+        )]);
+
+        apply_wellknown_credentials(&credentials);
+        assert_eq!(std::env::var(&key).ok().as_deref(), Some("secret-token"));
+        std::env::remove_var(&key);
+    }
+
+    #[test]
+    fn wellknown_credentials_preserve_existing_env_values() {
+        let key = format!("OPENCODE_WELLKNOWN_TEST_{}", uuid::Uuid::new_v4().simple());
+        std::env::set_var(&key, "preset");
+        let credentials: ProviderCredentials = std::collections::BTreeMap::from([(
+            "https://auth.example.com".to_string(),
+            provider_auth::ProviderCredential::Wellknown {
+                key: key.clone(),
+                token: "secret-token".to_string(),
+            },
+        )]);
+
+        apply_wellknown_credentials(&credentials);
+        // A pre-set env var must take precedence so operators can override.
+        assert_eq!(std::env::var(&key).ok().as_deref(), Some("preset"));
+        std::env::remove_var(&key);
     }
 
     #[test]
