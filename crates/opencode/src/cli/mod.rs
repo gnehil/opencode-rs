@@ -422,10 +422,12 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
             });
     }
 
-    let user_message_id = crate::id::MessageID::new();
-    let user_parts = build_run_user_parts(
+    // First-turn parts and message id; in interactive mode we reuse the
+    // processor across additional turns read from stdin.
+    let initial_message_id = crate::id::MessageID::new();
+    let initial_parts = build_run_user_parts(
         &session_id,
-        &user_message_id,
+        &initial_message_id,
         prompt_text,
         args.command
             .is_none()
@@ -438,33 +440,94 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
         std::process::exit(1);
     });
 
-    if !json_output {
+    if !json_output && !prompt_text.is_empty() {
         println!("Processing: {}", prompt_text);
     }
-    let result = processor
-        .process_stream_with_parts(&session_id, prompt_text, user_message_id, user_parts)
-        .await;
 
-    match result {
-        Ok(events) => {
-            let thinking = args.thinking.unwrap_or(false);
-            let filtered: Vec<_> = events
-                .into_iter()
-                .filter(|event| {
-                    !matches!(
-                        event,
-                        crate::session::processor::ProcessEvent::Reasoning(_)
-                    ) || thinking
-                })
-                .collect();
-            if let Err(e) = emit_run_events(&args.format, &session_id, &filtered) {
-                eprintln!("Error processing prompt: {}", e);
+    let run_turn = async |prompt_text: &str,
+                          message_id: crate::id::MessageID,
+                          parts: Vec<crate::message::Part>|
+          -> anyhow::Result<()> {
+        let events = processor
+            .process_stream_with_parts(&session_id, prompt_text, message_id, parts)
+            .await?;
+        let thinking = args.thinking.unwrap_or(false);
+        let filtered: Vec<_> = events
+            .into_iter()
+            .filter(|event| {
+                !matches!(
+                    event,
+                    crate::session::processor::ProcessEvent::Reasoning(_)
+                ) || thinking
+            })
+            .collect();
+        emit_run_events(&args.format, &session_id, &filtered)
+    };
+
+    // Interactive mode is allowed to start without an initial prompt; skip
+    // the first turn in that case so we don't persist an empty user message.
+    let has_initial_prompt = !prompt_text.trim().is_empty() || !initial_parts.is_empty();
+    if has_initial_prompt {
+        if let Err(e) = run_turn(prompt_text, initial_message_id, initial_parts).await {
+            eprintln!("Error processing prompt: {}", e);
+            if !args.interactive {
                 std::process::exit(1);
             }
         }
-        Err(e) => {
-            eprintln!("Error processing prompt: {}", e);
-            std::process::exit(1);
+    }
+
+    if !args.interactive {
+        return;
+    }
+
+    // Interactive multi-turn loop. Reads lines from stdin between turns
+    // until EOF or `/exit`. This is intentionally a line-based loop rather
+    // than a full TUI — opencode-rs has a separate `tui` subcommand for
+    // that — but it covers the "stay in-session and keep prompting" path
+    // that TS `run --interactive` provides.
+    use std::io::{BufRead, IsTerminal as _, Write as _};
+    let stdin = std::io::stdin();
+    let mut handle = stdin.lock();
+    let is_tty = std::io::stdin().is_terminal();
+    let mut line = String::new();
+    loop {
+        if is_tty {
+            print!("\n> ");
+            let _ = std::io::stdout().flush();
+        }
+        line.clear();
+        match handle.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("Failed to read stdin: {error}");
+                break;
+            }
+        }
+        let next = line.trim_end_matches(['\n', '\r']).to_string();
+        if next.is_empty() {
+            continue;
+        }
+        if matches!(next.as_str(), "/exit" | "/quit") {
+            break;
+        }
+        let message_id = crate::id::MessageID::new();
+        let parts = build_run_user_parts(
+            &session_id,
+            &message_id,
+            &next,
+            None,
+            &project_path,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("{}", e);
+            Vec::new()
+        });
+        if parts.is_empty() {
+            continue;
+        }
+        if let Err(error) = run_turn(&next, message_id, parts).await {
+            eprintln!("Error processing prompt: {error}");
         }
     }
 }
