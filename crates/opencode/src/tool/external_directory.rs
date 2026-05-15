@@ -78,8 +78,14 @@ mod tests {
     fn contains_path_matches_workspace_and_descendants() {
         let base = Path::new("/home/user/proj");
         assert!(contains_path(base, Path::new("/home/user/proj")));
-        assert!(contains_path(base, Path::new("/home/user/proj/src/main.rs")));
-        assert!(contains_path(base, Path::new("/home/user/proj/./src/../lib.rs")));
+        assert!(contains_path(
+            base,
+            Path::new("/home/user/proj/src/main.rs")
+        ));
+        assert!(contains_path(
+            base,
+            Path::new("/home/user/proj/./src/../lib.rs")
+        ));
         assert!(!contains_path(base, Path::new("/home/user/proj2/x")));
         assert!(!contains_path(base, Path::new("/home/user")));
         assert!(!contains_path(base, Path::new("/home/user/proj/../escape")));

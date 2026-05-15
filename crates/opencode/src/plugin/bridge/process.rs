@@ -97,14 +97,7 @@ impl PluginBridge {
             .ok_or_else(|| anyhow::anyhow!("plugin host stdout unavailable"))?;
         let mut reader = BufReader::new(stdout).lines();
 
-        write_request(
-            &mut stdin,
-            &HostRequest::Init {
-                plugins,
-                input,
-            },
-        )
-        .await?;
+        write_request(&mut stdin, &HostRequest::Init { plugins, input }).await?;
 
         // Read until the `ready` handshake completes, surfacing any log lines
         // the host emits while loading plugins.
@@ -155,12 +148,7 @@ impl PluginBridge {
 
     /// Invoke a trigger-style hook. `output` is passed to every plugin's hook
     /// in registration order; the mutated result is returned.
-    pub async fn trigger(
-        &self,
-        hook: &str,
-        input: Value,
-        output: Value,
-    ) -> anyhow::Result<Value> {
+    pub async fn trigger(&self, hook: &str, input: Value, output: Value) -> anyhow::Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);

@@ -11,7 +11,13 @@ use serde_json::Value;
 
 use super::spec::parse_plugin_specifier;
 
-const INDEX_FILES: &[&str] = &["index.js", "index.mjs", "index.cjs", "index.ts", "index.tsx"];
+const INDEX_FILES: &[&str] = &[
+    "index.js",
+    "index.mjs",
+    "index.cjs",
+    "index.ts",
+    "index.tsx",
+];
 
 /// Turn a plugin spec into a single flat directory name safe on every
 /// platform. Unlike the TypeScript `sanitize` (which only rewrites Windows
@@ -211,7 +217,10 @@ mod tests {
         let entry = resolve_npm_entry(dir.path()).unwrap();
         assert_eq!(
             entry,
-            format!("file://{}", dir.path().join("dist/server.js").to_string_lossy())
+            format!(
+                "file://{}",
+                dir.path().join("dist/server.js").to_string_lossy()
+            )
         );
     }
 

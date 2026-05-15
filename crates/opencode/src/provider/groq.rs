@@ -279,8 +279,8 @@ impl Provider for GroqProvider {
 
         let raw: serde_json::Value = response.json().await?;
         let reasoning = crate::provider::extract_openai_compat_reasoning(&raw);
-        let groq_resp: GroqResponse = serde_json::from_value(raw)
-            .map_err(|e| ProviderError::api(0, e.to_string()))?;
+        let groq_resp: GroqResponse =
+            serde_json::from_value(raw).map_err(|e| ProviderError::api(0, e.to_string()))?;
 
         let content = groq_resp
             .choices

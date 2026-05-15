@@ -173,8 +173,7 @@ fn encode_candidates(img: &DynamicImage, max_bytes: u64) -> Option<(&'static str
     let rgb = img.to_rgb8();
     for &quality in &JPEG_QUALITIES {
         let mut jpeg = Vec::new();
-        let mut encoder =
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality);
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality);
         if encoder.encode_image(&rgb).is_ok() {
             let data = base64::engine::general_purpose::STANDARD.encode(&jpeg);
             if data.len() as u64 <= max_bytes {

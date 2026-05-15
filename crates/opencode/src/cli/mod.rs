@@ -191,22 +191,24 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
         eprintln!("--interactive cannot be used with --format json");
         std::process::exit(1);
     }
+    // Demo slash commands only make sense alongside the interactive
+    // runtime; reject early like TS does so the flag fails loud instead
+    // of being silently ignored.
+    if args.demo && !args.interactive {
+        eprintln!("--demo requires --interactive");
+        std::process::exit(1);
+    }
 
     // `--attach <url>` routes the run through a remote opencode server
-    // via HTTP instead of the local provider/store. Falls back to a clear
-    // error on conflicts the local mode never sees.
+    // via HTTP instead of the local provider/store.
     if args.attach.is_some() {
-        if args.interactive {
-            eprintln!("--interactive cannot be combined with --attach");
-            std::process::exit(1);
-        }
         let piped = read_piped_stdin().unwrap_or_else(|e| {
             eprintln!("Failed to read stdin: {}", e);
             std::process::exit(1);
         });
         let mut message = local_process::join_run_message(&args.message);
         message = local_process::resolve_run_input(&message, piped.as_deref()).unwrap_or_default();
-        if message.trim().is_empty() && args.command.is_none() {
+        if message.trim().is_empty() && args.command.is_none() && !args.interactive {
             eprintln!("You must provide a message or a command");
             std::process::exit(1);
         }
@@ -447,7 +449,7 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
     let run_turn = async |prompt_text: &str,
                           message_id: crate::id::MessageID,
                           parts: Vec<crate::message::Part>|
-          -> anyhow::Result<()> {
+           -> anyhow::Result<()> {
         let events = processor
             .process_stream_with_parts(&session_id, prompt_text, message_id, parts)
             .await?;
@@ -455,10 +457,7 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
         let filtered: Vec<_> = events
             .into_iter()
             .filter(|event| {
-                !matches!(
-                    event,
-                    crate::session::processor::ProcessEvent::Reasoning(_)
-                ) || thinking
+                !matches!(event, crate::session::processor::ProcessEvent::Reasoning(_)) || thinking
             })
             .collect();
         emit_run_events(&args.format, &session_id, &filtered)
@@ -466,7 +465,14 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
 
     // Interactive mode is allowed to start without an initial prompt; skip
     // the first turn in that case so we don't persist an empty user message.
-    let has_initial_prompt = !prompt_text.trim().is_empty() || !initial_parts.is_empty();
+    // `initial_parts` always contains a synthesized text part even for an
+    // empty prompt, so the prompt-empty check is the real gate. File
+    // attachments count as content for the first turn even when no text is
+    // provided.
+    let has_initial_files = initial_parts
+        .iter()
+        .any(|part| matches!(part, crate::message::Part::File(_)));
+    let has_initial_prompt = !prompt_text.trim().is_empty() || has_initial_files;
     if has_initial_prompt {
         if let Err(e) = run_turn(prompt_text, initial_message_id, initial_parts).await {
             eprintln!("Error processing prompt: {}", e);
@@ -511,18 +517,19 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
         if matches!(next.as_str(), "/exit" | "/quit") {
             break;
         }
+        if next == "/help" {
+            println!("Available commands: /exit, /quit, /help");
+            if args.demo {
+                println!("(demo slash commands enabled; nothing to dispatch yet)");
+            }
+            continue;
+        }
         let message_id = crate::id::MessageID::new();
-        let parts = build_run_user_parts(
-            &session_id,
-            &message_id,
-            &next,
-            None,
-            &project_path,
-        )
-        .unwrap_or_else(|e| {
-            eprintln!("{}", e);
-            Vec::new()
-        });
+        let parts = build_run_user_parts(&session_id, &message_id, &next, None, &project_path)
+            .unwrap_or_else(|e| {
+                eprintln!("{}", e);
+                Vec::new()
+            });
         if parts.is_empty() {
             continue;
         }
@@ -750,8 +757,8 @@ fn run_event_json(
                 "part": part,
             }))
         }
-        crate::session::processor::ProcessEvent::ToolComplete(tool, output) => Some(
-            serde_json::json!({
+        crate::session::processor::ProcessEvent::ToolComplete(tool, output) => {
+            Some(serde_json::json!({
                 "type": "tool_use",
                 "timestamp": timestamp,
                 "sessionID": sid,
@@ -763,8 +770,8 @@ fn run_event_json(
                         "output": output,
                     },
                 },
-            }),
-        ),
+            }))
+        }
         crate::session::processor::ProcessEvent::Done(text) => Some(serde_json::json!({
             "type": "text",
             "timestamp": timestamp,
@@ -1056,8 +1063,7 @@ async fn handle_serve(args: args::NetworkArgs, data_dir: PathBuf, open_web: bool
                     plugin_manager
                         .notify_bridge(
                             "config",
-                            serde_json::to_value(config)
-                                .unwrap_or(serde_json::Value::Null),
+                            serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
                         )
                         .await;
                 }
@@ -1739,10 +1745,7 @@ async fn handle_acp(args: args::AcpArgs, data_dir: PathBuf) {
 /// falls back to `OPENCODE_SERVER_PASSWORD`/`OPENCODE_SERVER_USERNAME` env,
 /// with `opencode` as the default username. Returns `None` when no password
 /// is configured so unsecured local servers still work.
-fn attach_basic_auth_header(
-    password: Option<&str>,
-    username: Option<&str>,
-) -> Option<String> {
+fn attach_basic_auth_header(password: Option<&str>, username: Option<&str>) -> Option<String> {
     use base64::Engine;
     let password = password
         .map(str::to_string)
@@ -1753,8 +1756,8 @@ fn attach_basic_auth_header(
         .or_else(|| std::env::var("OPENCODE_SERVER_USERNAME").ok())
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| "opencode".to_string());
-    let token = base64::engine::general_purpose::STANDARD
-        .encode(format!("{}:{}", username, password));
+    let token =
+        base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", username, password));
     Some(format!("Basic {}", token))
 }
 
@@ -1771,7 +1774,8 @@ async fn run_attach(args: &args::RunArgs, message: String) -> anyhow::Result<()>
         .to_string();
 
     let mut headers = reqwest::header::HeaderMap::new();
-    if let Some(auth) = attach_basic_auth_header(args.password.as_deref(), args.username.as_deref()) {
+    if let Some(auth) = attach_basic_auth_header(args.password.as_deref(), args.username.as_deref())
+    {
         let value = reqwest::header::HeaderValue::from_str(&auth)
             .map_err(|e| anyhow::anyhow!("invalid auth header: {e}"))?;
         headers.insert(reqwest::header::AUTHORIZATION, value);
@@ -1786,11 +1790,78 @@ async fn run_attach(args: &args::RunArgs, message: String) -> anyhow::Result<()>
     let session_id = resolve_attach_session(&client, &base_url, args).await?;
     eprintln!("Attached to {} session={}", base_url, session_id);
 
-    // Subscribe to events before sending the prompt so we don't miss the
-    // first delta. The subscription is consumed on the same task.
-    let event_url = format!("{}/event", base_url);
+    // Share the session up front if requested, mirroring TS `share`.
+    if args.share {
+        let _ = client
+            .post(format!("{}/session/{}/share", base_url, session_id))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to share session: {e}"))?
+            .error_for_status();
+    }
+
+    // Run the initial prompt if one was provided.
+    let has_initial = !message.trim().is_empty() || args.command.is_some() || args.file.is_some();
+    if has_initial {
+        run_attach_turn(&client, &base_url, &session_id, args, &message).await?;
+    }
+
+    if !args.interactive {
+        return Ok(());
+    }
+
+    // Interactive remote loop: read stdin lines between turns, dispatching
+    // each through the same session.
+    use std::io::{BufRead, IsTerminal as _, Write as _};
+    let stdin = std::io::stdin();
+    let mut handle = stdin.lock();
+    let is_tty = std::io::stdin().is_terminal();
+    let mut line = String::new();
+    loop {
+        if is_tty {
+            print!("\n> ");
+            let _ = std::io::stdout().flush();
+        }
+        line.clear();
+        match handle.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("Failed to read stdin: {error}");
+                break;
+            }
+        }
+        let next = line.trim_end_matches(['\n', '\r']).to_string();
+        if next.is_empty() {
+            continue;
+        }
+        if matches!(next.as_str(), "/exit" | "/quit") {
+            break;
+        }
+        if next == "/help" {
+            println!("Available commands: /exit, /quit, /help");
+            continue;
+        }
+        if let Err(error) = run_attach_turn(&client, &base_url, &session_id, args, &next).await {
+            eprintln!("Error: {error}");
+        }
+    }
+    Ok(())
+}
+
+/// One remote prompt + event drain. The SSE stream is opened fresh per
+/// turn so each turn cleanly waits for its own idle marker; for an
+/// interactive loop the cost is a fresh subscription per line, which is
+/// negligible compared to the LLM latency.
+async fn run_attach_turn(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_id: &str,
+    args: &args::RunArgs,
+    message: &str,
+) -> anyhow::Result<()> {
     let event_stream = client
-        .get(&event_url)
+        .get(format!("{}/event", base_url))
         .header(reqwest::header::ACCEPT, "text/event-stream")
         .send()
         .await
@@ -1802,16 +1873,8 @@ async fn run_attach(args: &args::RunArgs, message: String) -> anyhow::Result<()>
         );
     }
 
-    send_attach_prompt(&client, &base_url, &session_id, args, &message).await?;
-
-    relay_attach_events(
-        event_stream,
-        &client,
-        &base_url,
-        &session_id,
-        args,
-    )
-    .await
+    send_attach_prompt(client, base_url, session_id, args, message).await?;
+    relay_attach_events(event_stream, client, base_url, session_id, args).await
 }
 
 async fn resolve_attach_session(
@@ -1862,11 +1925,89 @@ async fn send_attach_prompt(
     args: &args::RunArgs,
     message: &str,
 ) -> anyhow::Result<()> {
+    // Slash commands route to /session/.../command in TS, distinct from
+    // /session/.../message. Mirror that here so plugins can intercept.
+    if let Some(command) = args.command.as_deref().filter(|c| !c.is_empty()) {
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "command".to_string(),
+            serde_json::Value::String(command.to_string()),
+        );
+        body.insert(
+            "arguments".to_string(),
+            serde_json::Value::String(message.to_string()),
+        );
+        if let Some(model) = args.model.as_deref().filter(|m| !m.is_empty()) {
+            if let Some((provider, model_id)) = model.split_once('/') {
+                body.insert(
+                    "model".to_string(),
+                    serde_json::json!({ "providerID": provider, "modelID": model_id }),
+                );
+            }
+        }
+        if let Some(agent) = args.agent.as_deref().filter(|a| !a.is_empty()) {
+            body.insert(
+                "agent".to_string(),
+                serde_json::Value::String(agent.to_string()),
+            );
+        }
+        if let Some(variant) = args.variant.as_deref().filter(|v| !v.is_empty()) {
+            body.insert(
+                "variant".to_string(),
+                serde_json::Value::String(variant.to_string()),
+            );
+        }
+        let resp = client
+            .post(format!("{}/session/{}/command", base_url, session_id))
+            .json(&serde_json::Value::Object(body))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("remote command failed ({status}): {text}");
+        }
+        return Ok(());
+    }
+
+    // File attachments precede the text part so the model sees inputs in
+    // the same order TS sends them. Files are resolved against the local
+    // working directory and forwarded as `file://` URLs — the remote
+    // server reads them in turn.
+    let mut parts: Vec<serde_json::Value> = Vec::new();
+    if let Some(files) = args.file.as_ref() {
+        let base_dir =
+            std::env::current_dir().map_err(|e| anyhow::anyhow!("failed to read cwd: {e}"))?;
+        for file in files {
+            let path = std::path::PathBuf::from(file);
+            let resolved = if path.is_absolute() {
+                path
+            } else {
+                base_dir.join(&path)
+            };
+            if !resolved.exists() {
+                anyhow::bail!("file not found: {file}");
+            }
+            let mime = if resolved.is_dir() {
+                "application/x-directory"
+            } else {
+                "text/plain"
+            };
+            parts.push(serde_json::json!({
+                "type": "file",
+                "url": format!("file://{}", resolved.to_string_lossy()),
+                "filename": resolved
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                "mime": mime,
+            }));
+        }
+    }
+    parts.push(serde_json::json!({ "type": "text", "text": message }));
+
     let mut body = serde_json::Map::new();
-    body.insert(
-        "parts".to_string(),
-        serde_json::json!([{ "type": "text", "text": message }]),
-    );
+    body.insert("parts".to_string(), serde_json::Value::Array(parts));
     if let Some(model) = args.model.as_deref().filter(|m| !m.is_empty()) {
         if let Some((provider, model_id)) = model.split_once('/') {
             body.insert(
@@ -2201,9 +2342,7 @@ mod tests {
     fn run_json_suppresses_per_delta_and_tool_start_events() {
         use crate::session::processor::ProcessEvent;
         let session_id = crate::id::SessionID::new();
-        assert!(
-            run_event_json(&session_id, &ProcessEvent::TextDelta("hi".to_string())).is_none()
-        );
+        assert!(run_event_json(&session_id, &ProcessEvent::TextDelta("hi".to_string())).is_none());
         assert!(run_event_json(
             &session_id,
             &ProcessEvent::ToolStart("bash".to_string(), serde_json::json!({}))
@@ -2217,10 +2356,7 @@ mod tests {
         let session_id = crate::id::SessionID::new();
         let event = run_event_json(
             &session_id,
-            &ProcessEvent::ToolComplete(
-                "bash".to_string(),
-                serde_json::json!({ "stdout": "ok" }),
-            ),
+            &ProcessEvent::ToolComplete("bash".to_string(), serde_json::json!({ "stdout": "ok" })),
         )
         .unwrap();
         assert_eq!(event["type"], "tool_use");
@@ -2312,8 +2448,7 @@ mod tests {
         assert_eq!(finish["part"]["stopReason"], "end_turn");
 
         let finish_unknown =
-            run_event_json(&session_id, &ProcessEvent::StepFinish { stop_reason: None })
-                .unwrap();
+            run_event_json(&session_id, &ProcessEvent::StepFinish { stop_reason: None }).unwrap();
         assert!(finish_unknown["part"].get("stopReason").is_none());
     }
 
@@ -2321,8 +2456,7 @@ mod tests {
     fn run_json_wraps_errors_as_named_error_payload() {
         use crate::session::processor::ProcessEvent;
         let session_id = crate::id::SessionID::new();
-        let event =
-            run_event_json(&session_id, &ProcessEvent::Error("boom".to_string())).unwrap();
+        let event = run_event_json(&session_id, &ProcessEvent::Error("boom".to_string())).unwrap();
         assert_eq!(event["type"], "error");
         assert_eq!(event["error"]["name"], "Error");
         assert_eq!(event["error"]["data"]["message"], "boom");

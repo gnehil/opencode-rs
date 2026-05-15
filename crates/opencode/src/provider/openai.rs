@@ -331,8 +331,8 @@ impl Provider for OpenAIProvider {
         // network round-trip.
         let raw: serde_json::Value = response.json().await?;
         let reasoning = crate::provider::extract_openai_compat_reasoning(&raw);
-        let body: OpenAICompleteResponse = serde_json::from_value(raw)
-            .map_err(|e| ProviderError::api(0, e.to_string()))?;
+        let body: OpenAICompleteResponse =
+            serde_json::from_value(raw).map_err(|e| ProviderError::api(0, e.to_string()))?;
 
         let choice = body.choices.first();
         let content = choice

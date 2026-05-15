@@ -219,8 +219,8 @@ impl Provider for XAIProvider {
 
         let raw: serde_json::Value = response.json().await?;
         let reasoning = crate::provider::extract_openai_compat_reasoning(&raw);
-        let xai_resp: XAIResponse = serde_json::from_value(raw)
-            .map_err(|e| ProviderError::api(0, e.to_string()))?;
+        let xai_resp: XAIResponse =
+            serde_json::from_value(raw).map_err(|e| ProviderError::api(0, e.to_string()))?;
 
         let content = xai_resp
             .choices

@@ -113,10 +113,7 @@ mod tests {
             },
         };
         let text = serde_json::to_string(&request).unwrap();
-        assert_eq!(
-            serde_json::from_str::<HostRequest>(&text).unwrap(),
-            request
-        );
+        assert_eq!(serde_json::from_str::<HostRequest>(&text).unwrap(), request);
     }
 
     #[test]

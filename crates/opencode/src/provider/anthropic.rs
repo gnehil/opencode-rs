@@ -973,7 +973,10 @@ mod tests {
                 signature: Some("sig".to_string()),
             },
         ];
-        assert_eq!(aggregate_reasoning(&blocks).as_deref(), Some("first\nsecond"));
+        assert_eq!(
+            aggregate_reasoning(&blocks).as_deref(),
+            Some("first\nsecond")
+        );
     }
 
     #[test]

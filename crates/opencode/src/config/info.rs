@@ -368,7 +368,10 @@ pub struct WatcherConfig {
 #[serde(untagged)]
 pub enum PluginSpec {
     Bare(String),
-    WithOptions(String, std::collections::BTreeMap<String, serde_json::Value>),
+    WithOptions(
+        String,
+        std::collections::BTreeMap<String, serde_json::Value>,
+    ),
 }
 
 impl PluginSpec {

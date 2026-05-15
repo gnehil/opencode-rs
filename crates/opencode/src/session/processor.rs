@@ -555,9 +555,8 @@ impl PromptProcessor {
                         match tool.execute(input.clone(), ctx).await {
                             Ok(result) => ToolPartResult::Completed {
                                 output: result.output,
-                                attachments: self.normalize_attachments(
-                                    result.attachments.unwrap_or_default(),
-                                ),
+                                attachments: self
+                                    .normalize_attachments(result.attachments.unwrap_or_default()),
                             },
                             Err(error) => ToolPartResult::Error {
                                 error: error.to_string(),
@@ -1586,14 +1585,17 @@ mod tests {
             .unwrap();
 
         let messages = store.get_messages_with_parts(&session_id).await.unwrap();
-        let user_variant = messages.iter().find_map(|with_parts| match &with_parts.info {
-            Message::User(user) => Some(user.model.variant.clone()),
-            _ => None,
-        });
+        let user_variant = messages
+            .iter()
+            .find_map(|with_parts| match &with_parts.info {
+                Message::User(user) => Some(user.model.variant.clone()),
+                _ => None,
+            });
         assert_eq!(user_variant, Some(Some("high".to_string())));
 
-        let assistant_variant =
-            messages.iter().find_map(|with_parts| match &with_parts.info {
+        let assistant_variant = messages
+            .iter()
+            .find_map(|with_parts| match &with_parts.info {
                 Message::Assistant(asst) => Some(asst.variant.clone()),
                 _ => None,
             });
@@ -2032,10 +2034,12 @@ mod tests {
             .unwrap();
 
         let messages = store.get_messages_with_parts(&session_id).await.unwrap();
-        let user_agent = messages.iter().find_map(|with_parts| match &with_parts.info {
-            Message::User(user) => Some(user.agent.clone()),
-            _ => None,
-        });
+        let user_agent = messages
+            .iter()
+            .find_map(|with_parts| match &with_parts.info {
+                Message::User(user) => Some(user.agent.clone()),
+                _ => None,
+            });
         // The plugin rewriting message.agent should be visible in persisted state.
         assert_eq!(user_agent.as_deref(), Some("rewritten-agent"));
     }
@@ -2138,7 +2142,9 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert!(seen.iter().any(|message| {
             message.role == "tool"
-                && message.content.contains("bridge after: task done: bridge inspect")
+                && message
+                    .content
+                    .contains("bridge after: task done: bridge inspect")
         }));
     }
 }

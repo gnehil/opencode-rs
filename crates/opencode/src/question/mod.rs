@@ -92,13 +92,10 @@ impl QuestionBroker {
             session_id: session_id.to_string(),
             questions,
         };
-        self.inner.lock().await.insert(
-            id.clone(),
-            Pending {
-                request,
-                tx,
-            },
-        );
+        self.inner
+            .lock()
+            .await
+            .insert(id.clone(), Pending { request, tx });
         (id, rx)
     }
 

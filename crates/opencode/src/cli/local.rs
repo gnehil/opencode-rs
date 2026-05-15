@@ -1080,20 +1080,14 @@ pub(crate) async fn handle_mcp(subcommand: args::McpSubcommand, data_dir: PathBu
                 auth_store.load().await?;
                 if let Some(entry) = auth_store.get(&name).await {
                     if entry.tokens.is_some() {
-                        let expired = auth_store
-                            .is_token_expired(&name)
-                            .await
-                            .unwrap_or(false);
+                        let expired = auth_store.is_token_expired(&name).await.unwrap_or(false);
                         if expired {
                             println!(
                                 "MCP server '{}' has expired credentials. Re-authenticating...",
                                 name
                             );
                         } else {
-                            println!(
-                                "MCP server '{}' is already authenticated.",
-                                name
-                            );
+                            println!("MCP server '{}' is already authenticated.", name);
                             println!(
                                 "Run `opencode mcp logout {}` first if you want to re-authenticate.",
                                 name

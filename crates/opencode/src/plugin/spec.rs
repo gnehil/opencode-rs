@@ -101,7 +101,13 @@ pub fn parse_plugin_specifier(spec: &str) -> PackageSpecifier {
     }
 }
 
-const INDEX_FILES: &[&str] = &["index.ts", "index.tsx", "index.js", "index.mjs", "index.cjs"];
+const INDEX_FILES: &[&str] = &[
+    "index.ts",
+    "index.tsx",
+    "index.js",
+    "index.mjs",
+    "index.cjs",
+];
 
 /// Resolve a path-like spec into a concrete `file://` target.
 ///

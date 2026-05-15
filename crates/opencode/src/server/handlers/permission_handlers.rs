@@ -104,11 +104,7 @@ pub async fn respond_session_permission(
         "allow" => crate::permission::Reply::Once,
         other => crate::permission::Reply::from_str(other).map_err(|_| StatusCode::BAD_REQUEST)?,
     };
-    if !state
-        .permission_broker
-        .reply(&permission_id, reply)
-        .await
-    {
+    if !state.permission_broker.reply(&permission_id, reply).await {
         return Err(StatusCode::NOT_FOUND);
     }
     Ok(Json(json!(true)))
@@ -142,11 +138,7 @@ pub async fn reply_question(
     Path(request_id): Path<String>,
     Json(body): Json<QuestionReplyBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    if !state
-        .question_broker
-        .reply(&request_id, body.answers)
-        .await
-    {
+    if !state.question_broker.reply(&request_id, body.answers).await {
         return Err(StatusCode::NOT_FOUND);
     }
     Ok(Json(json!(true)))
@@ -182,8 +174,7 @@ mod tests {
     fn app_state() -> Arc<AppState> {
         let tmp = tempfile::tempdir().unwrap();
         Arc::new(
-            AppState::new(tmp.path().join("data"))
-                .with_workspace_root(tmp.path().to_path_buf()),
+            AppState::new(tmp.path().join("data")).with_workspace_root(tmp.path().to_path_buf()),
         )
     }
 
