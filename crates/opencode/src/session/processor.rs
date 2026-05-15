@@ -907,8 +907,15 @@ impl PromptProcessor {
         };
 
         // External plugins can tune sampling parameters per turn
-        // (TS `chat.params` hook).
+        // (TS `chat.params` hook). The input mirrors the TS contract so
+        // plugins authored against `@opencode-ai/plugin` see the same
+        // shape: provider context, the active user message, and the
+        // active variant alongside session/agent/model identifiers.
         if let Some(plugin_manager) = &self.plugin_manager {
+            let last_user_message = self
+                .last_user_message(session_id)
+                .await
+                .unwrap_or(serde_json::Value::Null);
             let params = plugin_manager
                 .trigger_bridge(
                     "chat.params",
@@ -916,11 +923,16 @@ impl PromptProcessor {
                         "sessionID": session_id.to_string(),
                         "agent": self.agent_name,
                         "model": { "providerID": self.provider.name(), "modelID": model_id },
+                        "provider": { "id": self.provider.name() },
+                        "variant": self.variant,
+                        "message": last_user_message,
                     }),
                     serde_json::json!({
                         "temperature": request.temperature,
                         "topP": request.top_p,
+                        "topK": serde_json::Value::Null,
                         "maxOutputTokens": request.max_tokens,
+                        "options": {},
                     }),
                 )
                 .await;
@@ -933,9 +945,25 @@ impl PromptProcessor {
             if let Some(max_tokens) = params.get("maxOutputTokens").and_then(|v| v.as_u64()) {
                 request.max_tokens = Some(max_tokens);
             }
+            // `topK` and `options` are accepted by the hook for shape parity
+            // even though `CompletionRequest` does not surface them today;
+            // ignoring values does not break plugins that always set them.
         }
 
         Ok(request)
+    }
+
+    /// Fetch the most recently persisted user message (with parts) and shape
+    /// it like the TS `chat.params` hook expects. Returns `None` when the
+    /// session has no user message yet (synthetic build turns, mid-stream
+    /// rebuilds where history was just reset, etc.).
+    async fn last_user_message(&self, session_id: &SessionID) -> Option<serde_json::Value> {
+        let messages = self.store.get_messages_with_parts(session_id).await.ok()?;
+        let with_parts = messages
+            .into_iter()
+            .rev()
+            .find(|with_parts| matches!(with_parts.info, Message::User(_)))?;
+        serde_json::to_value(with_parts).ok()
     }
 
     fn agent_info(&self, name: &str) -> Option<crate::agent::AgentInfo> {
