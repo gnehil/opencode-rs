@@ -153,6 +153,7 @@ impl Provider for OllamaProvider {
             },
             stop_reason: Some("stop".to_string()),
             model: model.clone(),
+            reasoning: None,
         })
     }
 

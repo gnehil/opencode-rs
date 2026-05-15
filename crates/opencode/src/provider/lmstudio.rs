@@ -102,6 +102,7 @@ impl Provider for LMStudioProvider {
             },
             stop_reason: Some("stop".to_string()),
             model: model.clone(),
+            reasoning: None,
         })
     }
 

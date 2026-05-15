@@ -108,6 +108,7 @@ impl Provider for TogetherAIProvider {
                     .to_string(),
             ),
             model: model.clone(),
+            reasoning: None,
         })
     }
 

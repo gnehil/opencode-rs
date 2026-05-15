@@ -223,6 +223,7 @@ impl Provider for AzureProvider {
                 cache_write: None,
             },
             model: self.deployment.clone(),
+            reasoning: None,
         })
     }
 

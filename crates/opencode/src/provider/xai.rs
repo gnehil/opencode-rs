@@ -257,6 +257,7 @@ impl Provider for XAIProvider {
                 cache_write: None,
             },
             model: xai_resp.model,
+            reasoning: None,
         })
     }
 

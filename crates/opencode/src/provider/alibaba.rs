@@ -130,6 +130,7 @@ impl Provider for AlibabaProvider {
             },
             stop_reason: Some("stop".to_string()),
             model,
+            reasoning: None,
         })
     }
 

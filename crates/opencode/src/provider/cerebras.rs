@@ -108,6 +108,7 @@ impl Provider for CerebrasProvider {
                     .to_string(),
             ),
             model: model.clone(),
+            reasoning: None,
         })
     }
 

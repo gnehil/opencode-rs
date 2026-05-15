@@ -134,6 +134,7 @@ impl Provider for GitHubCopilotProvider {
                     .to_string(),
             ),
             model: model.clone(),
+            reasoning: None,
         })
     }
 

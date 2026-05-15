@@ -118,6 +118,7 @@ impl Provider for VertexProvider {
                     .to_string(),
             ),
             model: model.clone(),
+            reasoning: None,
         })
     }
 

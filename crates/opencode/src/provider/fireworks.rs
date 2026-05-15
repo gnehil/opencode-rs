@@ -110,6 +110,7 @@ impl Provider for FireworksProvider {
                     .to_string(),
             ),
             model: model.clone(),
+            reasoning: None,
         })
     }
 

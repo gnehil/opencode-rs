@@ -27,6 +27,10 @@ pub enum ProcessEvent {
     TextDelta(String),
     ToolStart(String, serde_json::Value),
     ToolComplete(String, serde_json::Value),
+    /// Aggregated reasoning / "thinking" output from the provider, when the
+    /// provider returns it as a separate channel (e.g. Claude extended
+    /// thinking). Emitted after the assistant turn completes.
+    Reasoning(String),
     Done(String),
     Error(String),
 }
@@ -258,6 +262,11 @@ impl PromptProcessor {
             accumulated_content.push_str(&response.content);
             if !response.content.is_empty() {
                 events.push(ProcessEvent::TextDelta(response.content.clone()));
+            }
+            if let Some(reasoning) = response.reasoning.as_deref() {
+                if !reasoning.is_empty() {
+                    events.push(ProcessEvent::Reasoning(reasoning.to_string()));
+                }
             }
 
             // Persist the assistant turn before running tools so a crash
@@ -1108,6 +1117,7 @@ mod tests {
                     cache_write: None,
                 },
                 model: "test-model".to_string(),
+                reasoning: None,
             })
         }
 

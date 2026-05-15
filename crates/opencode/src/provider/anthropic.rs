@@ -120,11 +120,37 @@ struct AnthropicCompleteResponse {
     usage: AnthropicUsage,
 }
 
+/// Join the `thinking` payloads from a Claude response's content blocks into
+/// a single reasoning string. Returns `None` when no thinking blocks were
+/// present so callers can preserve the "no reasoning channel" signal.
+fn aggregate_reasoning(blocks: &[AnthropicResponseBlock]) -> Option<String> {
+    let mut chunks = blocks.iter().filter_map(|block| match block {
+        AnthropicResponseBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+        _ => None,
+    });
+    let first = chunks.next()?;
+    let mut out = first.to_string();
+    for chunk in chunks {
+        out.push('\n');
+        out.push_str(chunk);
+    }
+    Some(out)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicResponseBlock {
     Text {
         text: String,
+    },
+    /// Claude extended thinking blocks. The `signature` field is opaque
+    /// metadata used when echoing thinking back to the model on subsequent
+    /// turns; the user-facing `thinking` text is the part we surface.
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        #[allow(dead_code)]
+        signature: Option<String>,
     },
     ToolUse {
         id: String,
@@ -316,6 +342,8 @@ impl Provider for AnthropicProvider {
             .collect::<Vec<_>>()
             .join("\n");
 
+        let reasoning = aggregate_reasoning(&body.content);
+
         let tool_calls: Vec<ToolCall> = body
             .content
             .iter()
@@ -348,6 +376,7 @@ impl Provider for AnthropicProvider {
                 },
             },
             model: body.model,
+            reasoning,
         })
     }
 
@@ -911,5 +940,44 @@ mod tests {
             }
             _ => panic!("expected URL image"),
         }
+    }
+
+    #[test]
+    fn thinking_blocks_deserialize_from_anthropic_response() {
+        let payload = serde_json::json!([
+            { "type": "thinking", "thinking": "stepping through", "signature": "sig-1" },
+            { "type": "text", "text": "answer" }
+        ]);
+        let blocks: Vec<AnthropicResponseBlock> = serde_json::from_value(payload).unwrap();
+        assert!(matches!(
+            &blocks[0],
+            AnthropicResponseBlock::Thinking { thinking, .. } if thinking == "stepping through"
+        ));
+    }
+
+    #[test]
+    fn aggregate_reasoning_joins_thinking_blocks() {
+        let blocks = vec![
+            AnthropicResponseBlock::Thinking {
+                thinking: "first".to_string(),
+                signature: None,
+            },
+            AnthropicResponseBlock::Text {
+                text: "user answer".to_string(),
+            },
+            AnthropicResponseBlock::Thinking {
+                thinking: "second".to_string(),
+                signature: Some("sig".to_string()),
+            },
+        ];
+        assert_eq!(aggregate_reasoning(&blocks).as_deref(), Some("first\nsecond"));
+    }
+
+    #[test]
+    fn aggregate_reasoning_is_none_without_thinking_blocks() {
+        let blocks = vec![AnthropicResponseBlock::Text {
+            text: "hi".to_string(),
+        }];
+        assert!(aggregate_reasoning(&blocks).is_none());
     }
 }

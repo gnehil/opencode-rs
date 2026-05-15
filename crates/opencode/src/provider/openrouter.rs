@@ -141,6 +141,7 @@ impl Provider for OpenRouterProvider {
                     .to_string(),
             ),
             model: model.clone(),
+            reasoning: None,
         })
     }
 

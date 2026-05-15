@@ -140,6 +140,7 @@ impl Provider for DeepSeekProvider {
                     .to_string(),
             ),
             model: model.clone(),
+            reasoning: None,
         })
     }
 

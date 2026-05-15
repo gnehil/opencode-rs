@@ -24,6 +24,10 @@ pub struct CompletionResponse {
     pub stop_reason: Option<String>,
     pub usage: TokenUsage,
     pub model: String,
+    /// Aggregated reasoning / "thinking" text from the response, when the
+    /// provider returns a separate reasoning channel (e.g. Claude extended
+    /// thinking). `None` for providers without a reasoning channel.
+    pub reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

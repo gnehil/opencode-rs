@@ -109,6 +109,7 @@ impl Provider for PerplexityProvider {
                     .to_string(),
             ),
             model: model.clone(),
+            reasoning: None,
         })
     }
 

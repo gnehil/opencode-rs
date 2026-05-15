@@ -740,6 +740,7 @@ fn parse_anthropic_response(data: serde_json::Value, model: &str) -> CompletionR
         },
         stop_reason: data["stop_reason"].as_str().map(String::from),
         model: model.to_string(),
+        reasoning: None,
     }
 }
 

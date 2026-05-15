@@ -141,6 +141,7 @@ impl Provider for MistralProvider {
                     .to_string(),
             ),
             model: model.clone(),
+            reasoning: None,
         })
     }
 

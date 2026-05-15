@@ -358,6 +358,7 @@ impl Provider for OpenAIProvider {
                 cache_write: None,
             },
             model: body.model,
+            reasoning: None,
         })
     }
 

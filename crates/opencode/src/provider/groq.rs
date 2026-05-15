@@ -317,6 +317,7 @@ impl Provider for GroqProvider {
                 cache_write: None,
             },
             model: groq_resp.model,
+            reasoning: None,
         })
     }
 

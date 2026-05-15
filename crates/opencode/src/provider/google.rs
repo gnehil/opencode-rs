@@ -331,6 +331,7 @@ impl Provider for GoogleProvider {
             ),
             usage,
             model,
+            reasoning: None,
         })
     }
 

@@ -612,6 +612,15 @@ fn run_event_json(
     match event {
         crate::session::processor::ProcessEvent::TextDelta(_)
         | crate::session::processor::ProcessEvent::ToolStart(_, _) => None,
+        crate::session::processor::ProcessEvent::Reasoning(text) => Some(serde_json::json!({
+            "type": "reasoning",
+            "timestamp": timestamp,
+            "sessionID": sid,
+            "part": {
+                "type": "reasoning",
+                "text": text,
+            },
+        })),
         crate::session::processor::ProcessEvent::ToolComplete(tool, output) => Some(
             serde_json::json!({
                 "type": "tool_use",
@@ -1792,6 +1801,20 @@ mod tests {
         assert_eq!(event["type"], "text");
         assert_eq!(event["part"]["type"], "text");
         assert_eq!(event["part"]["text"], "final answer");
+    }
+
+    #[test]
+    fn run_json_emits_reasoning_part() {
+        use crate::session::processor::ProcessEvent;
+        let session_id = crate::id::SessionID::new();
+        let event = run_event_json(
+            &session_id,
+            &ProcessEvent::Reasoning("thinking it through".to_string()),
+        )
+        .unwrap();
+        assert_eq!(event["type"], "reasoning");
+        assert_eq!(event["part"]["type"], "reasoning");
+        assert_eq!(event["part"]["text"], "thinking it through");
     }
 
     #[test]
