@@ -141,6 +141,36 @@ struct GoogleResponseContent {
 struct GoogleResponsePart {
     text: Option<String>,
     function_call: Option<GoogleFunctionCall>,
+    /// Gemini thinking models flag reasoning parts with `thought: true`.
+    /// The accompanying `text` is the chain-of-thought rather than
+    /// user-visible content.
+    #[serde(default)]
+    thought: bool,
+}
+
+/// Walk Gemini response parts and split their text payloads into a
+/// user-visible answer and an optional reasoning channel based on the
+/// `thought: true` flag. Multiple parts of the same kind are joined with
+/// newlines; reasoning is `None` when no thinking parts were present.
+fn split_text_parts(parts: &[GoogleResponsePart]) -> (String, Option<String>) {
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    for part in parts {
+        let Some(text) = part.text.as_deref() else {
+            continue;
+        };
+        let target = if part.thought {
+            &mut reasoning
+        } else {
+            &mut content
+        };
+        if !target.is_empty() {
+            target.push('\n');
+        }
+        target.push_str(text);
+    }
+    let reasoning = (!reasoning.is_empty()).then_some(reasoning);
+    (content, reasoning)
 }
 
 #[derive(Deserialize)]
@@ -285,10 +315,14 @@ impl Provider for GoogleProvider {
         let google_resp: GoogleResponse = response.json().await?;
 
         let candidate = google_resp.candidates.first();
-        let content = candidate
-            .and_then(|c| c.content.parts.first())
-            .and_then(|p| p.text.clone())
-            .unwrap_or_default();
+        // Gemini thinking models interleave `thought: true` parts with the
+        // user-visible answer. Split text parts on the `thought` flag so
+        // chain-of-thought lands in the reasoning channel and the content
+        // string mirrors only what the model wants the user to see.
+        let (content, reasoning) = match candidate {
+            Some(c) => split_text_parts(&c.content.parts),
+            None => (String::new(), None),
+        };
 
         let tool_calls: Vec<ToolCall> = candidate
             .and_then(|c| {
@@ -331,7 +365,7 @@ impl Provider for GoogleProvider {
             ),
             usage,
             model,
-            reasoning: None,
+            reasoning,
         })
     }
 
@@ -498,5 +532,57 @@ impl GoogleProvider {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_part(text: &str, thought: bool) -> GoogleResponsePart {
+        GoogleResponsePart {
+            text: Some(text.to_string()),
+            function_call: None,
+            thought,
+        }
+    }
+
+    #[test]
+    fn split_routes_thought_text_to_reasoning_channel() {
+        let parts = vec![
+            text_part("thinking through", true),
+            text_part("here is the answer", false),
+        ];
+        let (content, reasoning) = split_text_parts(&parts);
+        assert_eq!(content, "here is the answer");
+        assert_eq!(reasoning.as_deref(), Some("thinking through"));
+    }
+
+    #[test]
+    fn split_joins_multiple_parts_with_newlines() {
+        let parts = vec![
+            text_part("step one", true),
+            text_part("step two", true),
+            text_part("answer a", false),
+            text_part("answer b", false),
+        ];
+        let (content, reasoning) = split_text_parts(&parts);
+        assert_eq!(content, "answer a\nanswer b");
+        assert_eq!(reasoning.as_deref(), Some("step one\nstep two"));
+    }
+
+    #[test]
+    fn split_returns_none_when_no_thought_parts_present() {
+        let parts = vec![text_part("just an answer", false)];
+        let (content, reasoning) = split_text_parts(&parts);
+        assert_eq!(content, "just an answer");
+        assert!(reasoning.is_none());
+    }
+
+    #[test]
+    fn thought_flag_defaults_to_false_when_absent() {
+        let raw = serde_json::json!({ "text": "answer" });
+        let part: GoogleResponsePart = serde_json::from_value(raw).unwrap();
+        assert!(!part.thought);
     }
 }
