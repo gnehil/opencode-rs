@@ -39,4 +39,9 @@ pub struct CompletionRequest {
     pub max_tokens: Option<u64>,
     pub top_p: Option<f64>,
     pub stop_sequences: Option<Vec<String>>,
+    /// Extra HTTP headers to fold into the provider call. Populated by the
+    /// `chat.headers` plugin hook; providers should layer these on top of
+    /// their own required headers without overriding auth/content headers.
+    #[allow(dead_code)]
+    pub extra_headers: std::collections::HashMap<String, String>,
 }

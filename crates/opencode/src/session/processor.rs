@@ -904,6 +904,7 @@ impl PromptProcessor {
             temperature: None,
             top_p: None,
             stop_sequences: None,
+            extra_headers: std::collections::HashMap::new(),
         };
 
         // External plugins can tune sampling parameters per turn
@@ -948,6 +949,32 @@ impl PromptProcessor {
             // `topK` and `options` are accepted by the hook for shape parity
             // even though `CompletionRequest` does not surface them today;
             // ignoring values does not break plugins that always set them.
+
+            // `chat.headers` lets plugins inject auth/beta headers per turn.
+            let headers_out = plugin_manager
+                .trigger_bridge(
+                    "chat.headers",
+                    serde_json::json!({
+                        "sessionID": session_id.to_string(),
+                        "agent": self.agent_name,
+                        "model": { "providerID": self.provider.name(), "modelID": model_id },
+                        "provider": { "id": self.provider.name() },
+                        "variant": self.variant,
+                    }),
+                    serde_json::json!({ "headers": {} }),
+                )
+                .await;
+            if let Some(map) = headers_out
+                .get("headers")
+                .and_then(|h| h.as_object())
+                .cloned()
+            {
+                for (k, v) in map {
+                    if let Some(text) = v.as_str() {
+                        request.extra_headers.insert(k, text.to_string());
+                    }
+                }
+            }
         }
 
         Ok(request)

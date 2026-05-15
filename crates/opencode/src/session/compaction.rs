@@ -59,6 +59,7 @@ pub async fn compact_session(
         temperature: Some(0.0),
         top_p: None,
         stop_sequences: None,
+        extra_headers: std::collections::HashMap::new(),
     };
 
     let response = provider

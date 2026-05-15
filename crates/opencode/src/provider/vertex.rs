@@ -378,6 +378,7 @@ mod tests {
             temperature: None,
             top_p: None,
             stop_sequences: None,
+            extra_headers: std::collections::HashMap::new(),
         };
         let body = build_gemini_body(&req, convert_messages_gemini(&req.messages));
         assert_eq!(

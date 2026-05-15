@@ -107,6 +107,48 @@ pub fn openai_compat_message_json(msg: &CompletionMessage) -> serde_json::Value 
     serde_json::Value::Object(obj)
 }
 
+/// Fold plugin-supplied `extra_headers` into an outgoing reqwest builder.
+/// Auth/content headers added by the provider itself stay untouched — these
+/// extras are layered on top, so a plugin that tries to overwrite something
+/// like `Authorization` only wins if the provider has not set it yet.
+pub fn apply_extra_headers(
+    mut builder: reqwest::RequestBuilder,
+    headers: &std::collections::HashMap<String, String>,
+) -> reqwest::RequestBuilder {
+    for (key, value) in headers {
+        if key.trim().is_empty() {
+            continue;
+        }
+        builder = builder.header(key, value);
+    }
+    builder
+}
+
+#[cfg(test)]
+mod extra_headers_tests {
+    use super::*;
+
+    #[test]
+    fn apply_extra_headers_layers_provided_keys() {
+        let client = reqwest::Client::new();
+        let headers = std::collections::HashMap::from([
+            ("X-Beta".to_string(), "thinking-2025".to_string()),
+            ("X-Empty".to_string(), "".to_string()),
+        ]);
+        let req = apply_extra_headers(client.post("http://localhost/"), &headers)
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.headers().get("x-beta").map(|v| v.to_str().unwrap()),
+            Some("thinking-2025")
+        );
+        assert_eq!(
+            req.headers().get("x-empty").map(|v| v.to_str().unwrap()),
+            Some("")
+        );
+    }
+}
+
 /// Extract the reasoning / "thinking" text from an OpenAI-compatible chat
 /// completions JSON response, when the provider exposes one. Different
 /// providers spell this field differently — DeepSeek uses

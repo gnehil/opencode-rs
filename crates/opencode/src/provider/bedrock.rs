@@ -874,6 +874,7 @@ mod tests {
             temperature: Some(0.5),
             top_p: None,
             stop_sequences: None,
+            extra_headers: std::collections::HashMap::new(),
         };
         let body = build_anthropic_body(&request);
         assert_eq!(body["anthropic_version"], "bedrock-2023-05-31");

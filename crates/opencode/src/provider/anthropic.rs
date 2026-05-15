@@ -313,13 +313,15 @@ impl Provider for AnthropicProvider {
 
     async fn complete(&self, request: CompletionRequest) -> ProviderResult<CompletionResponse> {
         let anthropic_req = self.build_request(&request, false);
+        let extras = request.extra_headers.clone();
 
-        let response = self
+        let builder = self
             .client
             .post(API_URL)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        let response = crate::provider::apply_extra_headers(builder, &extras)
             .json(&anthropic_req)
             .send()
             .await?;
@@ -796,6 +798,7 @@ mod tests {
             temperature: None,
             top_p: None,
             stop_sequences: None,
+            extra_headers: std::collections::HashMap::new(),
         }
     }
 

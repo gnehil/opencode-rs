@@ -979,6 +979,7 @@ impl ACPAgent {
                 temperature: None,
                 top_p: None,
                 stop_sequences: None,
+                extra_headers: std::collections::HashMap::new(),
             };
 
             let response = tokio::select! {
