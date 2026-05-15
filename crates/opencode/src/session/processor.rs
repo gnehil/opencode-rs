@@ -31,6 +31,13 @@ pub enum ProcessEvent {
     /// provider returns it as a separate channel (e.g. Claude extended
     /// thinking). Emitted after the assistant turn completes.
     Reasoning(String),
+    /// Boundary marker fired at the beginning of each provider turn.
+    StepStart,
+    /// Boundary marker fired at the end of each provider turn, carrying
+    /// the provider's stop reason when known.
+    StepFinish {
+        stop_reason: Option<String>,
+    },
     Done(String),
     Error(String),
 }
@@ -233,6 +240,8 @@ impl PromptProcessor {
             .unwrap_or_default();
 
         for _ in 0..self.max_iterations {
+            events.push(ProcessEvent::StepStart);
+
             // Rebuild the full conversation from persisted state every
             // iteration so each turn sees the canonical view (the model's
             // own prior tool_use calls + our tool_result responses).
@@ -253,6 +262,9 @@ impl PromptProcessor {
             {
                 Ok(r) => r,
                 Err(e) => {
+                    events.push(ProcessEvent::StepFinish {
+                        stop_reason: Some("error".to_string()),
+                    });
                     events.push(ProcessEvent::Error(e.to_string()));
                     break;
                 }
@@ -322,6 +334,9 @@ impl PromptProcessor {
             ));
 
             if response.tool_calls.is_empty() {
+                events.push(ProcessEvent::StepFinish {
+                    stop_reason: response.stop_reason.clone(),
+                });
                 events.push(ProcessEvent::Done(accumulated_content));
                 break;
             }
@@ -335,6 +350,9 @@ impl PromptProcessor {
                 &mut events,
             )
             .await?;
+            events.push(ProcessEvent::StepFinish {
+                stop_reason: response.stop_reason.clone(),
+            });
 
             // Auto-compact before the next iteration if cumulative input
             // is approaching the model's context ceiling.
@@ -1336,6 +1354,20 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, super::ProcessEvent::Done(text) if text == "summary")));
+
+        // Every iteration of the provider loop emits a matched step_start +
+        // step_finish pair, in order, before the terminal Done.
+        let starts = events
+            .iter()
+            .filter(|e| matches!(e, super::ProcessEvent::StepStart))
+            .count();
+        let finishes = events
+            .iter()
+            .filter(|e| matches!(e, super::ProcessEvent::StepFinish { .. }))
+            .count();
+        assert!(starts > 0, "expected at least one StepStart event");
+        assert_eq!(starts, finishes, "step start/finish events must pair up");
+
         let messages = store.get_messages_with_parts(&session_id).await.unwrap();
         assert!(messages.iter().any(|message| message
             .parts

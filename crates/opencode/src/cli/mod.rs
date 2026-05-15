@@ -621,6 +621,31 @@ fn run_event_json(
                 "text": text,
             },
         })),
+        crate::session::processor::ProcessEvent::StepStart => Some(serde_json::json!({
+            "type": "step_start",
+            "timestamp": timestamp,
+            "sessionID": sid,
+            "part": { "type": "step-start" },
+        })),
+        crate::session::processor::ProcessEvent::StepFinish { stop_reason } => {
+            let mut part = serde_json::Map::new();
+            part.insert(
+                "type".to_string(),
+                serde_json::Value::String("step-finish".to_string()),
+            );
+            if let Some(reason) = stop_reason {
+                part.insert(
+                    "stopReason".to_string(),
+                    serde_json::Value::String(reason.clone()),
+                );
+            }
+            Some(serde_json::json!({
+                "type": "step_finish",
+                "timestamp": timestamp,
+                "sessionID": sid,
+                "part": part,
+            }))
+        }
         crate::session::processor::ProcessEvent::ToolComplete(tool, output) => Some(
             serde_json::json!({
                 "type": "tool_use",
@@ -1815,6 +1840,31 @@ mod tests {
         assert_eq!(event["type"], "reasoning");
         assert_eq!(event["part"]["type"], "reasoning");
         assert_eq!(event["part"]["text"], "thinking it through");
+    }
+
+    #[test]
+    fn run_json_emits_step_boundaries() {
+        use crate::session::processor::ProcessEvent;
+        let session_id = crate::id::SessionID::new();
+        let start = run_event_json(&session_id, &ProcessEvent::StepStart).unwrap();
+        assert_eq!(start["type"], "step_start");
+        assert_eq!(start["part"]["type"], "step-start");
+
+        let finish = run_event_json(
+            &session_id,
+            &ProcessEvent::StepFinish {
+                stop_reason: Some("end_turn".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(finish["type"], "step_finish");
+        assert_eq!(finish["part"]["type"], "step-finish");
+        assert_eq!(finish["part"]["stopReason"], "end_turn");
+
+        let finish_unknown =
+            run_event_json(&session_id, &ProcessEvent::StepFinish { stop_reason: None })
+                .unwrap();
+        assert!(finish_unknown["part"].get("stopReason").is_none());
     }
 
     #[test]
