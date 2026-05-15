@@ -192,6 +192,31 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
         std::process::exit(1);
     }
 
+    // `--attach <url>` routes the run through a remote opencode server
+    // via HTTP instead of the local provider/store. Falls back to a clear
+    // error on conflicts the local mode never sees.
+    if args.attach.is_some() {
+        if args.interactive {
+            eprintln!("--interactive cannot be combined with --attach");
+            std::process::exit(1);
+        }
+        let piped = read_piped_stdin().unwrap_or_else(|e| {
+            eprintln!("Failed to read stdin: {}", e);
+            std::process::exit(1);
+        });
+        let mut message = local_process::join_run_message(&args.message);
+        message = local_process::resolve_run_input(&message, piped.as_deref()).unwrap_or_default();
+        if message.trim().is_empty() && args.command.is_none() {
+            eprintln!("You must provide a message or a command");
+            std::process::exit(1);
+        }
+        if let Err(e) = run_attach(&args, message).await {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let piped = read_piped_stdin().unwrap_or_else(|e| {
         eprintln!("Failed to read stdin: {}", e);
         std::process::exit(1);
@@ -1646,6 +1671,298 @@ async fn handle_acp(args: args::AcpArgs, data_dir: PathBuf) {
     }
 }
 
+/// Build the `Authorization: Basic` header for an opencode remote server.
+/// Mirrors TS `ServerAuth.headers`: prefers explicit `--password`/`--username`,
+/// falls back to `OPENCODE_SERVER_PASSWORD`/`OPENCODE_SERVER_USERNAME` env,
+/// with `opencode` as the default username. Returns `None` when no password
+/// is configured so unsecured local servers still work.
+fn attach_basic_auth_header(
+    password: Option<&str>,
+    username: Option<&str>,
+) -> Option<String> {
+    use base64::Engine;
+    let password = password
+        .map(str::to_string)
+        .or_else(|| std::env::var("OPENCODE_SERVER_PASSWORD").ok())
+        .filter(|p| !p.is_empty())?;
+    let username = username
+        .map(str::to_string)
+        .or_else(|| std::env::var("OPENCODE_SERVER_USERNAME").ok())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "opencode".to_string());
+    let token = base64::engine::general_purpose::STANDARD
+        .encode(format!("{}:{}", username, password));
+    Some(format!("Basic {}", token))
+}
+
+/// Drive a single prompt through a remote opencode server. Speaks the same
+/// HTTP API our local server exposes (`/session`, `/session/:id/message`,
+/// `/event`), auto-handles `permission.asked` events, and prints events to
+/// stdout in the format requested via `--format`.
+async fn run_attach(args: &args::RunArgs, message: String) -> anyhow::Result<()> {
+    let base_url = args
+        .attach
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--attach url is required"))?
+        .trim_end_matches('/')
+        .to_string();
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(auth) = attach_basic_auth_header(args.password.as_deref(), args.username.as_deref()) {
+        let value = reqwest::header::HeaderValue::from_str(&auth)
+            .map_err(|e| anyhow::anyhow!("invalid auth header: {e}"))?;
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+    }
+    let client = reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to build attach client: {e}"))?;
+
+    // Either continue an explicit session, the most recent one, or create
+    // a fresh remote session.
+    let session_id = resolve_attach_session(&client, &base_url, args).await?;
+    eprintln!("Attached to {} session={}", base_url, session_id);
+
+    // Subscribe to events before sending the prompt so we don't miss the
+    // first delta. The subscription is consumed on the same task.
+    let event_url = format!("{}/event", base_url);
+    let event_stream = client
+        .get(&event_url)
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to subscribe to /event: {e}"))?;
+    if !event_stream.status().is_success() {
+        anyhow::bail!(
+            "remote /event subscription failed with status {}",
+            event_stream.status()
+        );
+    }
+
+    send_attach_prompt(&client, &base_url, &session_id, args, &message).await?;
+
+    relay_attach_events(
+        event_stream,
+        &client,
+        &base_url,
+        &session_id,
+        args,
+    )
+    .await
+}
+
+async fn resolve_attach_session(
+    client: &reqwest::Client,
+    base_url: &str,
+    args: &args::RunArgs,
+) -> anyhow::Result<String> {
+    if let Some(id) = args.session.as_deref().filter(|s| !s.is_empty()) {
+        return Ok(id.to_string());
+    }
+    if args.r#continue {
+        let resp = client
+            .get(format!("{}/session", base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
+        if let Some(first) = resp.as_array().and_then(|arr| arr.first()) {
+            if let Some(id) = first.get("id").and_then(|v| v.as_str()) {
+                return Ok(id.to_string());
+            }
+        }
+        anyhow::bail!("--continue requested but remote returned no sessions");
+    }
+    let body = serde_json::json!({
+        "title": args.title.clone().unwrap_or_else(|| "Attach session".to_string()),
+    });
+    let created = client
+        .post(format!("{}/session", base_url))
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?;
+    created
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("remote /session response had no id"))
+}
+
+async fn send_attach_prompt(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_id: &str,
+    args: &args::RunArgs,
+    message: &str,
+) -> anyhow::Result<()> {
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "parts".to_string(),
+        serde_json::json!([{ "type": "text", "text": message }]),
+    );
+    if let Some(model) = args.model.as_deref().filter(|m| !m.is_empty()) {
+        if let Some((provider, model_id)) = model.split_once('/') {
+            body.insert(
+                "model".to_string(),
+                serde_json::json!({ "providerID": provider, "modelID": model_id }),
+            );
+        }
+    }
+    if let Some(agent) = args.agent.as_deref().filter(|a| !a.is_empty()) {
+        body.insert(
+            "agent".to_string(),
+            serde_json::Value::String(agent.to_string()),
+        );
+    }
+    if let Some(variant) = args.variant.as_deref().filter(|v| !v.is_empty()) {
+        body.insert(
+            "variant".to_string(),
+            serde_json::Value::String(variant.to_string()),
+        );
+    }
+    let resp = client
+        .post(format!("{}/session/{}/message", base_url, session_id))
+        .json(&serde_json::Value::Object(body))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("remote prompt failed ({status}): {text}");
+    }
+    Ok(())
+}
+
+async fn relay_attach_events(
+    event_stream: reqwest::Response,
+    client: &reqwest::Client,
+    base_url: &str,
+    session_id: &str,
+    args: &args::RunArgs,
+) -> anyhow::Result<()> {
+    use futures::StreamExt;
+    let json_output = matches!(args.format, args::RunFormat::Json);
+    let mut bytes = event_stream.bytes_stream();
+    let mut buffer = String::new();
+
+    while let Some(chunk) = bytes.next().await {
+        let chunk = chunk.map_err(|e| anyhow::anyhow!("event stream broke: {e}"))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(idx) = buffer.find("\n\n") {
+            let event_block = buffer[..idx].to_string();
+            buffer.drain(..idx + 2);
+            if let Some(payload) = sse_data_payload(&event_block) {
+                let value: serde_json::Value = match serde_json::from_str(&payload) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                handle_attach_event(client, base_url, session_id, args, &value, json_output)
+                    .await?;
+                if attach_event_is_terminal(&value, session_id) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sse_data_payload(block: &str) -> Option<String> {
+    let mut data = String::new();
+    for line in block.lines() {
+        if let Some(rest) = line.strip_prefix("data: ") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(rest);
+        }
+    }
+    (!data.is_empty()).then_some(data)
+}
+
+fn attach_event_type(value: &serde_json::Value) -> Option<&str> {
+    value.get("type").and_then(|t| t.as_str())
+}
+
+fn attach_event_is_terminal(value: &serde_json::Value, session_id: &str) -> bool {
+    // The TS server emits `session.status` with `type: idle` when the
+    // session is done processing; we treat that as our termination signal.
+    if attach_event_type(value) != Some("session.status") {
+        return false;
+    }
+    let props = value.get("properties").unwrap_or(value);
+    if props.get("sessionID").and_then(|v| v.as_str()) != Some(session_id) {
+        return false;
+    }
+    matches!(
+        props
+            .get("status")
+            .and_then(|s| s.get("type"))
+            .and_then(|v| v.as_str()),
+        Some("idle")
+    )
+}
+
+async fn handle_attach_event(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_id: &str,
+    args: &args::RunArgs,
+    value: &serde_json::Value,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    let event_type = attach_event_type(value).unwrap_or("");
+    if event_type == "permission.asked" {
+        let props = value.get("properties").unwrap_or(value);
+        let event_session = props.get("sessionID").and_then(|v| v.as_str());
+        if event_session != Some(session_id) {
+            return Ok(());
+        }
+        let Some(permission_id) = props.get("id").and_then(|v| v.as_str()) else {
+            return Ok(());
+        };
+        let response = if args.dangerously_skip_permissions {
+            "once"
+        } else {
+            "reject"
+        };
+        let _ = client
+            .post(format!(
+                "{}/session/{}/permissions/{}",
+                base_url, session_id, permission_id
+            ))
+            .json(&serde_json::json!({ "response": response }))
+            .send()
+            .await;
+        return Ok(());
+    }
+
+    if json_output {
+        println!("{}", serde_json::to_string(value).unwrap_or_default());
+        return Ok(());
+    }
+
+    // Default mode: print finalized assistant text parts; other events are
+    // suppressed to match `opencode run` non-JSON output.
+    if event_type == "message.part.updated" {
+        let props = value.get("properties").unwrap_or(value);
+        let part = props.get("part").unwrap_or(&serde_json::Value::Null);
+        if part.get("type").and_then(|v| v.as_str()) == Some("text") {
+            if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                let text = text.trim();
+                if !text.is_empty() {
+                    println!("{}", text);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn run() {
     println!("Use async runtime. Call run_async() instead.");
 }
@@ -2000,5 +2317,62 @@ mod tests {
             provider_api_key_from_credentials("openai", Some(&credentials)),
             None
         );
+    }
+
+    #[test]
+    fn attach_basic_auth_returns_none_without_password() {
+        // Save and clear any inherited env so the test result is hermetic.
+        let prev_pw = std::env::var("OPENCODE_SERVER_PASSWORD").ok();
+        let prev_user = std::env::var("OPENCODE_SERVER_USERNAME").ok();
+        std::env::remove_var("OPENCODE_SERVER_PASSWORD");
+        std::env::remove_var("OPENCODE_SERVER_USERNAME");
+        assert!(attach_basic_auth_header(None, None).is_none());
+        if let Some(v) = prev_pw {
+            std::env::set_var("OPENCODE_SERVER_PASSWORD", v);
+        }
+        if let Some(v) = prev_user {
+            std::env::set_var("OPENCODE_SERVER_USERNAME", v);
+        }
+    }
+
+    #[test]
+    fn attach_basic_auth_uses_default_username_when_only_password_present() {
+        let header = attach_basic_auth_header(Some("hunter2"), None).unwrap();
+        // base64("opencode:hunter2") == "b3BlbmNvZGU6aHVudGVyMg=="
+        assert_eq!(header, "Basic b3BlbmNvZGU6aHVudGVyMg==");
+    }
+
+    #[test]
+    fn sse_data_payload_concatenates_multi_line_data_fields() {
+        let block = "event: message\ndata: hello\ndata: world\nid: 1";
+        assert_eq!(sse_data_payload(block).as_deref(), Some("hello\nworld"));
+    }
+
+    #[test]
+    fn sse_data_payload_returns_none_for_event_without_data() {
+        assert!(sse_data_payload("event: ping").is_none());
+    }
+
+    #[test]
+    fn attach_event_is_terminal_matches_idle_session_status() {
+        let value = serde_json::json!({
+            "type": "session.status",
+            "properties": {
+                "sessionID": "ses_1",
+                "status": { "type": "idle" }
+            }
+        });
+        assert!(attach_event_is_terminal(&value, "ses_1"));
+        // Wrong session id should not terminate.
+        assert!(!attach_event_is_terminal(&value, "ses_2"));
+        // Non-idle status should not terminate.
+        let busy = serde_json::json!({
+            "type": "session.status",
+            "properties": {
+                "sessionID": "ses_1",
+                "status": { "type": "busy" }
+            }
+        });
+        assert!(!attach_event_is_terminal(&busy, "ses_1"));
     }
 }
