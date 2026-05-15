@@ -571,7 +571,9 @@ fn emit_run_events(
 ) -> anyhow::Result<()> {
     if matches!(format, args::RunFormat::Json) {
         for event in events {
-            println!("{}", run_event_json(session_id, event));
+            if let Some(value) = run_event_json(session_id, event) {
+                println!("{}", value);
+            }
         }
     } else {
         let mut response = None;
@@ -595,44 +597,54 @@ fn emit_run_events(
     Ok(())
 }
 
+/// Shape a [`ProcessEvent`](crate::session::processor::ProcessEvent) for the
+/// `run --format json` stream. The schema matches the TypeScript run command:
+/// `tool_use` for completed tool calls, `text` for the final assistant text,
+/// `error` for failures wrapped in a NamedError-style payload. Per-delta and
+/// `tool_start` events are intentionally suppressed because the TS stream
+/// drives off finalized parts, not deltas.
 fn run_event_json(
     session_id: &crate::id::SessionID,
     event: &crate::session::processor::ProcessEvent,
-) -> serde_json::Value {
+) -> Option<serde_json::Value> {
     let timestamp = chrono::Utc::now().timestamp_millis();
+    let sid = session_id.to_string();
     match event {
-        crate::session::processor::ProcessEvent::TextDelta(delta) => serde_json::json!({
-            "type": "text_delta",
+        crate::session::processor::ProcessEvent::TextDelta(_)
+        | crate::session::processor::ProcessEvent::ToolStart(_, _) => None,
+        crate::session::processor::ProcessEvent::ToolComplete(tool, output) => Some(
+            serde_json::json!({
+                "type": "tool_use",
+                "timestamp": timestamp,
+                "sessionID": sid,
+                "part": {
+                    "type": "tool",
+                    "tool": tool,
+                    "state": {
+                        "status": "completed",
+                        "output": output,
+                    },
+                },
+            }),
+        ),
+        crate::session::processor::ProcessEvent::Done(text) => Some(serde_json::json!({
+            "type": "text",
             "timestamp": timestamp,
-            "sessionID": session_id.to_string(),
-            "delta": delta,
-        }),
-        crate::session::processor::ProcessEvent::ToolStart(tool, input) => serde_json::json!({
-            "type": "tool_start",
-            "timestamp": timestamp,
-            "sessionID": session_id.to_string(),
-            "tool": tool,
-            "input": input,
-        }),
-        crate::session::processor::ProcessEvent::ToolComplete(tool, output) => serde_json::json!({
-            "type": "tool_complete",
-            "timestamp": timestamp,
-            "sessionID": session_id.to_string(),
-            "tool": tool,
-            "output": output,
-        }),
-        crate::session::processor::ProcessEvent::Done(text) => serde_json::json!({
-            "type": "done",
-            "timestamp": timestamp,
-            "sessionID": session_id.to_string(),
-            "text": text,
-        }),
-        crate::session::processor::ProcessEvent::Error(error) => serde_json::json!({
+            "sessionID": sid,
+            "part": {
+                "type": "text",
+                "text": text,
+            },
+        })),
+        crate::session::processor::ProcessEvent::Error(error) => Some(serde_json::json!({
             "type": "error",
             "timestamp": timestamp,
-            "sessionID": session_id.to_string(),
-            "error": error,
-        }),
+            "sessionID": sid,
+            "error": {
+                "name": "Error",
+                "data": { "message": error },
+            },
+        })),
     }
 }
 
@@ -1735,6 +1747,62 @@ mod tests {
             crate::message::Part::Text(part) => assert_eq!(part.text, "prompt text"),
             _ => panic!("expected text part"),
         }
+    }
+
+    #[test]
+    fn run_json_suppresses_per_delta_and_tool_start_events() {
+        use crate::session::processor::ProcessEvent;
+        let session_id = crate::id::SessionID::new();
+        assert!(
+            run_event_json(&session_id, &ProcessEvent::TextDelta("hi".to_string())).is_none()
+        );
+        assert!(run_event_json(
+            &session_id,
+            &ProcessEvent::ToolStart("bash".to_string(), serde_json::json!({}))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn run_json_emits_tool_use_for_completed_tools() {
+        use crate::session::processor::ProcessEvent;
+        let session_id = crate::id::SessionID::new();
+        let event = run_event_json(
+            &session_id,
+            &ProcessEvent::ToolComplete(
+                "bash".to_string(),
+                serde_json::json!({ "stdout": "ok" }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(event["type"], "tool_use");
+        assert_eq!(event["sessionID"], session_id.to_string());
+        assert_eq!(event["part"]["type"], "tool");
+        assert_eq!(event["part"]["tool"], "bash");
+        assert_eq!(event["part"]["state"]["status"], "completed");
+        assert_eq!(event["part"]["state"]["output"]["stdout"], "ok");
+    }
+
+    #[test]
+    fn run_json_emits_text_part_at_done() {
+        use crate::session::processor::ProcessEvent;
+        let session_id = crate::id::SessionID::new();
+        let event =
+            run_event_json(&session_id, &ProcessEvent::Done("final answer".to_string())).unwrap();
+        assert_eq!(event["type"], "text");
+        assert_eq!(event["part"]["type"], "text");
+        assert_eq!(event["part"]["text"], "final answer");
+    }
+
+    #[test]
+    fn run_json_wraps_errors_as_named_error_payload() {
+        use crate::session::processor::ProcessEvent;
+        let session_id = crate::id::SessionID::new();
+        let event =
+            run_event_json(&session_id, &ProcessEvent::Error("boom".to_string())).unwrap();
+        assert_eq!(event["type"], "error");
+        assert_eq!(event["error"]["name"], "Error");
+        assert_eq!(event["error"]["data"]["message"], "boom");
     }
 
     #[test]

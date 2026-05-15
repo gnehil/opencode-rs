@@ -15,7 +15,7 @@ Legend:
 | Area | TS reference | Rust reference | Status | Next work |
 | --- | --- | --- | --- | --- |
 | Top-level commands | `packages/opencode/src/cli/cmd/*.ts` | `crates/opencode/src/cli/args.rs` | partial | Keep option/alias parity as implementation catches up |
-| `run` non-interactive | `cli/cmd/run.ts` | `cli/mod.rs`, `session/processor.rs` | partial | Align JSON event stream and command/shell prompt route behavior |
+| `run` non-interactive | `cli/cmd/run.ts` | `cli/mod.rs`, `session/processor.rs` | partial | JSON event stream now matches TS schema (`tool_use`, `text`, `error` wrapped as NamedError; per-delta and `tool_start` suppressed). Still missing: bus-driven `message.part.updated` event source, `step_start`/`step_finish`/`reasoning` events, command/shell route shape parity |
 | `run --interactive` | `cli/cmd/run/runtime*.ts`, `footer*.tsx` | `tui/*`, `cli/local.rs` | partial | Split footer, permission/question prompt, scrollback, subagent frames |
 | `tui` | `cli/cmd/tui/*` | `tui/*` | partial | Worker/internal transport, session validation, model/agent pickers |
 | `attach` | `cli/cmd/tui/attach.ts` | `cli/local.rs` | partial | Launch real remote TUI instead of only validating/selecting session |
