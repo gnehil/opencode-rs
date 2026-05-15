@@ -120,41 +120,46 @@ pub struct QuestionQuery {
 }
 
 pub async fn list_questions(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Query(query): Query<QuestionQuery>,
 ) -> Json<serde_json::Value> {
-    Json(json!({
-        "questions": [],
-        "session_id": query.session_id
-    }))
+    let pending = state
+        .question_broker
+        .pending(query.session_id.as_deref())
+        .await;
+    Json(json!(pending))
 }
 
+/// Reply payload for `POST /question/:id/reply`. Mirrors the broker's
+/// `QuestionReply`: a 2-D array of selected labels, indexed by question.
 #[derive(Deserialize)]
 pub struct QuestionReplyBody {
-    answer: String,
+    answers: Vec<Vec<String>>,
 }
 
 pub async fn reply_question(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(request_id): Path<String>,
     Json(body): Json<QuestionReplyBody>,
-) -> Json<serde_json::Value> {
-    Json(json!({
-        "success": true,
-        "request_id": request_id,
-        "answer": body.answer
-    }))
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !state
+        .question_broker
+        .reply(&request_id, body.answers)
+        .await
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(json!(true)))
 }
 
 pub async fn reject_question(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(request_id): Path<String>,
-) -> Json<serde_json::Value> {
-    Json(json!({
-        "success": true,
-        "request_id": request_id,
-        "rejected": true
-    }))
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !state.question_broker.reject(&request_id).await {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(json!(true)))
 }
 
 #[cfg(test)]

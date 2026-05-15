@@ -331,6 +331,7 @@ mod tests {
             agent_name: None,
             model_id: None,
             plugin_manager: None,
+            question_broker: None,
         }
     }
 

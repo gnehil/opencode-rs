@@ -100,31 +100,79 @@ impl Tool for QuestionTool {
     fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: ToolContext,
+        ctx: ToolContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>> {
         Box::pin(async move {
             let params: QuestionParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid question parameters: {}", e))?;
 
-            let formatted = params
+            // Translate the tool schema into the broker's question shape so
+            // the HTTP API and the tool share one type.
+            let questions: Vec<crate::question::QuestionInfo> = params
                 .questions
-                .iter()
-                .enumerate()
-                .map(|(i, q)| format!("Question {}: {}", i + 1, q.question))
-                .collect::<Vec<_>>()
-                .join("\n");
+                .into_iter()
+                .map(|q| crate::question::QuestionInfo {
+                    question: q.question,
+                    header: q.header,
+                    options: q
+                        .options
+                        .into_iter()
+                        .map(|o| crate::question::QuestionOption {
+                            label: o.label,
+                            description: o.description,
+                        })
+                        .collect(),
+                    multiple: q.multiple,
+                    custom: q.custom,
+                })
+                .collect();
 
-            let output = format!(
-                "Questions sent to user. Waiting for response.\n\nQuestions:\n{}",
-                formatted
-            );
+            let Some(broker) = ctx.question_broker.clone() else {
+                let formatted = questions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, q)| format!("Question {}: {}", i + 1, q.question))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Ok(ToolResult::with_metadata(
+                    format!(
+                        "Questions sent to user. Waiting for response.\n\nQuestions:\n{formatted}"
+                    ),
+                    json!({ "questions_count": questions.len() }),
+                ));
+            };
 
-            Ok(ToolResult::with_metadata(
-                output,
-                json!({
-                    "questions_count": params.questions.len(),
-                }),
-            ))
+            let (request_id, rx) = broker.ask(&ctx.session_id, questions.clone()).await;
+
+            match rx.await {
+                Ok(crate::question::QuestionOutcome::Replied(answers)) => {
+                    let mut lines = Vec::with_capacity(answers.len());
+                    for (idx, answer) in answers.iter().enumerate() {
+                        let question = questions
+                            .get(idx)
+                            .map(|q| q.question.as_str())
+                            .unwrap_or("question");
+                        lines.push(format!("Q: {question}\nA: {}", answer.join(", ")));
+                    }
+                    let output = if lines.is_empty() {
+                        "User provided an empty response.".to_string()
+                    } else {
+                        lines.join("\n\n")
+                    };
+                    Ok(ToolResult::with_metadata(
+                        output,
+                        json!({
+                            "questions_count": questions.len(),
+                            "answers": answers,
+                            "request_id": request_id,
+                        }),
+                    ))
+                }
+                Ok(crate::question::QuestionOutcome::Rejected) => {
+                    Err(anyhow::anyhow!("The user dismissed this question"))
+                }
+                Err(_) => Err(anyhow::anyhow!("Question broker dropped before reply")),
+            }
         })
     }
 }

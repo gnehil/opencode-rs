@@ -15,6 +15,7 @@ pub struct PromptProcessor {
     tools: Vec<Arc<dyn Tool>>,
     bus: EventBus,
     permission_broker: Option<crate::permission::PermissionBroker>,
+    question_broker: Option<crate::question::QuestionBroker>,
     plugin_manager: Option<Arc<crate::plugin::PluginManager>>,
     max_iterations: usize,
     agent_name: String,
@@ -54,6 +55,7 @@ impl PromptProcessor {
             tools: crate::tool::default_registry(),
             bus: EventBus::new(),
             permission_broker: None,
+            question_broker: None,
             plugin_manager: None,
             max_iterations: 10,
             agent_name: "build".to_string(),
@@ -119,6 +121,11 @@ impl PromptProcessor {
 
     pub fn with_permission_broker(mut self, broker: crate::permission::PermissionBroker) -> Self {
         self.permission_broker = Some(broker);
+        self
+    }
+
+    pub fn with_question_broker(mut self, broker: crate::question::QuestionBroker) -> Self {
+        self.question_broker = Some(broker);
         self
     }
 
@@ -535,6 +542,7 @@ impl PromptProcessor {
                             agent_name: Some(self.agent_name.clone()),
                             model_id: Some(model_id.to_string()),
                             plugin_manager: self.plugin_manager.clone(),
+                            question_broker: self.question_broker.clone(),
                         };
                         match tool.execute(input.clone(), ctx).await {
                             Ok(result) => ToolPartResult::Completed {
@@ -797,6 +805,7 @@ impl PromptProcessor {
                             agent_name: Some(self.agent_name.clone()),
                             model_id: self.model_id.clone(),
                             plugin_manager: self.plugin_manager.clone(),
+                            question_broker: self.question_broker.clone(),
                         };
                         match tool.execute(params.clone(), ctx).await {
                             Ok(tool_result) => ToolPartResult::Completed {

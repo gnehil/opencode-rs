@@ -18,6 +18,7 @@ pub mod permission;
 pub mod plugin;
 pub mod provider;
 pub mod pty;
+pub mod question;
 pub mod server;
 pub mod session;
 pub mod skill;

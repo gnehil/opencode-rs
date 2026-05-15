@@ -1189,6 +1189,7 @@ impl ACPAgent {
                         agent_name: Some(agent_name.clone()),
                         model_id: None,
                         plugin_manager: None,
+                        question_broker: None,
                     };
                     match tool.execute(params.clone(), ctx).await {
                         Ok(r) => ToolPartResult::Completed {

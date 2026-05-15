@@ -18,6 +18,7 @@ pub struct ToolContext {
     pub agent_name: Option<String>,
     pub model_id: Option<String>,
     pub plugin_manager: Option<Arc<crate::plugin::PluginManager>>,
+    pub question_broker: Option<crate::question::QuestionBroker>,
 }
 
 impl ToolContext {
@@ -205,6 +206,7 @@ mod tests {
             agent_name: None,
             model_id: None,
             plugin_manager: None,
+            question_broker: None,
         }
     }
 

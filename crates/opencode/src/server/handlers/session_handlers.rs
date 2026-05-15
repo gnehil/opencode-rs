@@ -19,6 +19,7 @@ pub struct AppState {
     pub workspace_root: std::path::PathBuf,
     pub event_bus: EventBus,
     pub permission_broker: crate::permission::PermissionBroker,
+    pub question_broker: crate::question::QuestionBroker,
     pub pty_service: std::sync::Arc<crate::pty::PtyService>,
     pub pty_tickets: std::sync::Arc<crate::pty::PtyTicketStore>,
     pub tui_control: std::sync::Arc<crate::tui::control::TuiControl>,
@@ -49,6 +50,7 @@ impl AppState {
             tui_control: std::sync::Arc::new(crate::tui::control::TuiControl::new()),
             event_bus,
             permission_broker: crate::permission::PermissionBroker::new(),
+            question_broker: crate::question::QuestionBroker::new(),
             mcp_manager: std::sync::Arc::new(tokio::sync::RwLock::new(
                 crate::mcp::McpManager::new().with_auth_store(mcp_auth_store.clone()),
             )),
