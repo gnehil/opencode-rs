@@ -308,6 +308,7 @@ mod tests {
             config: None,
             agent_name: None,
             model_id: None,
+            plugin_manager: None,
         }
     }
 

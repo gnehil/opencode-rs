@@ -428,6 +428,7 @@ impl PromptProcessor {
                             config: self.config.clone(),
                             agent_name: Some(self.agent_name.clone()),
                             model_id: Some(model_id.to_string()),
+                            plugin_manager: self.plugin_manager.clone(),
                         };
                         match tool.execute(input.clone(), ctx).await {
                             Ok(result) => ToolPartResult::Completed {
@@ -689,6 +690,7 @@ impl PromptProcessor {
                             config: self.config.clone(),
                             agent_name: Some(self.agent_name.clone()),
                             model_id: self.model_id.clone(),
+                            plugin_manager: self.plugin_manager.clone(),
                         };
                         match tool.execute(params.clone(), ctx).await {
                             Ok(tool_result) => ToolPartResult::Completed {

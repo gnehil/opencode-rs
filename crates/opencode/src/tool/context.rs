@@ -17,6 +17,7 @@ pub struct ToolContext {
     pub config: Option<crate::config::Config>,
     pub agent_name: Option<String>,
     pub model_id: Option<String>,
+    pub plugin_manager: Option<Arc<crate::plugin::PluginManager>>,
 }
 
 impl ToolContext {
@@ -49,6 +50,34 @@ impl ToolContext {
     }
 
     async fn ask_permission(&self, permission: &str, pattern: &str) -> anyhow::Result<()> {
+        // External plugins get first say via the `permission.ask` hook: they
+        // can resolve the request to `allow`/`deny` before it ever reaches
+        // the interactive broker. A `status` left at `ask` falls through.
+        if let Some(plugin_manager) = &self.plugin_manager {
+            let decision = plugin_manager
+                .trigger_bridge(
+                    "permission.ask",
+                    serde_json::json!({
+                        "type": permission,
+                        "pattern": pattern,
+                        "sessionID": self.session_id.to_string(),
+                    }),
+                    serde_json::json!({ "status": "ask" }),
+                )
+                .await;
+            match decision.get("status").and_then(|s| s.as_str()) {
+                Some("allow") => return Ok(()),
+                Some("deny") => {
+                    return Err(anyhow::anyhow!(
+                        "Tool '{}' denied by plugin for pattern '{}'",
+                        permission,
+                        pattern
+                    ))
+                }
+                _ => {}
+            }
+        }
+
         let Some(broker) = &self.permission_broker else {
             return Err(anyhow::anyhow!(
                 "Tool '{}' requires explicit user approval for pattern '{}'",
@@ -175,6 +204,7 @@ mod tests {
             config: None,
             agent_name: None,
             model_id: None,
+            plugin_manager: None,
         }
     }
 
@@ -253,5 +283,77 @@ mod tests {
                 .await
         );
         assert!(task.await.unwrap().is_ok());
+    }
+
+    async fn ctx_with_permission_plugin(status: &str) -> Option<ToolContext> {
+        use crate::plugin::bridge;
+        let (runtime, _) = bridge::detect_js_runtime()?;
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("plugin.mjs");
+        std::fs::write(
+            &plugin,
+            format!(
+                r#"export default async function () {{
+                    return {{
+                        "permission.ask": async (input, output) => {{
+                            output.status = "{status}"
+                        }},
+                    }}
+                }}"#
+            ),
+        )
+        .unwrap();
+        let plugin_bridge = bridge::PluginBridge::spawn(
+            runtime,
+            vec![bridge::PluginToLoad {
+                spec: "./plugin.mjs".to_string(),
+                entry: format!("file://{}", plugin.to_string_lossy()),
+                options: None,
+            }],
+            bridge::PluginInputData {
+                directory: "/tmp".to_string(),
+                worktree: "/tmp".to_string(),
+                project: serde_json::json!({}),
+                server_url: "http://localhost:4096".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let manager = crate::plugin::PluginManager::new();
+        manager.set_bridge(std::sync::Arc::new(plugin_bridge));
+
+        // A non-empty ruleset with no matching rule resolves to Ask, which
+        // is where the `permission.ask` plugin hook gets consulted.
+        let mut ctx = ctx(vec![PermissionRule {
+            permission: "bash".to_string(),
+            pattern: "git *".to_string(),
+            action: Action::Ask,
+        }]);
+        ctx.plugin_manager = Some(std::sync::Arc::new(manager));
+        Some(ctx)
+    }
+
+    #[tokio::test]
+    async fn permission_ask_plugin_can_allow() {
+        let Some(ctx) = ctx_with_permission_plugin("allow").await else {
+            eprintln!("skipping: no JS runtime available");
+            return;
+        };
+        // No broker is set; only the plugin's `allow` lets this through.
+        assert!(ctx.check_permission("bash", "rm -rf /").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn permission_ask_plugin_can_deny() {
+        let Some(ctx) = ctx_with_permission_plugin("deny").await else {
+            eprintln!("skipping: no JS runtime available");
+            return;
+        };
+        let err = ctx
+            .check_permission("bash", "ls")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("denied by plugin"), "got: {err}");
     }
 }
