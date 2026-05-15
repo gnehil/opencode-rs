@@ -183,7 +183,10 @@ impl Provider for AzureProvider {
             return Err(ProviderError::api(status, body));
         }
 
-        let azure_resp: AzureResponse = response.json().await?;
+        let raw: serde_json::Value = response.json().await?;
+        let reasoning = crate::provider::extract_openai_compat_reasoning(&raw);
+        let azure_resp: AzureResponse = serde_json::from_value(raw)
+            .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
         let content = azure_resp
             .choices
@@ -223,7 +226,7 @@ impl Provider for AzureProvider {
                 cache_write: None,
             },
             model: self.deployment.clone(),
-            reasoning: None,
+            reasoning,
         })
     }
 

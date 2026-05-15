@@ -108,7 +108,7 @@ impl Provider for TogetherAIProvider {
                     .to_string(),
             ),
             model: model.clone(),
-            reasoning: None,
+            reasoning: crate::provider::extract_openai_compat_reasoning(&data),
         })
     }
 

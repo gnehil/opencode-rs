@@ -141,7 +141,7 @@ impl Provider for OpenRouterProvider {
                     .to_string(),
             ),
             model: model.clone(),
-            reasoning: None,
+            reasoning: crate::provider::extract_openai_compat_reasoning(&data),
         })
     }
 

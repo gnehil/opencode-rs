@@ -325,7 +325,14 @@ impl Provider for OpenAIProvider {
             return Err(ProviderError::api(status, body));
         }
 
-        let body: OpenAICompleteResponse = response.json().await?;
+        // Parse the response once as a generic Value so we can pull any
+        // provider-specific reasoning channel, then convert into the typed
+        // shape used below. Doubles parse work but is negligible next to the
+        // network round-trip.
+        let raw: serde_json::Value = response.json().await?;
+        let reasoning = crate::provider::extract_openai_compat_reasoning(&raw);
+        let body: OpenAICompleteResponse = serde_json::from_value(raw)
+            .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
         let choice = body.choices.first();
         let content = choice
@@ -358,7 +365,7 @@ impl Provider for OpenAIProvider {
                 cache_write: None,
             },
             model: body.model,
-            reasoning: None,
+            reasoning,
         })
     }
 

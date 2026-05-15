@@ -106,3 +106,102 @@ pub fn openai_compat_message_json(msg: &CompletionMessage) -> serde_json::Value 
     }
     serde_json::Value::Object(obj)
 }
+
+/// Extract the reasoning / "thinking" text from an OpenAI-compatible chat
+/// completions JSON response, when the provider exposes one. Different
+/// providers spell this field differently — DeepSeek uses
+/// `reasoning_content`, OpenAI o1 uses `reasoning_summary`, OpenRouter
+/// surfaces `reasoning` — so the helper checks each spelling in order and
+/// returns the first non-empty string. Returns `None` when no reasoning
+/// channel is present.
+pub fn extract_openai_compat_reasoning(value: &serde_json::Value) -> Option<String> {
+    let message = value.get("choices")?.get(0)?.get("message")?;
+    for key in ["reasoning_content", "reasoning", "reasoning_summary"] {
+        match message.get(key) {
+            Some(serde_json::Value::String(text)) if !text.is_empty() => {
+                return Some(text.clone());
+            }
+            Some(serde_json::Value::Array(items)) => {
+                let joined: String = items
+                    .iter()
+                    .filter_map(|item| match item {
+                        serde_json::Value::String(text) => Some(text.clone()),
+                        serde_json::Value::Object(map) => map
+                            .get("text")
+                            .or_else(|| map.get("content"))
+                            .or_else(|| map.get("summary"))
+                            .and_then(|v| v.as_str().map(str::to_string)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !joined.is_empty() {
+                    return Some(joined);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod openai_compat_reasoning_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extracts_reasoning_content_string() {
+        let v = json!({
+            "choices": [{ "message": { "content": "answer", "reasoning_content": "thinking" } }]
+        });
+        assert_eq!(
+            extract_openai_compat_reasoning(&v).as_deref(),
+            Some("thinking")
+        );
+    }
+
+    #[test]
+    fn extracts_reasoning_string() {
+        let v = json!({
+            "choices": [{ "message": { "content": "answer", "reasoning": "thinking" } }]
+        });
+        assert_eq!(
+            extract_openai_compat_reasoning(&v).as_deref(),
+            Some("thinking")
+        );
+    }
+
+    #[test]
+    fn joins_reasoning_summary_array_objects() {
+        let v = json!({
+            "choices": [{ "message": {
+                "content": "answer",
+                "reasoning_summary": [
+                    { "text": "step one" },
+                    { "text": "step two" }
+                ]
+            } }]
+        });
+        assert_eq!(
+            extract_openai_compat_reasoning(&v).as_deref(),
+            Some("step one\nstep two")
+        );
+    }
+
+    #[test]
+    fn none_when_no_reasoning_field_present() {
+        let v = json!({
+            "choices": [{ "message": { "content": "answer" } }]
+        });
+        assert!(extract_openai_compat_reasoning(&v).is_none());
+    }
+
+    #[test]
+    fn skips_empty_reasoning_strings() {
+        let v = json!({
+            "choices": [{ "message": { "content": "answer", "reasoning_content": "" } }]
+        });
+        assert!(extract_openai_compat_reasoning(&v).is_none());
+    }
+}

@@ -277,7 +277,10 @@ impl Provider for GroqProvider {
             return Err(ProviderError::api(status, body));
         }
 
-        let groq_resp: GroqResponse = response.json().await?;
+        let raw: serde_json::Value = response.json().await?;
+        let reasoning = crate::provider::extract_openai_compat_reasoning(&raw);
+        let groq_resp: GroqResponse = serde_json::from_value(raw)
+            .map_err(|e| ProviderError::api(0, e.to_string()))?;
 
         let content = groq_resp
             .choices
@@ -317,7 +320,7 @@ impl Provider for GroqProvider {
                 cache_write: None,
             },
             model: groq_resp.model,
-            reasoning: None,
+            reasoning,
         })
     }
 
