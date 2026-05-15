@@ -1068,9 +1068,56 @@ pub(crate) async fn handle_mcp(subcommand: args::McpSubcommand, data_dir: PathBu
                 let cwd = std::env::current_dir()?;
                 let config = crate::config::load_project_config(&cwd)?.unwrap_or_default();
                 let target = mcp_cli::mcp_auth_target(&config, &name)?;
+
+                // Surface existing credentials before starting a fresh OAuth
+                // dance, matching the TS prompt that asks before
+                // re-authenticating. Expired tokens fall through to a fresh
+                // run; valid ones are reported and skipped so users do not
+                // open a browser unnecessarily.
+                let auth_store = McpAuthStore::new(data_dir.clone());
+                auth_store.load().await?;
+                if let Some(entry) = auth_store.get(&name).await {
+                    if entry.tokens.is_some() {
+                        let expired = auth_store
+                            .is_token_expired(&name)
+                            .await
+                            .unwrap_or(false);
+                        if expired {
+                            println!(
+                                "MCP server '{}' has expired credentials. Re-authenticating...",
+                                name
+                            );
+                        } else {
+                            println!(
+                                "MCP server '{}' is already authenticated.",
+                                name
+                            );
+                            println!(
+                                "Run `opencode mcp logout {}` first if you want to re-authenticate.",
+                                name
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
+
                 let client = reqwest::Client::new();
                 let metadata = mcp_cli::discover_oauth_metadata(&client, &target.url).await?;
-                let session = mcp_cli::start_mcp_oauth(data_dir, target, metadata).await?;
+                let session = match mcp_cli::start_mcp_oauth(data_dir, target, metadata).await {
+                    Ok(session) => session,
+                    Err(error) => {
+                        let message = error.to_string();
+                        if message.contains("dynamic registration") {
+                            eprintln!("{}", message);
+                            eprintln!(
+                                "Add a `clientId` (and optional `clientSecret`) to the `mcp.{}` entry in your opencode config and re-run `opencode mcp auth {}`.",
+                                name, name
+                            );
+                            return Err(error);
+                        }
+                        return Err(error);
+                    }
+                };
                 println!("Open this URL to authenticate MCP server '{}':", name);
                 println!("{}", session.start.authorization_url);
                 open_url(&session.start.authorization_url);
