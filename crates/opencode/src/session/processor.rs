@@ -172,19 +172,49 @@ impl PromptProcessor {
             system: None,
             tools: None,
         };
+        let user_message_json =
+            serde_json::to_value(&user_msg).unwrap_or(serde_json::Value::Null);
         self.store
             .save_message(session_id, &Message::User(user_msg))
             .await?;
-        let saved_user_parts = user_parts.clone();
-        if user_parts.is_empty() {
-            self.store
-                .save_text_part(session_id, &user_message_id, prompt)
-                .await?;
+
+        // Assemble the user parts (synthesizing a text part when only a raw
+        // prompt string was supplied) so plugins see a uniform shape.
+        let mut user_parts: Vec<Part> = if user_parts.is_empty() {
+            vec![text_part(session_id, &user_message_id, prompt)]
         } else {
-            for part in user_parts {
-                self.store.save_part(&part).await?;
+            user_parts
+        };
+
+        // External plugins observe and may rewrite the incoming user
+        // message's parts before they are persisted (TS `chat.message` hook).
+        if let Some(plugin_manager) = &self.plugin_manager {
+            let output = plugin_manager
+                .trigger_bridge(
+                    "chat.message",
+                    serde_json::json!({
+                        "sessionID": session_id.to_string(),
+                        "agent": self.agent_name,
+                        "messageID": user_message_id.to_string(),
+                    }),
+                    serde_json::json!({
+                        "message": user_message_json,
+                        "parts": user_parts,
+                    }),
+                )
+                .await;
+            if let Some(parts) = output
+                .get("parts")
+                .and_then(|parts| serde_json::from_value::<Vec<Part>>(parts.clone()).ok())
+            {
+                user_parts = parts;
             }
         }
+
+        for part in &user_parts {
+            self.store.save_part(part).await?;
+        }
+        let saved_user_parts = user_parts;
         self.bus.publish(Event::message_create(
             session_id.to_string(),
             user_message_id.to_string(),
@@ -1470,6 +1500,102 @@ mod tests {
             .tools
             .iter()
             .any(|tool| tool.description == "rewritten: task"));
+    }
+
+    #[tokio::test]
+    async fn process_stream_applies_external_plugin_chat_message_hook() {
+        use crate::plugin::bridge;
+        let Some((runtime, _)) = bridge::detect_js_runtime() else {
+            eprintln!("skipping: no JS runtime available");
+            return;
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_path = tmp.path().join("plugin.mjs");
+        std::fs::write(
+            &plugin_path,
+            r#"export default async function () {
+                return {
+                    "chat.message": async (input, output) => {
+                        for (const part of output.parts) {
+                            if (part.type === "text") {
+                                part.text = "rewritten: " + part.text
+                            }
+                        }
+                    },
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let store = Arc::new(SessionStore::new(tmp.path().to_path_buf()).await.unwrap());
+        let session = store
+            .create("t", "p", &std::path::PathBuf::from("/tmp"))
+            .await
+            .unwrap();
+        let session_id = SessionID::parse(&session.id).unwrap();
+        let provider = Arc::new(FakeProvider {
+            model: ModelInfo {
+                id: Some(ModelID::new("test-model")),
+                name: None,
+                family: None,
+                release_date: None,
+                attachment: None,
+                reasoning: None,
+                temperature: None,
+                tool_call: None,
+                interleaved: None,
+                cost: None,
+                limit: None,
+                modalities: None,
+                experimental: None,
+                status: None,
+                provider: None,
+                options: None,
+                headers: None,
+                variants: None,
+            },
+            seen: Arc::new(Mutex::new(Vec::new())),
+        });
+
+        let plugin_bridge = bridge::PluginBridge::spawn(
+            runtime,
+            vec![bridge::PluginToLoad {
+                spec: "./plugin.mjs".to_string(),
+                entry: format!("file://{}", plugin_path.to_string_lossy()),
+                options: None,
+            }],
+            bridge::PluginInputData {
+                directory: "/tmp".to_string(),
+                worktree: "/tmp".to_string(),
+                project: serde_json::json!({}),
+                server_url: "http://localhost:4096".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plugin_manager = crate::plugin::PluginManager::new();
+        plugin_manager.set_bridge(Arc::new(plugin_bridge));
+
+        let processor = PromptProcessor::new(store.clone(), provider)
+            .with_plugin_manager(Arc::new(plugin_manager));
+        let user_message_id = MessageID::new();
+
+        processor
+            .process_stream_with_parts(&session_id, "hello world", user_message_id, Vec::new())
+            .await
+            .unwrap();
+
+        let messages = store.get_messages_with_parts(&session_id).await.unwrap();
+        let user_text = messages.iter().find_map(|with_parts| {
+            matches!(&with_parts.info, Message::User(_)).then(|| {
+                with_parts.parts.iter().find_map(|part| match part {
+                    Part::Text(text) => Some(text.text.clone()),
+                    _ => None,
+                })
+            })?
+        });
+        assert_eq!(user_text.as_deref(), Some("rewritten: hello world"));
     }
 
     #[tokio::test]
