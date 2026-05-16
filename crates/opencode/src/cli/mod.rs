@@ -168,7 +168,12 @@ async fn handle_tui(args: args::TuiArgs, data_dir: PathBuf) {
 }
 
 async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
-    let project_path = if let Some(dir) = &args.dir {
+    // In attach mode `--dir` is the directory the *remote* server should
+    // run against and must not touch the local filesystem; the local
+    // chdir only applies when we're running the local provider/store.
+    let project_path = if args.attach.is_some() {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else if let Some(dir) = &args.dir {
         let path = PathBuf::from(dir);
         std::env::set_current_dir(&path).unwrap_or_else(|e| {
             eprintln!("Failed to change directory to {}: {}", path.display(), e);
@@ -491,13 +496,16 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
     // than a full TUI — opencode-rs has a separate `tui` subcommand for
     // that — but it covers the "stay in-session and keep prompting" path
     // that TS `run --interactive` provides.
-    use std::io::{BufRead, IsTerminal as _, Write as _};
-    let stdin = std::io::stdin();
-    let mut handle = stdin.lock();
-    let is_tty = std::io::stdin().is_terminal();
+    use std::io::{BufRead, Write as _};
+    // Reopen /dev/tty when stdin was piped so an `echo hi | opencode run -i`
+    // invocation can still accept follow-up lines.
+    let Some(mut handle) = interactive_input_source() else {
+        return;
+    };
+    let stdout_is_tty = interactive_stdout_is_tty();
     let mut line = String::new();
     loop {
-        if is_tty {
+        if stdout_is_tty {
             print!("\n> ");
             let _ = std::io::stdout().flush();
         }
@@ -582,6 +590,39 @@ fn read_piped_stdin() -> anyhow::Result<Option<String>> {
     let mut input = String::new();
     stdin.read_to_string(&mut input)?;
     Ok(Some(input))
+}
+
+/// A read+write pair for the interactive prompt loop. Picks `/dev/tty` when
+/// stdin has been consumed by piped input so users can still type after a
+/// `cat prompt.txt | opencode run -i ...` style invocation. Windows
+/// falls back to plain stdin (a richer CONIN$ path is left for later).
+///
+/// Mirrors TS `runtime.stdin`'s "reopen the controlling terminal" trick.
+fn interactive_input_source() -> Option<Box<dyn std::io::BufRead + Send>> {
+    use std::io::IsTerminal as _;
+    // When stdin is still a TTY we can read from it as normal.
+    if std::io::stdin().is_terminal() {
+        return Some(Box::new(std::io::BufReader::new(std::io::stdin())));
+    }
+    // Stdin was piped; try to reopen the controlling terminal so the
+    // user can still type.
+    #[cfg(unix)]
+    {
+        if let Ok(file) = std::fs::OpenOptions::new().read(true).open("/dev/tty") {
+            return Some(Box::new(std::io::BufReader::new(file)));
+        }
+    }
+    // Fall back to plain stdin (will hit EOF immediately when piped, which
+    // matches the previous behavior on platforms without /dev/tty access).
+    Some(Box::new(std::io::BufReader::new(std::io::stdin())))
+}
+
+/// True when interactive output makes sense — i.e. when stdout is a real
+/// terminal. We treat a redirected stdout as "non-interactive" for prompt
+/// printing but still allow the loop itself, mirroring TS `stdout.isTTY`.
+fn interactive_stdout_is_tty() -> bool {
+    use std::io::IsTerminal as _;
+    std::io::stdout().is_terminal()
 }
 
 fn run_session_title(title: Option<&str>, prompt: &str) -> String {
@@ -1780,6 +1821,19 @@ async fn run_attach(args: &args::RunArgs, message: String) -> anyhow::Result<()>
             .map_err(|e| anyhow::anyhow!("invalid auth header: {e}"))?;
         headers.insert(reqwest::header::AUTHORIZATION, value);
     }
+    // `--dir` under --attach is the remote project directory. The TS SDK
+    // sends it as `x-opencode-directory` (URL-encoded) on every request so
+    // the server can route to the right project; the server also accepts a
+    // `?directory=` query for GETs. Setting the header here covers both.
+    if let Some(dir) = args.dir.as_deref().filter(|d| !d.is_empty()) {
+        let encoded = urlencoding::encode(dir).into_owned();
+        let value = reqwest::header::HeaderValue::from_str(&encoded)
+            .map_err(|e| anyhow::anyhow!("invalid --dir value: {e}"))?;
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-opencode-directory"),
+            value,
+        );
+    }
     let client = reqwest::Client::builder()
         .default_headers(headers)
         .build()
@@ -1791,13 +1845,35 @@ async fn run_attach(args: &args::RunArgs, message: String) -> anyhow::Result<()>
     eprintln!("Attached to {} session={}", base_url, session_id);
 
     // Share the session up front if requested, mirroring TS `share`.
+    // Honour the remote response: a 404 means the server has no share
+    // endpoint (cloud feature disabled), which we surface as a warning
+    // rather than aborting the run. Other failures abort. Share URLs
+    // returned in the body are printed for the operator.
     if args.share {
-        let _ = client
+        let response = client
             .post(format!("{}/session/{}/share", base_url, session_id))
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("failed to share session: {e}"))?
-            .error_for_status();
+            .map_err(|e| anyhow::anyhow!("failed to share session: {e}"))?;
+        let status = response.status();
+        if status.is_success() {
+            if let Ok(body) = response.json::<serde_json::Value>().await {
+                let url = body
+                    .get("url")
+                    .or_else(|| body.get("share").and_then(|s| s.get("url")))
+                    .and_then(|v| v.as_str());
+                if let Some(url) = url {
+                    eprintln!("Share URL: {url}");
+                }
+            }
+        } else if status == reqwest::StatusCode::NOT_FOUND {
+            eprintln!(
+                "Warning: remote does not expose /session/{session_id}/share; --share ignored"
+            );
+        } else {
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("share failed ({status}): {text}");
+        }
     }
 
     // Run the initial prompt if one was provided.
@@ -1810,15 +1886,17 @@ async fn run_attach(args: &args::RunArgs, message: String) -> anyhow::Result<()>
         return Ok(());
     }
 
-    // Interactive remote loop: read stdin lines between turns, dispatching
-    // each through the same session.
-    use std::io::{BufRead, IsTerminal as _, Write as _};
-    let stdin = std::io::stdin();
-    let mut handle = stdin.lock();
-    let is_tty = std::io::stdin().is_terminal();
+    // Interactive remote loop: read lines between turns, dispatching each
+    // through the same session. Falls back to /dev/tty when stdin was
+    // piped so a `cat msg | opencode run --attach url -i` still works.
+    use std::io::{BufRead, Write as _};
+    let Some(mut handle) = interactive_input_source() else {
+        return Ok(());
+    };
+    let stdout_is_tty = interactive_stdout_is_tty();
     let mut line = String::new();
     loop {
-        if is_tty {
+        if stdout_is_tty {
             print!("\n> ");
             let _ = std::io::stdout().flush();
         }
@@ -2537,6 +2615,19 @@ mod tests {
         let header = attach_basic_auth_header(Some("hunter2"), None).unwrap();
         // base64("opencode:hunter2") == "b3BlbmNvZGU6aHVudGVyMg=="
         assert_eq!(header, "Basic b3BlbmNvZGU6aHVudGVyMg==");
+    }
+
+    #[test]
+    fn attach_dir_header_value_is_url_encoded() {
+        // Confirms the encoding contract for the x-opencode-directory
+        // header used by the attach client. We test the encoder itself
+        // rather than the request builder, since reqwest's value type
+        // does the right thing as long as we feed it the encoded string.
+        let encoded = urlencoding::encode("/home/user/projects with space").into_owned();
+        assert_eq!(encoded, "%2Fhome%2Fuser%2Fprojects%20with%20space");
+        // And that path segments stay path-like under repeat encoding.
+        let trailing = urlencoding::encode("/tmp/").into_owned();
+        assert!(trailing.starts_with("%2Ftmp"));
     }
 
     #[test]
