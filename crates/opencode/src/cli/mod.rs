@@ -203,6 +203,13 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
         eprintln!("--demo requires --interactive");
         std::process::exit(1);
     }
+    // Interactive mode keeps prompting the user, so a non-TTY stdout (the
+    // operator redirected output to a file or another process) cannot
+    // possibly drive the loop. Match TS by failing fast.
+    if args.interactive && !interactive_stdout_is_tty() {
+        eprintln!("--interactive requires a TTY stdout");
+        std::process::exit(1);
+    }
 
     // `--attach <url>` routes the run through a remote opencode server
     // via HTTP instead of the local provider/store.
