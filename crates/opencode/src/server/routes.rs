@@ -1,4 +1,6 @@
 use axum::{
+    extract::{Json, Path, State},
+    http::StatusCode,
     routing::{delete, get, patch, post, put},
     Router,
 };
@@ -105,7 +107,7 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         )
         .route("/session/:id/abort", post(session_handlers::abort_session))
         .route("/session/:id/message", post(message_handlers::prompt))
-        .route("/session/:id/message", get(message_handlers::list_messages))
+        .route("/session/:id/message", get(canonical_list_messages))
         .route(
             "/session/:id/prompt_async",
             post(message_handlers::prompt_async),
@@ -236,6 +238,19 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/sync/replay", post(workspace_handlers::sync_replay))
         .with_state(app_state)
         .layer(cors_layer())
+}
+
+async fn canonical_list_messages(
+    State(state): State<std::sync::Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::message::WithParts>>, StatusCode> {
+    let session_id = crate::id::SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let store = state.get_store().await;
+    let messages = store
+        .get_messages_with_parts(&session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(messages))
 }
 
 #[cfg(test)]
@@ -1542,6 +1557,36 @@ new file mode 100644
         let response = send(
             app.clone(),
             Request::builder()
+                .method("GET")
+                .uri(format!("/session/{session_id}/message"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let messages = response_json(response).await;
+        let messages = messages
+            .as_array()
+            .expect("canonical /session/:id/message returns a bare array");
+        assert!(messages.iter().any(|message| {
+            message["info"]["role"] == "user" && message["parts"][0]["text"] == "hello"
+        }));
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/session/{session_id}/messages"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response_json(response).await.get("messages").is_some());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
                 .method("POST")
                 .uri(format!("/session/{session_id}/prompt_async"))
                 .header("content-type", "application/json")
@@ -1662,5 +1707,38 @@ new file mode 100644
         )
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn event_route_uses_opencode_sse_headers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = std::sync::Arc::new(
+            AppState::new(tmp.path().join("data")).with_workspace_root(tmp.path().to_path_buf()),
+        );
+        let app = create_router_with_state(state);
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("GET")
+                .uri("/event")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("x-accel-buffering").unwrap(), "no");
+        assert_eq!(
+            response.headers().get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+        assert!(response
+            .headers()
+            .get("cache-control")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("no-transform"));
     }
 }

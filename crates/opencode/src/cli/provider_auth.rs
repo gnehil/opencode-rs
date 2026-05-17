@@ -66,7 +66,7 @@ impl ProviderAuthStore {
             std::fs::create_dir_all(parent)?;
         }
         let text = serde_json::to_string_pretty(credentials)?;
-        std::fs::write(&self.path, format!("{text}\n"))?;
+        crate::util::filesystem::write_private_file(&self.path, format!("{text}\n"))?;
         Ok(())
     }
 
@@ -260,6 +260,26 @@ mod tests {
             reloaded.get("openai"),
             Some(ProviderCredential::Api { key, .. }) if key == "sk-test"
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_auth_store_writes_private_auth_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProviderAuthStore::new(dir.path());
+
+        store
+            .set("openai", api_key_credential("sk-test").unwrap())
+            .unwrap();
+
+        let mode = std::fs::metadata(store.auth_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

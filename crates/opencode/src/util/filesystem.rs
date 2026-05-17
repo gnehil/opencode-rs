@@ -53,6 +53,39 @@ pub async fn write_file_bytes(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -
     Ok(())
 }
 
+pub fn write_private_file(
+    path: impl AsRef<Path>,
+    content: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(content.as_ref())?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, content.as_ref())
+    }
+}
+
 pub async fn is_dir(path: impl AsRef<Path>) -> bool {
     match fs::metadata(path).await {
         Ok(meta) => meta.is_dir(),

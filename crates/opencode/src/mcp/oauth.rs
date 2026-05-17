@@ -72,7 +72,7 @@ impl McpAuthStore {
             std::fs::create_dir_all(parent)?;
         }
         let content = serde_json::to_string(entries)?;
-        std::fs::write(&self.filepath, content)?;
+        crate::util::filesystem::write_private_file(&self.filepath, content)?;
         Ok(())
     }
 
@@ -638,5 +638,27 @@ mod tests {
                 .and_then(|entry| entry.code_verifier.as_deref()),
             Some("verifier")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auth_store_writes_private_mcp_auth_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("missing").join("opencode");
+        let store = McpAuthStore::new(data_dir.clone());
+
+        store
+            .update_code_verifier("local", "verifier")
+            .await
+            .expect("auth store update should persist");
+
+        let mode = std::fs::metadata(data_dir.join("mcp-auth.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

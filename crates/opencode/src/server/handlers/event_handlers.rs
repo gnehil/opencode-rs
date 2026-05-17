@@ -1,6 +1,7 @@
 use axum::extract::{Query, State};
+use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use futures::stream::Stream;
+use axum::response::IntoResponse;
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -19,7 +20,7 @@ pub struct EventQuery {
 pub async fn sse_events(
     State(state): State<Arc<AppState>>,
     Query(query): Query<EventQuery>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> impl IntoResponse {
     let bus: EventBus = state.event_bus.clone();
     let filter_sid = query.session_id;
 
@@ -28,7 +29,7 @@ pub async fn sse_events(
         let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
         heartbeat.tick().await;
 
-        yield Ok(sse_message_event(connected_payload()));
+        yield Ok::<Event, Infallible>(sse_message_event(connected_payload()));
 
         loop {
             tokio::select! {
@@ -41,19 +42,36 @@ pub async fn sse_events(
                         }
                     }
 
-                    yield Ok(sse_message_event(bus_event_payload(&event)));
+                    yield Ok::<Event, Infallible>(sse_message_event(bus_event_payload(&event)));
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 },
                 _ = heartbeat.tick() => {
-                    yield Ok(sse_message_event(heartbeat_payload()));
+                    yield Ok::<Event, Infallible>(sse_message_event(heartbeat_payload()));
                 }
             }
         }
     };
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    (
+        sse_headers(),
+        Sse::new(stream).keep_alive(KeepAlive::default()),
+    )
+}
+
+fn sse_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers
 }
 
 fn sse_message_event(payload: serde_json::Value) -> Event {

@@ -465,7 +465,7 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
         let events = processor
             .process_stream_with_parts(&session_id, prompt_text, message_id, parts)
             .await?;
-        let thinking = args.thinking.unwrap_or(false);
+        let thinking = run_shows_thinking(&args);
         let filtered: Vec<_> = events
             .into_iter()
             .filter(|event| {
@@ -1885,7 +1885,7 @@ async fn run_attach(args: &args::RunArgs, message: String) -> anyhow::Result<()>
     // Run the initial prompt if one was provided.
     let has_initial = !message.trim().is_empty() || args.command.is_some() || args.file.is_some();
     if has_initial {
-        run_attach_turn(&client, &base_url, &session_id, args, &message).await?;
+        run_attach_turn(&client, &base_url, &session_id, args, &message, true).await?;
     }
 
     if !args.interactive {
@@ -1926,7 +1926,9 @@ async fn run_attach(args: &args::RunArgs, message: String) -> anyhow::Result<()>
             println!("Available commands: /exit, /quit, /help");
             continue;
         }
-        if let Err(error) = run_attach_turn(&client, &base_url, &session_id, args, &next).await {
+        if let Err(error) =
+            run_attach_turn(&client, &base_url, &session_id, args, &next, false).await
+        {
             eprintln!("Error: {error}");
         }
     }
@@ -1943,6 +1945,7 @@ async fn run_attach_turn(
     session_id: &str,
     args: &args::RunArgs,
     message: &str,
+    include_files: bool,
 ) -> anyhow::Result<()> {
     let event_stream = client
         .get(format!("{}/event", base_url))
@@ -1957,7 +1960,7 @@ async fn run_attach_turn(
         );
     }
 
-    send_attach_prompt(client, base_url, session_id, args, message).await?;
+    send_attach_prompt(client, base_url, session_id, args, message, include_files).await?;
     relay_attach_events(event_stream, client, base_url, session_id, args).await
 }
 
@@ -1966,10 +1969,9 @@ async fn resolve_attach_session(
     base_url: &str,
     args: &args::RunArgs,
 ) -> anyhow::Result<String> {
-    if let Some(id) = args.session.as_deref().filter(|s| !s.is_empty()) {
-        return Ok(id.to_string());
-    }
-    if args.r#continue {
+    let session_id = if let Some(id) = args.session.as_deref().filter(|s| !s.is_empty()) {
+        id.to_string()
+    } else if args.r#continue {
         let resp = client
             .get(format!("{}/session", base_url))
             .send()
@@ -1979,27 +1981,60 @@ async fn resolve_attach_session(
             .await?;
         if let Some(first) = resp.as_array().and_then(|arr| arr.first()) {
             if let Some(id) = first.get("id").and_then(|v| v.as_str()) {
-                return Ok(id.to_string());
+                id.to_string()
+            } else {
+                anyhow::bail!("--continue requested but remote returned a session without id");
             }
+        } else {
+            anyhow::bail!("--continue requested but remote returned no sessions");
         }
-        anyhow::bail!("--continue requested but remote returned no sessions");
+    } else {
+        let body = serde_json::json!({
+            "title": args.title.clone().unwrap_or_else(|| "Attach session".to_string()),
+        });
+        let created = client
+            .post(format!("{}/session", base_url))
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
+        session_id_from_response(&created)
+            .ok_or_else(|| anyhow::anyhow!("remote /session response had no id"))?
+    };
+
+    if args.fork {
+        fork_attach_session(client, base_url, &session_id).await
+    } else {
+        Ok(session_id)
     }
-    let body = serde_json::json!({
-        "title": args.title.clone().unwrap_or_else(|| "Attach session".to_string()),
-    });
-    let created = client
-        .post(format!("{}/session", base_url))
-        .json(&body)
+}
+
+async fn fork_attach_session(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_id: &str,
+) -> anyhow::Result<String> {
+    let forked = client
+        .post(format!("{}/session/{}/fork", base_url, session_id))
+        .json(&serde_json::json!({}))
         .send()
         .await?
         .error_for_status()?
         .json::<serde_json::Value>()
         .await?;
-    created
+    session_id_from_response(&forked)
+        .ok_or_else(|| anyhow::anyhow!("remote /session/{session_id}/fork response had no id"))
+}
+
+fn session_id_from_response(value: &serde_json::Value) -> Option<String> {
+    value
         .get("id")
+        .or_else(|| value.get("data").and_then(|data| data.get("id")))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| anyhow::anyhow!("remote /session response had no id"))
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string)
 }
 
 async fn send_attach_prompt(
@@ -2008,42 +2043,15 @@ async fn send_attach_prompt(
     session_id: &str,
     args: &args::RunArgs,
     message: &str,
+    include_files: bool,
 ) -> anyhow::Result<()> {
     // Slash commands route to /session/.../command in TS, distinct from
     // /session/.../message. Mirror that here so plugins can intercept.
     if let Some(command) = args.command.as_deref().filter(|c| !c.is_empty()) {
-        let mut body = serde_json::Map::new();
-        body.insert(
-            "command".to_string(),
-            serde_json::Value::String(command.to_string()),
-        );
-        body.insert(
-            "arguments".to_string(),
-            serde_json::Value::String(message.to_string()),
-        );
-        if let Some(model) = args.model.as_deref().filter(|m| !m.is_empty()) {
-            if let Some((provider, model_id)) = model.split_once('/') {
-                body.insert(
-                    "model".to_string(),
-                    serde_json::json!({ "providerID": provider, "modelID": model_id }),
-                );
-            }
-        }
-        if let Some(agent) = args.agent.as_deref().filter(|a| !a.is_empty()) {
-            body.insert(
-                "agent".to_string(),
-                serde_json::Value::String(agent.to_string()),
-            );
-        }
-        if let Some(variant) = args.variant.as_deref().filter(|v| !v.is_empty()) {
-            body.insert(
-                "variant".to_string(),
-                serde_json::Value::String(variant.to_string()),
-            );
-        }
+        let body = attach_command_body(args, command, message);
         let resp = client
             .post(format!("{}/session/{}/command", base_url, session_id))
-            .json(&serde_json::Value::Object(body))
+            .json(&body)
             .send()
             .await?;
         if !resp.status().is_success() {
@@ -2054,44 +2062,96 @@ async fn send_attach_prompt(
         return Ok(());
     }
 
+    let body = attach_message_body(args, message, include_files)?;
+    let resp = client
+        .post(format!("{}/session/{}/message", base_url, session_id))
+        .json(&body)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("remote prompt failed ({status}): {text}");
+    }
+    Ok(())
+}
+
+fn attach_command_body(args: &args::RunArgs, command: &str, message: &str) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "command".to_string(),
+        serde_json::Value::String(command.to_string()),
+    );
+    body.insert(
+        "arguments".to_string(),
+        serde_json::Value::String(message.to_string()),
+    );
+    attach_insert_run_options(&mut body, args);
+    serde_json::Value::Object(body)
+}
+
+fn attach_message_body(
+    args: &args::RunArgs,
+    message: &str,
+    include_files: bool,
+) -> anyhow::Result<serde_json::Value> {
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "parts".to_string(),
+        serde_json::Value::Array(attach_message_parts(args, message, include_files)?),
+    );
+    attach_insert_run_options(&mut body, args);
+    Ok(serde_json::Value::Object(body))
+}
+
+fn attach_message_parts(
+    args: &args::RunArgs,
+    message: &str,
+    include_files: bool,
+) -> anyhow::Result<Vec<serde_json::Value>> {
     // File attachments precede the text part so the model sees inputs in
-    // the same order TS sends them. Files are resolved against the local
-    // working directory and forwarded as `file://` URLs — the remote
-    // server reads them in turn.
+    // the same order TS sends them. TS only sends CLI `--file` attachments
+    // on the first interactive turn; follow-up lines carry only text.
     let mut parts: Vec<serde_json::Value> = Vec::new();
-    if let Some(files) = args.file.as_ref() {
-        let base_dir =
-            std::env::current_dir().map_err(|e| anyhow::anyhow!("failed to read cwd: {e}"))?;
-        for file in files {
-            let path = std::path::PathBuf::from(file);
-            let resolved = if path.is_absolute() {
-                path
-            } else {
-                base_dir.join(&path)
-            };
-            if !resolved.exists() {
-                anyhow::bail!("file not found: {file}");
+    if include_files {
+        if let Some(files) = args.file.as_ref() {
+            let base_dir =
+                std::env::current_dir().map_err(|e| anyhow::anyhow!("failed to read cwd: {e}"))?;
+            for file in files {
+                let path = std::path::PathBuf::from(file);
+                let resolved = if path.is_absolute() {
+                    path
+                } else {
+                    base_dir.join(&path)
+                };
+                if !resolved.exists() {
+                    anyhow::bail!("file not found: {file}");
+                }
+                let mime = if resolved.is_dir() {
+                    "application/x-directory"
+                } else {
+                    "text/plain"
+                };
+                parts.push(serde_json::json!({
+                    "type": "file",
+                    "url": format!("file://{}", resolved.to_string_lossy()),
+                    "filename": resolved
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    "mime": mime,
+                }));
             }
-            let mime = if resolved.is_dir() {
-                "application/x-directory"
-            } else {
-                "text/plain"
-            };
-            parts.push(serde_json::json!({
-                "type": "file",
-                "url": format!("file://{}", resolved.to_string_lossy()),
-                "filename": resolved
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                "mime": mime,
-            }));
         }
     }
     parts.push(serde_json::json!({ "type": "text", "text": message }));
+    Ok(parts)
+}
 
-    let mut body = serde_json::Map::new();
-    body.insert("parts".to_string(), serde_json::Value::Array(parts));
+fn attach_insert_run_options(
+    body: &mut serde_json::Map<String, serde_json::Value>,
+    args: &args::RunArgs,
+) {
     if let Some(model) = args.model.as_deref().filter(|m| !m.is_empty()) {
         if let Some((provider, model_id)) = model.split_once('/') {
             body.insert(
@@ -2112,17 +2172,10 @@ async fn send_attach_prompt(
             serde_json::Value::String(variant.to_string()),
         );
     }
-    let resp = client
-        .post(format!("{}/session/{}/message", base_url, session_id))
-        .json(&serde_json::Value::Object(body))
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("remote prompt failed ({status}): {text}");
-    }
-    Ok(())
+}
+
+fn run_shows_thinking(args: &args::RunArgs) -> bool {
+    args.thinking.unwrap_or(args.interactive)
 }
 
 async fn relay_attach_events(
@@ -2283,6 +2336,32 @@ mod tests {
                 chunk_timeout: None,
             }),
             models: None,
+        }
+    }
+
+    fn run_args() -> args::RunArgs {
+        args::RunArgs {
+            message: Vec::new(),
+            command: None,
+            r#continue: false,
+            session: None,
+            fork: false,
+            share: false,
+            model: None,
+            agent: None,
+            file: None,
+            format: args::RunFormat::Default,
+            title: None,
+            attach: None,
+            password: None,
+            username: None,
+            dir: None,
+            port: None,
+            variant: None,
+            thinking: None,
+            interactive: false,
+            dangerously_skip_permissions: false,
+            demo: false,
         }
     }
 
@@ -2477,6 +2556,22 @@ mod tests {
     }
 
     #[test]
+    fn run_thinking_defaults_to_interactive_mode() {
+        let mut args = run_args();
+        assert!(!run_shows_thinking(&args));
+
+        args.interactive = true;
+        assert!(run_shows_thinking(&args));
+
+        args.thinking = Some(false);
+        assert!(!run_shows_thinking(&args));
+
+        args.interactive = false;
+        args.thinking = Some(true);
+        assert!(run_shows_thinking(&args));
+    }
+
+    #[test]
     fn wellknown_credentials_export_their_env_vars() {
         // Unique key per test run so parallel tests do not collide.
         let key = format!("OPENCODE_WELLKNOWN_TEST_{}", uuid::Uuid::new_v4().simple());
@@ -2634,6 +2729,43 @@ mod tests {
         // And that path segments stay path-like under repeat encoding.
         let trailing = urlencoding::encode("/tmp/").into_owned();
         assert!(trailing.starts_with("%2Ftmp"));
+    }
+
+    #[test]
+    fn attach_message_parts_include_files_only_on_first_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "attached text").unwrap();
+        let mut args = run_args();
+        args.file = Some(vec![file.to_string_lossy().to_string()]);
+
+        let first = attach_message_parts(&args, "first", true).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0]["type"], "file");
+        assert_eq!(first[1]["type"], "text");
+        assert_eq!(first[1]["text"], "first");
+
+        let follow_up = attach_message_parts(&args, "next", false).unwrap();
+        assert_eq!(follow_up.len(), 1);
+        assert_eq!(follow_up[0]["type"], "text");
+        assert_eq!(follow_up[0]["text"], "next");
+    }
+
+    #[test]
+    fn attach_session_id_parser_accepts_sdk_and_direct_shapes() {
+        assert_eq!(
+            session_id_from_response(&serde_json::json!({ "id": "ses_direct" })).as_deref(),
+            Some("ses_direct")
+        );
+        assert_eq!(
+            session_id_from_response(&serde_json::json!({
+                "data": { "id": "ses_sdk" }
+            }))
+            .as_deref(),
+            Some("ses_sdk")
+        );
+        assert!(session_id_from_response(&serde_json::json!({ "data": { "id": "" } })).is_none());
+        assert!(session_id_from_response(&serde_json::json!({})).is_none());
     }
 
     #[test]

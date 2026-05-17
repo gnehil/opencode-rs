@@ -69,10 +69,11 @@ use std::sync::Arc;
 ///     session_search
 ///   * Repository: repo_clone
 ///
-/// Two tools intentionally NOT registered by default:
-///   * `RepoCloneTool` — destructive (writes a new directory tree); needs
-///     explicit permission flow before exposing to the agent.
-///   * Provider-internal tools (e.g. `LspTool` is exposed but its
+/// Tools still run through the permission layer after being exposed. The
+/// default build agent denies `repo_clone`; specialist agents can opt in.
+///
+/// Provider-internal tools:
+///   * `LspTool` is exposed but its
 ///     workspace-symbol op needs a non-empty query so the agent rarely
 ///     finds it useful without prompting; we expose it anyway).
 ///
@@ -92,6 +93,7 @@ pub fn default_registry() -> Vec<Arc<dyn Tool>> {
         Arc::new(AstGrepSearchTool),
         Arc::new(AstGrepReplaceTool),
         Arc::new(RepoSearchTool),
+        Arc::new(RepoCloneTool),
         Arc::new(RepoOverviewTool),
         Arc::new(WebFetchTool),
         Arc::new(WebSearchTool),
@@ -115,4 +117,17 @@ pub fn registry_with(mut extra: Vec<Arc<dyn Tool>>) -> Vec<Arc<dyn Tool>> {
     let mut tools = default_registry();
     tools.append(&mut extra);
     tools
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn default_registry_exposes_repo_clone() {
+        let tools = super::default_registry();
+
+        assert!(
+            tools.iter().any(|tool| tool.name() == "repo_clone"),
+            "repo_clone should be available for agents whose permissions allow it"
+        );
+    }
 }

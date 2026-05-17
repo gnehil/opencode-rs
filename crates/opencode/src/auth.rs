@@ -120,7 +120,7 @@ impl AuthStore {
             std::fs::create_dir_all(parent)?;
         }
         let text = serde_json::to_string_pretty(entries)?;
-        std::fs::write(&self.filepath, format!("{}\n", text))?;
+        crate::util::filesystem::write_private_file(&self.filepath, format!("{}\n", text))?;
         Ok(())
     }
 }
@@ -144,6 +144,27 @@ mod tests {
         reloaded.load().await.expect("load should read credentials");
 
         assert_eq!(reloaded.get("openai").await, Some(AuthInfo::api("sk-test")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auth_store_writes_private_auth_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = AuthStore::new(temp.path().to_path_buf());
+
+        store
+            .set("openai", AuthInfo::api("sk-test"))
+            .await
+            .expect("set should persist credentials");
+
+        let mode = std::fs::metadata(store.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[tokio::test]
