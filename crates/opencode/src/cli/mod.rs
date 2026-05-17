@@ -624,9 +624,8 @@ fn interactive_input_source() -> Option<Box<dyn std::io::BufRead + Send>> {
     Some(Box::new(std::io::BufReader::new(std::io::stdin())))
 }
 
-/// True when interactive output makes sense — i.e. when stdout is a real
-/// terminal. We treat a redirected stdout as "non-interactive" for prompt
-/// printing but still allow the loop itself, mirroring TS `stdout.isTTY`.
+/// True when stdout can drive an interactive run. `handle_run` rejects
+/// redirected stdout up front to match TS `process.stdout.isTTY`.
 fn interactive_stdout_is_tty() -> bool {
     use std::io::IsTerminal as _;
     std::io::stdout().is_terminal()
