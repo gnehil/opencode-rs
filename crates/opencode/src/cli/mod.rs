@@ -256,14 +256,21 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
             None
         }
     };
+    let mcp_manager = load_mcp_manager_from_config(project_config.as_ref(), &data_dir).await;
     let run_command = match args.command.as_deref() {
         Some(command) => Some(
-            resolve_run_command(command, &message, &project_path, project_config.as_ref())
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("Failed to resolve command '{}': {}", command, e);
-                    std::process::exit(1);
-                }),
+            resolve_run_command(
+                command,
+                &message,
+                &project_path,
+                project_config.as_ref(),
+                mcp_manager.as_ref(),
+            )
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to resolve command '{}': {}", command, e);
+                std::process::exit(1);
+            }),
         ),
         None => None,
     };
@@ -399,7 +406,10 @@ async fn handle_run(args: Box<args::RunArgs>, data_dir: PathBuf) {
     }
 
     let store = Arc::new(store);
-    let mcp_tools = load_mcp_tools_from_project(&project_path, &data_dir).await;
+    let mcp_tools = match &mcp_manager {
+        Some(manager) => manager.runtime_tools().await,
+        None => Vec::new(),
+    };
     let mut processor = PromptProcessor::new(store.clone(), provider)
         .with_tools(crate::tool::registry_with(mcp_tools))
         .with_agent(agent_name);
@@ -565,12 +575,14 @@ async fn resolve_run_command(
     arguments: &str,
     project_path: &std::path::Path,
     config: Option<&Config>,
+    mcp_manager: Option<&crate::mcp::McpManager>,
 ) -> anyhow::Result<RunCommandInput> {
     let name = command_name.trim().trim_start_matches('/');
     if name.is_empty() {
         anyhow::bail!("command name cannot be empty");
     }
-    let commands = crate::command::load_commands(project_path, config)?;
+    let commands =
+        crate::command::load_commands_with_mcp_prompts(project_path, config, mcp_manager).await?;
     let command = commands
         .into_iter()
         .find(|command| command.name == name)
@@ -1241,9 +1253,10 @@ fn infer_provider_id(model: Option<&str>, has_anthropic_key: bool, has_openai_ke
     "anthropic".to_string()
 }
 
-type ProviderCredentials = std::collections::BTreeMap<String, provider_auth::ProviderCredential>;
+pub(crate) type ProviderCredentials =
+    std::collections::BTreeMap<String, provider_auth::ProviderCredential>;
 
-fn load_provider_credentials(data_dir: &PathBuf) -> ProviderCredentials {
+pub(crate) fn load_provider_credentials(data_dir: &PathBuf) -> ProviderCredentials {
     let credentials = provider_auth::ProviderAuthStore::new(data_dir.clone())
         .load()
         .unwrap_or_default();
@@ -1307,6 +1320,22 @@ fn build_provider_from_model_config_auth_or_env(
                 std::env::var_os("OPENAI_API_KEY").is_some(),
             )
         });
+    if let Some(provider) = build_provider_from_config_with_auth(&provider_id, config, credentials)?
+    {
+        return Ok(provider);
+    }
+    if let Some(provider) = build_provider_from_auth(&provider_id, credentials)? {
+        return Ok(provider);
+    }
+    build_provider_from_env(&provider_id)
+}
+
+pub(crate) fn build_provider_from_id_config_auth_or_env(
+    provider_id: &str,
+    config: Option<&Config>,
+    credentials: Option<&ProviderCredentials>,
+) -> anyhow::Result<Arc<dyn Provider>> {
+    let provider_id = normalize_provider_id(provider_id);
     if let Some(provider) = build_provider_from_config_with_auth(&provider_id, config, credentials)?
     {
         return Ok(provider);
@@ -1467,7 +1496,7 @@ fn build_provider_from_parts(
     }
 }
 
-fn normalize_provider_id(provider_id: &str) -> String {
+pub(crate) fn normalize_provider_id(provider_id: &str) -> String {
     provider_id_from_model(Some(provider_id))
         .unwrap_or_else(|| provider_id.trim().to_ascii_lowercase())
 }
@@ -1751,23 +1780,15 @@ fn open_browser(url: &str) {
     }
 }
 
-async fn load_mcp_tools_from_project(
-    project_path: &std::path::Path,
+async fn load_mcp_manager_from_config(
+    config: Option<&Config>,
     data_dir: &std::path::Path,
-) -> Vec<Arc<dyn crate::tool::Tool>> {
-    let config = match crate::config::load_project_config(project_path) {
-        Ok(Some(config)) => config,
-        Ok(None) => return Vec::new(),
-        Err(e) => {
-            eprintln!("Warning: failed to load opencode config: {}", e);
-            return Vec::new();
-        }
-    };
-
+) -> Option<crate::mcp::McpManager> {
+    let config = config?;
     let auth_store = Arc::new(crate::mcp::McpAuthStore::new(data_dir.to_path_buf()));
     let mut manager = crate::mcp::McpManager::new().with_auth_store(auth_store);
-    manager.start_configured(&config).await;
-    manager.runtime_tools().await
+    manager.start_configured(config).await;
+    Some(manager)
 }
 
 async fn handle_acp(args: args::AcpArgs, data_dir: PathBuf) {

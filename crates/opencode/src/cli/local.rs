@@ -1594,45 +1594,74 @@ pub(crate) fn handle_pr(args: args::PrArgs) -> Result<()> {
 }
 
 pub(crate) async fn handle_attach(args: args::AttachArgs) -> Result<()> {
-    if let Some(dir) = args.dir {
-        std::env::set_current_dir(&dir)
-            .with_context(|| format!("failed to change directory to {dir}"))?;
+    if args.fork && !args.r#continue && args.session.is_none() {
+        anyhow::bail!("--fork requires --continue or --session");
     }
-    let base_url = args
-        .url
-        .unwrap_or_else(|| "http://127.0.0.1:4096".to_string());
+
+    let directory = match args.dir.as_deref().filter(|dir| !dir.is_empty()) {
+        Some(dir) => match std::env::set_current_dir(dir) {
+            Ok(()) => Some(std::env::current_dir()?.to_string_lossy().to_string()),
+            Err(_) => Some(dir.to_string()),
+        },
+        None => None,
+    };
+    let base_url = args.url.as_deref().unwrap_or("http://127.0.0.1:4096");
+    let base_url = base_url.trim_end_matches('/').to_string();
     let client = reqwest::Client::new();
-    let mut health = client.get(format!("{}/health", base_url.trim_end_matches('/')));
+    let mut health = client.get(format!("{}/health", base_url));
+    if let Some(dir) = directory.as_deref() {
+        health = health.header(
+            "x-opencode-directory",
+            urlencoding::encode(dir).into_owned(),
+        );
+    }
     let username = args
         .username
+        .as_deref()
+        .map(ToString::to_string)
         .or_else(|| std::env::var("OPENCODE_SERVER_USERNAME").ok())
         .unwrap_or_else(|| "opencode".to_string());
     let password = args
         .password
+        .as_deref()
+        .map(ToString::to_string)
         .or_else(|| std::env::var("OPENCODE_SERVER_PASSWORD").ok());
     if let Some(password) = password.as_ref() {
         health = health.basic_auth(&username, Some(password));
     }
     health.send().await?.error_for_status()?;
 
-    if let Some(session) = args.session {
-        let endpoint = local_process::attach_select_session_endpoint(&base_url, &session);
-        let mut request = client
-            .post(endpoint)
-            .json(&serde_json::json!({ "session_id": session }));
+    if let Some(session) = args
+        .session
+        .as_deref()
+        .filter(|session| !session.is_empty())
+    {
+        let mut request = client.get(format!("{}/session/{}", base_url, session));
         if let Some(password) = password.as_ref() {
             request = request.basic_auth(&username, Some(password));
         }
+        if let Some(dir) = directory.as_deref() {
+            request = request.header(
+                "x-opencode-directory",
+                urlencoding::encode(dir).into_owned(),
+            );
+        }
         request.send().await?.error_for_status()?;
-        println!("Attached server {} to session.", base_url);
-    } else if args.r#continue {
-        println!(
-            "Connected to {}. Continue mode requires the running TUI to select its latest session.",
-            base_url
-        );
-    } else {
-        println!("Connected to {}.", base_url);
     }
+
+    let mut command = local_process::attach_run_command(
+        &base_url,
+        directory.as_deref(),
+        args.r#continue,
+        args.session.as_deref(),
+        args.fork,
+        args.password.as_deref(),
+        args.username.as_deref(),
+    );
+    if let Ok(current_exe) = std::env::current_exe() {
+        command.program = current_exe.to_string_lossy().to_string();
+    }
+    run_command_spec_status(&command)?;
     Ok(())
 }
 

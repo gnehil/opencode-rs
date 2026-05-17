@@ -493,8 +493,16 @@ pub async fn command(
     if command_name.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let commands = crate::command::load_commands(&state.workspace_root, state.config.as_ref())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let commands = {
+        let manager = state.mcp_manager.read().await;
+        crate::command::load_commands_with_mcp_prompts(
+            &state.workspace_root,
+            state.config.as_ref(),
+            Some(&manager),
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
     let command = commands
         .into_iter()
         .find(|command| command.name == command_name)

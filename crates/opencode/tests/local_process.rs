@@ -2,11 +2,10 @@
 mod local_process;
 
 use local_process::{
-    attach_select_session_endpoint, cross_repo_pr_commands, github_workflow_contents,
-    github_workflow_file, join_run_message, normalize_upgrade_target, opencode_start_command,
-    parse_imported_session_id, parse_opencode_session_url, pr_checkout_command, pr_view_command,
-    resolve_run_input, resolve_upgrade_method, upgrade_plan, CommandSpec, InstallMethod,
-    UpgradeAction,
+    attach_run_command, cross_repo_pr_commands, github_workflow_contents, github_workflow_file,
+    join_run_message, normalize_upgrade_target, opencode_start_command, parse_imported_session_id,
+    parse_opencode_session_url, pr_checkout_command, pr_view_command, resolve_run_input,
+    resolve_upgrade_method, upgrade_plan, CommandSpec, InstallMethod, UpgradeAction,
 };
 
 #[test]
@@ -165,10 +164,36 @@ fn github_workflow_install_content_uses_bundled_action_and_model() {
 }
 
 #[test]
-fn attach_select_session_endpoint_normalizes_base_url() {
+fn attach_run_command_delegates_to_interactive_run_attach() {
     assert_eq!(
-        attach_select_session_endpoint("http://127.0.0.1:4096/", "ses_123"),
-        "http://127.0.0.1:4096/tui/select-session"
+        attach_run_command(
+            "http://127.0.0.1:4096/",
+            Some("/remote/project"),
+            true,
+            Some("ses_123"),
+            true,
+            Some("secret"),
+            Some("alice"),
+        ),
+        CommandSpec {
+            program: "opencode".to_string(),
+            args: vec![
+                "run".to_string(),
+                "--interactive".to_string(),
+                "--attach".to_string(),
+                "http://127.0.0.1:4096".to_string(),
+                "--dir".to_string(),
+                "/remote/project".to_string(),
+                "--continue".to_string(),
+                "--session".to_string(),
+                "ses_123".to_string(),
+                "--fork".to_string(),
+                "--password".to_string(),
+                "secret".to_string(),
+                "--username".to_string(),
+                "alice".to_string(),
+            ],
+        }
     );
 }
 

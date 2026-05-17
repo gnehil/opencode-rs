@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::bus::EventBus;
 use crate::id::{MessageID, PartID, SessionID};
+use crate::provider::Provider;
 use crate::session::SessionStore;
 use crate::storage::SessionRow;
 
@@ -129,6 +130,17 @@ pub struct InitSessionBody {
     pub provider_id: String,
     #[serde(rename = "messageID", alias = "message_id", alias = "messageId")]
     pub message_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummarizeSessionBody {
+    #[serde(rename = "modelID", alias = "model_id", alias = "modelId")]
+    pub model_id: String,
+    #[serde(rename = "providerID", alias = "provider_id", alias = "providerId")]
+    pub provider_id: String,
+    #[serde(default)]
+    pub auto: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -295,6 +307,65 @@ pub async fn init_session(
     };
     let _ = super::message_handlers::command(State(state), Path(id), Json(req)).await?;
     Ok(Json(true))
+}
+
+pub async fn summarize_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<SummarizeSessionBody>,
+) -> Result<Json<bool>, StatusCode> {
+    let store = state.get_store().await;
+    let session_id = SessionID::parse(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if store
+        .get(&session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let provider = summarize_provider(&state, &body.provider_id)?;
+    store
+        .clear_revert(&session_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let store = Arc::new(store);
+    crate::session::compact_session_with_options(
+        &store,
+        &session_id,
+        &provider,
+        &body.provider_id,
+        &body.model_id,
+        body.auto.unwrap_or(false),
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state
+        .event_bus
+        .publish(crate::bus::Event::session_update(&id));
+    Ok(Json(true))
+}
+
+fn summarize_provider(
+    state: &AppState,
+    provider_id: &str,
+) -> Result<Arc<dyn Provider>, StatusCode> {
+    let requested = crate::cli::normalize_provider_id(provider_id);
+    if let Some(provider) = state.provider.as_ref() {
+        if requested.is_empty() || crate::cli::normalize_provider_id(provider.name()) == requested {
+            return Ok(provider.clone());
+        }
+    }
+
+    let credentials = crate::cli::load_provider_credentials(&state.data_dir);
+    crate::cli::build_provider_from_id_config_auth_or_env(
+        provider_id,
+        state.config.as_ref(),
+        Some(&credentials),
+    )
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
 }
 
 pub async fn update_session(

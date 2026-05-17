@@ -1,7 +1,8 @@
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::json;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use super::context::ToolContext;
 use super::r#trait::Tool;
@@ -450,9 +451,270 @@ impl Tool for RepoCloneTool {
 
 #[derive(Debug, Deserialize)]
 pub struct RepoOverviewParams {
-    pub path: String,
     #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub depth: Option<usize>,
+    #[serde(default, alias = "maxFiles")]
     pub max_files: Option<usize>,
+}
+
+struct RepoOverviewTarget {
+    path: PathBuf,
+    repository: Option<String>,
+}
+
+struct RepoOverviewEntry {
+    name: String,
+    path: PathBuf,
+    directory: bool,
+}
+
+const REPO_OVERVIEW_IGNORED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "dist",
+    "build",
+    ".next",
+    "target",
+    "vendor",
+];
+const REPO_OVERVIEW_STRUCTURE_LIMIT: usize = 200;
+const REPO_OVERVIEW_MAX_STRUCTURE_LIMIT: usize = 1000;
+const REPO_OVERVIEW_DEPENDENCY_FILES: &[&str] = &[
+    "package.json",
+    "package-lock.json",
+    "bun.lock",
+    "bun.lockb",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "requirements.txt",
+    "pyproject.toml",
+    "go.mod",
+    "Cargo.toml",
+    "Gemfile",
+    "build.gradle",
+    "build.gradle.kts",
+    "pom.xml",
+    "composer.json",
+];
+const REPO_OVERVIEW_COMMON_ENTRYPOINTS: &[&str] = &[
+    "index.ts",
+    "index.tsx",
+    "index.js",
+    "index.mjs",
+    "main.ts",
+    "main.js",
+    "src/index.ts",
+    "src/index.tsx",
+    "src/index.js",
+    "src/main.ts",
+    "src/main.js",
+];
+
+fn resolve_repo_overview_target(
+    params: &RepoOverviewParams,
+    working_dir: &Path,
+) -> Result<RepoOverviewTarget> {
+    if let Some(requested_path) = params.path.as_deref().filter(|p| !p.trim().is_empty()) {
+        let path = Path::new(requested_path);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            working_dir.join(path)
+        };
+        return Ok(RepoOverviewTarget {
+            path,
+            repository: params.repository.clone(),
+        });
+    }
+
+    let repository = params
+        .repository
+        .as_deref()
+        .filter(|r| !r.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Either repository or path is required"))?;
+    let reference = parse_remote_repository_reference(repository)?;
+    Ok(RepoOverviewTarget {
+        path: repository_cache_path(&reference),
+        repository: Some(reference.label),
+    })
+}
+
+fn repo_overview_depth(depth: Option<usize>) -> usize {
+    match depth {
+        Some(depth) if (1..=6).contains(&depth) => depth,
+        _ => 3,
+    }
+}
+
+fn repo_overview_max_files(max_files: Option<usize>) -> usize {
+    max_files
+        .filter(|max| *max > 0)
+        .unwrap_or(REPO_OVERVIEW_STRUCTURE_LIMIT)
+        .min(REPO_OVERVIEW_MAX_STRUCTURE_LIMIT)
+}
+
+fn repo_overview_entries(dir: &Path) -> Vec<RepoOverviewEntry> {
+    let ignored: HashSet<&str> = REPO_OVERVIEW_IGNORED_DIRS.iter().copied().collect();
+    let mut entries = std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(|entry| entry.ok()))
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if ignored.contains(name.as_str()) {
+                return None;
+            }
+            let file_type = entry.file_type().ok()?;
+            Some(RepoOverviewEntry {
+                name,
+                path: entry.path(),
+                directory: file_type.is_dir(),
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| {
+        b.directory
+            .cmp(&a.directory)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    entries
+}
+
+fn repo_overview_structure(root: &Path, depth: usize, max_files: usize) -> (Vec<String>, bool) {
+    fn visit(
+        dir: &Path,
+        level: usize,
+        depth: usize,
+        max_files: usize,
+        lines: &mut Vec<String>,
+        truncated: &mut bool,
+    ) {
+        if level >= depth {
+            return;
+        }
+        for entry in repo_overview_entries(dir) {
+            if lines.len() >= max_files {
+                *truncated = true;
+                return;
+            }
+            lines.push(format!(
+                "{}{}{}",
+                "  ".repeat(level),
+                entry.name,
+                if entry.directory { "/" } else { "" }
+            ));
+            if entry.directory {
+                visit(&entry.path, level + 1, depth, max_files, lines, truncated);
+            }
+        }
+    }
+
+    let mut lines = Vec::new();
+    let mut truncated = false;
+    visit(root, 0, depth, max_files, &mut lines, &mut truncated);
+    (lines, truncated)
+}
+
+fn repo_overview_package_manager(files: &HashSet<String>) -> Option<&'static str> {
+    if files.contains("bun.lock") || files.contains("bun.lockb") {
+        Some("bun")
+    } else if files.contains("pnpm-lock.yaml") {
+        Some("pnpm")
+    } else if files.contains("yarn.lock") {
+        Some("yarn")
+    } else if files.contains("package-lock.json") {
+        Some("npm")
+    } else {
+        None
+    }
+}
+
+fn repo_overview_ecosystems(files: &HashSet<String>) -> Vec<&'static str> {
+    let mut result = Vec::new();
+    if files.contains("package.json") {
+        result.push("Node.js");
+    }
+    if files.contains("pyproject.toml") || files.contains("requirements.txt") {
+        result.push("Python");
+    }
+    if files.contains("go.mod") {
+        result.push("Go");
+    }
+    if files.contains("Cargo.toml") {
+        result.push("Rust");
+    }
+    if files.contains("Gemfile") {
+        result.push("Ruby");
+    }
+    if files.contains("build.gradle")
+        || files.contains("build.gradle.kts")
+        || files.contains("pom.xml")
+    {
+        result.push("Java/Kotlin");
+    }
+    if files.contains("composer.json") {
+        result.push("PHP");
+    }
+    result
+}
+
+fn repo_overview_package_entrypoints(root: &Path, files: &HashSet<String>) -> Vec<String> {
+    if !files.contains("package.json") {
+        return Vec::new();
+    }
+    let package_json = std::fs::read_to_string(root.join("package.json"))
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .unwrap_or_else(|| json!({}));
+    let mut entrypoints = Vec::new();
+    if let Some(main) = package_json.get("main").and_then(|value| value.as_str()) {
+        entrypoints.push(format!("main: {main}"));
+    }
+    if let Some(module) = package_json.get("module").and_then(|value| value.as_str()) {
+        entrypoints.push(format!("module: {module}"));
+    }
+    if let Some(types) = package_json.get("types").and_then(|value| value.as_str()) {
+        entrypoints.push(format!("types: {types}"));
+    }
+    if let Some(bin) = package_json.get("bin") {
+        if let Some(bin) = bin.as_str() {
+            entrypoints.push(format!("bin: {bin}"));
+        } else if let Some(map) = bin.as_object() {
+            entrypoints.extend(map.keys().map(|name| format!("bin: {name}")));
+        }
+    }
+    if let Some(exports) = package_json
+        .get("exports")
+        .and_then(|value| value.as_object())
+    {
+        entrypoints.extend(
+            exports
+                .keys()
+                .take(10)
+                .map(|name| format!("exports: {name}")),
+        );
+    }
+    entrypoints
+}
+
+fn repo_overview_common_entrypoints(root: &Path, top_level: &HashSet<String>) -> Vec<String> {
+    REPO_OVERVIEW_COMMON_ENTRYPOINTS
+        .iter()
+        .filter(|file| {
+            if !file.contains('/') {
+                top_level.contains(**file)
+            } else {
+                root.join(file).is_file()
+            }
+        })
+        .map(|file| format!("file: {file}"))
+        .collect()
 }
 
 pub struct RepoOverviewTool;
@@ -470,67 +732,137 @@ impl Tool for RepoOverviewTool {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Repository path to analyze" },
-                "max_files": { "type": "integer", "description": "Maximum files to include in overview" }
-            },
-            "required": ["path"]
+                "repository": {
+                    "type": "string",
+                    "description": "Cached repository to inspect, as a git URL, host/path reference, or GitHub owner/repo shorthand"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory path to inspect instead of a cached repository"
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "Maximum structure depth to include. Defaults to 3."
+                },
+                "maxFiles": {
+                    "type": "integer",
+                    "description": "Maximum files to include in the structure. Defaults to 200."
+                },
+                "max_files": {
+                    "type": "integer",
+                    "description": "Legacy alias for maxFiles"
+                }
+            }
         })
     }
 
     fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: ToolContext,
+        ctx: ToolContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>> {
         Box::pin(async move {
             let params: RepoOverviewParams = serde_json::from_value(params)
                 .map_err(|e| anyhow::anyhow!("Invalid repo_overview parameters: {}", e))?;
 
-            let path = std::path::PathBuf::from(&params.path);
-            if !path.exists() {
-                return Err(anyhow::anyhow!("Path not found: {}", params.path));
-            }
+            let target = resolve_repo_overview_target(&params, &ctx.working_dir)?;
+            let depth = repo_overview_depth(params.depth);
+            let max_files = repo_overview_max_files(params.max_files);
+            let target_display = target.path.display().to_string();
+            let permission_pattern = target
+                .repository
+                .as_deref()
+                .unwrap_or(&target_display)
+                .to_string();
 
-            let mut overview = format!("# Repository Overview: {}\n\n", params.path);
+            super::assert_external_directory(
+                &ctx,
+                &target.path,
+                super::ExternalKind::Directory,
+                false,
+            )
+            .await?;
+            ctx.check_permission("repo_overview", &permission_pattern)
+                .await?;
 
-            if let Ok(entries) = std::fs::read_dir(&path) {
-                let mut dirs = Vec::new();
-                let mut files = Vec::new();
-
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with('.') {
-                        continue;
-                    }
-                    if entry.path().is_dir() {
-                        dirs.push(name);
-                    } else {
-                        files.push(name);
-                    }
+            if !target.path.exists() {
+                if let Some(repository) = &target.repository {
+                    return Err(anyhow::anyhow!(
+                        "Repository is not cloned: {repository}. Use repo_clone first. Expected path: {target_display}"
+                    ));
                 }
-
-                overview.push_str(&format!(
-                    "## Directories ({})\n{}\n\n",
-                    dirs.len(),
-                    dirs.join(", ")
-                ));
-                overview.push_str(&format!(
-                    "## Root Files ({})\n{}\n\n",
-                    files.len(),
-                    files.join(", ")
-                ));
+                return Err(anyhow::anyhow!("Directory not found: {target_display}"));
+            }
+            if !target.path.is_dir() {
+                return Err(anyhow::anyhow!("Path is not a directory: {target_display}"));
             }
 
-            if let Ok(output) = std::process::Command::new("git")
-                .args(["log", "--oneline", "-10"])
-                .current_dir(&path)
-                .output()
-            {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                overview.push_str(&format!("## Recent Commits\n{}\n", stdout));
+            let entries = repo_overview_entries(&target.path);
+            let top_level = entries
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<HashSet<_>>();
+            let dependency_files = REPO_OVERVIEW_DEPENDENCY_FILES
+                .iter()
+                .filter(|file| top_level.contains(**file))
+                .copied()
+                .collect::<Vec<_>>();
+            let package_manager = repo_overview_package_manager(&top_level);
+            let ecosystems = repo_overview_ecosystems(&top_level);
+            let mut entrypoints = repo_overview_package_entrypoints(&target.path, &top_level);
+            entrypoints.extend(repo_overview_common_entrypoints(&target.path, &top_level));
+            let (structure, truncated) = repo_overview_structure(&target.path, depth, max_files);
+
+            let branch = git_output(
+                &["symbolic-ref", "--quiet", "--short", "HEAD"],
+                &target.path,
+            );
+            let head = git_output(&["rev-parse", "HEAD"], &target.path);
+
+            let metadata = json!({
+                "path": target_display,
+                "repository": target.repository.clone(),
+                "branch": branch.clone(),
+                "head": head.clone(),
+                "package_manager": package_manager,
+                "ecosystems": ecosystems.clone(),
+                "dependency_files": dependency_files.clone(),
+                "entrypoints": entrypoints.clone(),
+                "depth": depth,
+                "maxFiles": max_files,
+                "truncated": truncated,
+            });
+
+            let mut output = vec![format!("Path: {target_display}")];
+            if let Some(repository) = &target.repository {
+                output.push(format!("Repository: {repository}"));
+            }
+            if let Some(branch) = &branch {
+                output.push(format!("Branch: {branch}"));
+            }
+            if let Some(head) = &head {
+                output.push(format!("HEAD: {head}"));
+            }
+            if !ecosystems.is_empty() {
+                output.push(format!("Ecosystems: {}", ecosystems.join(", ")));
+            }
+            if let Some(package_manager) = package_manager {
+                output.push(format!("Package manager: {package_manager}"));
+            }
+            if !dependency_files.is_empty() {
+                output.push(format!("Dependency files: {}", dependency_files.join(", ")));
+            }
+            if !entrypoints.is_empty() {
+                output.push("Likely entrypoints:".to_string());
+                output.extend(entrypoints.iter().map(|entry| format!("- {entry}")));
+            }
+            output.push("Top-level structure:".to_string());
+            output.extend(structure);
+            if truncated {
+                output.push("(Structure truncated)".to_string());
             }
 
-            Ok(ToolResult::new(overview))
+            Ok(ToolResult::with_metadata(output.join("\n"), metadata))
         })
     }
 }
@@ -646,5 +978,132 @@ mod tests {
             .to_string();
 
         assert!(err.contains("denied by permission rule"), "got: {err}");
+    }
+
+    #[test]
+    fn repo_overview_schema_matches_upstream_repository_parameters() {
+        let schema = RepoOverviewTool.parameters_schema();
+        let properties = schema["properties"].as_object().unwrap();
+
+        assert!(properties.contains_key("repository"));
+        assert!(properties.contains_key("path"));
+        assert!(properties.contains_key("depth"));
+        assert!(properties.contains_key("maxFiles"));
+        assert!(properties.contains_key("max_files"));
+        assert!(schema.get("required").is_none() || schema["required"] == json!([]));
+    }
+
+    #[tokio::test]
+    async fn repo_overview_resolves_repository_to_managed_cache_target() {
+        let err = RepoOverviewTool
+            .execute(
+                json!({
+                    "repository": "owner/project",
+                    "depth": 2
+                }),
+                ctx(vec![
+                    PermissionRule::allow_tool("external_directory"),
+                    PermissionRule::allow_tool("repo_overview"),
+                ]),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("Repository is not cloned: owner/project"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains(&crate::global::repos().display().to_string()),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_overview_prefers_path_and_keeps_legacy_relative_path_compatibility() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        let repo = root.join("local-repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("package.json"), r#"{"main":"index.js"}"#).unwrap();
+        std::fs::write(repo.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+
+        let result = RepoOverviewTool
+            .execute(
+                json!({
+                    "repository": "owner/ignored",
+                    "path": "local-repo",
+                    "depth": 2
+                }),
+                ctx_with_working_dir(
+                    root.clone(),
+                    vec![PermissionRule::allow_tool("repo_overview")],
+                ),
+            )
+            .await
+            .unwrap();
+
+        let metadata = result.metadata.unwrap();
+        assert_eq!(metadata["path"], json!(repo.display().to_string()));
+        assert_eq!(metadata["repository"], json!("owner/ignored"));
+        assert_eq!(metadata["depth"], json!(2));
+        assert!(result.output.contains(&format!("Path: {}", repo.display())));
+        assert!(result.output.contains("Repository: owner/ignored"));
+    }
+
+    #[tokio::test]
+    async fn repo_overview_uses_repo_overview_permission_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let err = RepoOverviewTool
+            .execute(
+                json!({
+                    "path": repo.display().to_string()
+                }),
+                ctx_with_working_dir(
+                    tmp.path().to_path_buf(),
+                    vec![PermissionRule::deny_tool("repo_overview")],
+                ),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("denied by permission rule"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn repo_overview_requires_external_directory_permission_for_unsafe_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&external).unwrap();
+
+        let err = RepoOverviewTool
+            .execute(
+                json!({
+                    "path": external.display().to_string()
+                }),
+                ctx_with_working_dir(workspace, vec![PermissionRule::allow_tool("repo_overview")]),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("external_directory"), "got: {err}");
+    }
+
+    fn ctx_with_working_dir(
+        working_dir: PathBuf,
+        rules: crate::permission::Ruleset,
+    ) -> ToolContext {
+        ToolContext {
+            working_dir,
+            ..ctx(rules)
+        }
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -104,6 +104,132 @@ pub fn load_commands(root: &Path, config: Option<&Config>) -> anyhow::Result<Vec
     }
 
     Ok(commands.into_values().collect())
+}
+
+pub async fn load_commands_with_mcp_prompts(
+    root: &Path,
+    config: Option<&Config>,
+    mcp_manager: Option<&crate::mcp::McpManager>,
+) -> anyhow::Result<Vec<CommandInfo>> {
+    let mut commands = load_commands(root, config)?
+        .into_iter()
+        .map(|command| (command.name.clone(), command))
+        .collect::<BTreeMap<_, _>>();
+
+    if let Some(manager) = mcp_manager {
+        let prompts = manager.list_all_prompts().await;
+        let mut prompt_entries = prompts.into_iter().collect::<Vec<_>>();
+        prompt_entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (name, prompt) in prompt_entries {
+            if let Some(command) = mcp_prompt_command(manager, &name, &prompt).await {
+                insert_command(&mut commands, command);
+            }
+        }
+    }
+
+    for command in load_skill_commands(root).await? {
+        commands.entry(command.name.clone()).or_insert(command);
+    }
+
+    Ok(commands.into_values().collect())
+}
+
+async fn load_skill_commands(root: &Path) -> anyhow::Result<Vec<CommandInfo>> {
+    let service = crate::skill::SkillService::new();
+    service.discover(&root.to_path_buf()).await?;
+    let mut skills = service.all().await;
+    skills.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(skills
+        .into_iter()
+        .map(|skill| CommandInfo {
+            name: skill.name,
+            description: skill.description,
+            agent: None,
+            model: None,
+            source: Some("skill".to_string()),
+            template: skill.content,
+            subtask: None,
+            hints: Vec::new(),
+        })
+        .collect())
+}
+
+async fn mcp_prompt_command(
+    manager: &crate::mcp::McpManager,
+    command_name: &str,
+    prompt: &serde_json::Value,
+) -> Option<CommandInfo> {
+    let client = prompt.get("client")?.as_str()?;
+    let prompt_name = prompt.get("name")?.as_str()?;
+    let args = mcp_prompt_placeholder_args(prompt);
+    let template = manager
+        .get_prompt(client, prompt_name, Some(args))
+        .await
+        .ok()
+        .flatten()
+        .map(|prompt| mcp_prompt_template(&prompt))
+        .unwrap_or_default();
+    Some(mcp_prompt_command_info(command_name, prompt, template))
+}
+
+fn mcp_prompt_command_info(
+    command_name: &str,
+    prompt: &serde_json::Value,
+    template: String,
+) -> CommandInfo {
+    let description = prompt
+        .get("description")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    let hints = prompt
+        .get("arguments")
+        .and_then(|arguments| arguments.as_array())
+        .map(|arguments| {
+            (1..=arguments.len())
+                .map(|index| format!("${index}"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    CommandInfo {
+        name: command_name.to_string(),
+        description,
+        agent: None,
+        model: None,
+        source: Some("mcp".to_string()),
+        template,
+        subtask: None,
+        hints,
+    }
+}
+
+fn mcp_prompt_placeholder_args(prompt: &serde_json::Value) -> HashMap<String, String> {
+    prompt
+        .get("arguments")
+        .and_then(|arguments| arguments.as_array())
+        .map(|arguments| {
+            arguments
+                .iter()
+                .enumerate()
+                .filter_map(|(index, argument)| {
+                    let name = argument.get("name")?.as_str()?;
+                    Some((name.to_string(), format!("${}", index + 1)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn mcp_prompt_template(prompt: &rmcp::model::GetPromptResult) -> String {
+    prompt
+        .messages
+        .iter()
+        .filter_map(|message| match &message.content {
+            rmcp::model::PromptMessageContent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn render_template(template: &str, arguments: &str) -> String {
@@ -433,5 +559,72 @@ mod tests {
         assert_eq!(audit.description.as_deref(), Some("Audit changed files"));
         assert_eq!(audit.agent.as_deref(), Some("reviewer"));
         assert_eq!(audit.template, "Audit $ARGUMENTS");
+    }
+
+    #[test]
+    fn mcp_prompt_command_uses_upstream_keys_and_argument_hints() {
+        let prompt = serde_json::json!({
+            "client": "design tools",
+            "name": "review",
+            "description": "Review with external context",
+            "arguments": [
+                { "name": "target" },
+                { "name": "depth" }
+            ]
+        });
+        let args = super::mcp_prompt_placeholder_args(&prompt);
+        assert_eq!(args.get("target").map(String::as_str), Some("$1"));
+        assert_eq!(args.get("depth").map(String::as_str), Some("$2"));
+
+        let command = super::mcp_prompt_command_info(
+            "design_tools:review",
+            &prompt,
+            "Review $1 at $2".to_string(),
+        );
+        assert_eq!(command.name, "design_tools:review");
+        assert_eq!(command.source.as_deref(), Some("mcp"));
+        assert_eq!(
+            command.description.as_deref(),
+            Some("Review with external context")
+        );
+        assert_eq!(command.template, "Review $1 at $2");
+        assert_eq!(command.hints, vec!["$1", "$2"]);
+    }
+
+    #[tokio::test]
+    async fn load_commands_with_mcp_prompts_adds_skills_without_overriding_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = temp.path().join(".opencode").join("skills").join("review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: review\ndescription: Skill review\n---\nSkill body\n",
+        )
+        .unwrap();
+        let helper_dir = temp.path().join(".opencode").join("skills").join("helper");
+        std::fs::create_dir_all(&helper_dir).unwrap();
+        std::fs::write(
+            helper_dir.join("SKILL.md"),
+            "---\nname: helper\ndescription: Helper skill\n---\nHelper body\n",
+        )
+        .unwrap();
+
+        let commands = super::load_commands_with_mcp_prompts(temp.path(), None, None)
+            .await
+            .unwrap();
+        let review = commands
+            .iter()
+            .find(|command| command.name == "review")
+            .unwrap();
+        assert_eq!(review.source.as_deref(), Some("command"));
+
+        let helper = commands
+            .iter()
+            .find(|command| command.name == "helper")
+            .unwrap();
+        assert_eq!(helper.source.as_deref(), Some("skill"));
+        assert_eq!(helper.description.as_deref(), Some("Helper skill"));
+        assert_eq!(helper.template, "Helper body");
+        assert!(helper.hints.is_empty());
     }
 }

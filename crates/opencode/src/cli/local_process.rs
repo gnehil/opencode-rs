@@ -211,8 +211,40 @@ jobs:
     )
 }
 
-pub fn attach_select_session_endpoint(base_url: &str, _session_id: &str) -> String {
-    format!("{}/tui/select-session", base_url.trim_end_matches('/'))
+pub fn attach_run_command(
+    base_url: &str,
+    dir: Option<&str>,
+    continue_last: bool,
+    session_id: Option<&str>,
+    fork: bool,
+    password: Option<&str>,
+    username: Option<&str>,
+) -> CommandSpec {
+    let mut args = vec![
+        "run".to_string(),
+        "--interactive".to_string(),
+        "--attach".to_string(),
+        base_url.trim_end_matches('/').to_string(),
+    ];
+    if let Some(dir) = dir.filter(|dir| !dir.is_empty()) {
+        args.extend(["--dir".to_string(), dir.to_string()]);
+    }
+    if continue_last {
+        args.push("--continue".to_string());
+    }
+    if let Some(session_id) = session_id.filter(|session_id| !session_id.is_empty()) {
+        args.extend(["--session".to_string(), session_id.to_string()]);
+    }
+    if fork {
+        args.push("--fork".to_string());
+    }
+    if let Some(password) = password.filter(|password| !password.is_empty()) {
+        args.extend(["--password".to_string(), password.to_string()]);
+    }
+    if let Some(username) = username.filter(|username| !username.is_empty()) {
+        args.extend(["--username".to_string(), username.to_string()]);
+    }
+    CommandSpec::new("opencode", args)
 }
 
 pub fn join_run_message(args: &[String]) -> String {

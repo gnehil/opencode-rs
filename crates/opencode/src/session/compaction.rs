@@ -30,6 +30,17 @@ pub async fn compact_session(
     provider: &Arc<dyn Provider>,
     model_id: &str,
 ) -> Result<()> {
+    compact_session_with_options(store, session_id, provider, provider.name(), model_id, true).await
+}
+
+pub async fn compact_session_with_options(
+    store: &Arc<SessionStore>,
+    session_id: &SessionID,
+    provider: &Arc<dyn Provider>,
+    provider_id: &str,
+    model_id: &str,
+    auto: bool,
+) -> Result<()> {
     // 1. Rebuild the full conversation (already excludes pre-prior-compaction
     //    turns) so the summarizer sees only the live window.
     let history = crate::session::build_completion_messages(store, session_id).await?;
@@ -88,7 +99,7 @@ pub async fn compact_session(
         summary: None,
         agent: "build".to_string(),
         model: crate::message::ModelRef {
-            provider_id: String::new(),
+            provider_id: provider_id.to_string(),
             model_id: model_id.to_string(),
             variant: None,
         },
@@ -97,6 +108,18 @@ pub async fn compact_session(
     };
     store
         .save_message(session_id, &crate::message::Message::User(summary_msg))
+        .await?;
+    store
+        .save_part(&crate::message::Part::Compaction(
+            crate::message::part::CompactionPart {
+                id: crate::id::PartID::new(),
+                session_id: session_id.clone(),
+                message_id: summary_message_id.clone(),
+                auto,
+                overflow: None,
+                tail_start_id: None,
+            },
+        ))
         .await?;
     store
         .save_text_part(

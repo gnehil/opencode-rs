@@ -12,7 +12,7 @@ pub mod summary;
 pub mod time;
 
 pub use crate::storage::SessionRow;
-pub use compaction::compact_session;
+pub use compaction::{compact_session, compact_session_with_options};
 pub use history::build_completion_messages;
 pub use info::SessionInfo;
 pub use model::SessionModel;

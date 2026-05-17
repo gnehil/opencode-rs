@@ -4,7 +4,10 @@ use std::process::Stdio;
 use anyhow::{Context, Result};
 use reqwest::header::HeaderMap;
 use rmcp::handler::client::ClientHandler;
-use rmcp::model::{CallToolRequestParam, ClientInfo, ReadResourceRequestParam, ServerInfo};
+use rmcp::model::{
+    CallToolRequestParam, ClientInfo, GetPromptRequestParam, GetPromptResult, JsonObject, Prompt,
+    ReadResourceRequestParam, ServerInfo,
+};
 use rmcp::service::{Peer, RoleClient, ServiceExt};
 use rmcp::transport::sse::SseTransport;
 use rmcp::transport::TokioChildProcess;
@@ -168,6 +171,32 @@ impl McpClient {
             .context("Failed to list tools from MCP server")?;
 
         Ok(tools.iter().map(McpTool::from_rmcp).collect())
+    }
+
+    pub async fn list_prompts(&self) -> Result<Vec<Prompt>> {
+        self.peer
+            .list_all_prompts()
+            .await
+            .context("Failed to list prompts from MCP server")
+    }
+
+    pub async fn get_prompt(
+        &self,
+        name: &str,
+        args: Option<HashMap<String, String>>,
+    ) -> Result<GetPromptResult> {
+        let arguments = args.map(|args| {
+            args.into_iter()
+                .map(|(key, value)| (key, serde_json::Value::String(value)))
+                .collect::<JsonObject>()
+        });
+        self.peer
+            .get_prompt(GetPromptRequestParam {
+                name: name.to_string(),
+                arguments,
+            })
+            .await
+            .with_context(|| format!("Failed to get prompt '{}' from MCP server", name))
     }
 
     pub async fn call_tool(&self, name: &str, args: serde_json::Value) -> Result<McpToolResult> {

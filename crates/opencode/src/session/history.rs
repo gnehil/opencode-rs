@@ -145,6 +145,7 @@ fn collect_text(parts: &[Part]) -> String {
 fn collect_user_content(parts: &[Part]) -> (String, Vec<String>) {
     let mut chunks = Vec::new();
     let mut images = Vec::new();
+    let has_text = parts.iter().any(|part| matches!(part, Part::Text(_)));
 
     for part in parts {
         match part {
@@ -183,7 +184,8 @@ fn collect_user_content(parts: &[Part]) -> (String, Vec<String>) {
                     task.description, task.agent, task.prompt
                 ));
             }
-            Part::Compaction(_) => chunks.push("What did we do so far?".to_string()),
+            Part::Compaction(_) if !has_text => chunks.push("What did we do so far?".to_string()),
+            Part::Compaction(_) => {}
             _ => {}
         }
     }

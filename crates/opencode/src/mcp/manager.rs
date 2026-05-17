@@ -203,6 +203,66 @@ impl McpManager {
         result
     }
 
+    pub async fn list_all_prompts(&self) -> HashMap<String, serde_json::Value> {
+        let mut result = HashMap::new();
+
+        for (name, client) in &self.clients {
+            match client.list_prompts().await {
+                Ok(prompts) => {
+                    for prompt in prompts {
+                        let key = format!(
+                            "{}:{}",
+                            sanitize_mcp_name(name),
+                            sanitize_mcp_name(&prompt.name)
+                        );
+                        let mut value = serde_json::to_value(&prompt).unwrap_or_else(|_| {
+                            serde_json::json!({
+                                "name": prompt.name,
+                                "description": prompt.description,
+                                "arguments": prompt.arguments,
+                            })
+                        });
+                        if let serde_json::Value::Object(map) = &mut value {
+                            map.insert(
+                                "client".to_string(),
+                                serde_json::Value::String(name.clone()),
+                            );
+                        }
+                        result.insert(key, value);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to list prompts from '{}': {}", name, e);
+                }
+            }
+        }
+
+        result
+    }
+
+    pub async fn get_prompt(
+        &self,
+        client_name: &str,
+        name: &str,
+        args: Option<HashMap<String, String>>,
+    ) -> Result<Option<rmcp::model::GetPromptResult>> {
+        let Some(client) = self.clients.get(client_name) else {
+            warn!("client not found for get_prompt: {}", client_name);
+            return Ok(None);
+        };
+
+        match client.get_prompt(name, args).await {
+            Ok(prompt) => Ok(Some(prompt)),
+            Err(e) => {
+                warn!(
+                    "Failed to get prompt '{}' from '{}': {}",
+                    name, client_name, e
+                );
+                Ok(None)
+            }
+        }
+    }
+
     fn remove_client(&mut self, name: &str) {
         if let Some(_client) = self.clients.remove(name) {
             debug!("Removed MCP client '{}'", name);
@@ -258,6 +318,19 @@ fn is_unauthorized_error(error: &anyhow::Error) -> bool {
     })
 }
 
+fn sanitize_mcp_name(input: &str) -> String {
+    input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +379,29 @@ mod tests {
                 .unwrap(),
             "Bearer token-123"
         );
+    }
+
+    #[tokio::test]
+    async fn prompt_api_handles_empty_manager_and_unknown_client() {
+        let manager = McpManager::new();
+
+        assert!(manager.list_all_prompts().await.is_empty());
+        assert!(manager
+            .get_prompt(
+                "missing",
+                "review",
+                Some(HashMap::from([("topic".to_string(), "auth".to_string(),)]))
+            )
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn sanitize_mcp_name_matches_upstream_mcp_prompt_keys() {
+        assert_eq!(sanitize_mcp_name("design tools"), "design_tools");
+        assert_eq!(sanitize_mcp_name("repo:search"), "repo_search");
+        assert_eq!(sanitize_mcp_name("ok-name_1"), "ok-name_1");
     }
 
     #[tokio::test]

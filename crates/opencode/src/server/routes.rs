@@ -53,6 +53,10 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
             post(session_handlers::init_session),
         )
         .route(
+            "/api/session/:id/summarize",
+            post(session_handlers::summarize_session),
+        )
+        .route(
             "/api/session/:id/revert",
             post(session_handlers::revert_message),
         )
@@ -97,6 +101,10 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/session/:id/todo", get(session_handlers::session_todo))
         .route("/session/:id/diff", get(session_handlers::session_diff))
         .route("/session/:id/init", post(session_handlers::init_session))
+        .route(
+            "/session/:id/summarize",
+            post(session_handlers::summarize_session),
+        )
         .route(
             "/session/:id/revert",
             post(session_handlers::revert_message),
@@ -268,6 +276,54 @@ mod tests {
     async fn send(app: Router, request: Request<Body>) -> axum::response::Response {
         let mut app = app;
         Service::call(&mut app, request).await.unwrap()
+    }
+
+    struct SummaryProvider {
+        seen_model: std::sync::Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for SummaryProvider {
+        fn name(&self) -> &str {
+            "summary-test"
+        }
+
+        async fn complete(
+            &self,
+            request: crate::provider::CompletionRequest,
+        ) -> crate::provider::ProviderResult<crate::provider::CompletionResponse> {
+            *self.seen_model.lock().unwrap() = Some(request.model.to_string());
+            Ok(crate::provider::CompletionResponse {
+                content: "route summary".to_string(),
+                tool_calls: Vec::new(),
+                stop_reason: Some("stop".to_string()),
+                usage: crate::provider::TokenUsage {
+                    input: 1,
+                    output: 1,
+                    cache_read: None,
+                    cache_write: None,
+                },
+                model: "test-model".to_string(),
+                reasoning: None,
+            })
+        }
+
+        fn stream(
+            &self,
+            _request: crate::provider::CompletionRequest,
+        ) -> crate::provider::ProviderResult<crate::provider::EventStream> {
+            Ok(Box::pin(futures::stream::empty::<
+                crate::provider::ProviderResult<crate::provider::StreamEvent>,
+            >()))
+        }
+
+        fn models(&self) -> &[crate::provider::ModelInfo] {
+            &[]
+        }
+
+        fn default_model(&self) -> Option<&crate::provider::ModelInfo> {
+            None
+        }
     }
 
     #[tokio::test]
@@ -1492,6 +1548,198 @@ new file mode 100644
         )
         .await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn session_summarize_routes_exist_and_require_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let state = std::sync::Arc::new(
+            AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
+        );
+        let app = create_router_with_state(state);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/session")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "directory": root }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let created = response_json(response).await;
+        let session_id = created["id"].as_str().unwrap();
+
+        for path in [
+            format!("/session/{session_id}/summarize"),
+            format!("/api/session/{session_id}/summarize"),
+        ] {
+            let response = send(
+                app.clone(),
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "providerID": "missing-test-provider",
+                            "modelID": "claude-sonnet-4-5",
+                            "auto": true
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+
+    #[tokio::test]
+    async fn session_summarize_route_returns_boolean_and_persists_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let provider = std::sync::Arc::new(SummaryProvider {
+            seen_model: std::sync::Mutex::new(None),
+        });
+        let state = std::sync::Arc::new(
+            AppState::new(root.join("data"))
+                .with_workspace_root(root.to_path_buf())
+                .with_provider(provider.clone()),
+        );
+        let app = create_router_with_state(state.clone());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/session")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "directory": root }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let created = response_json(response).await;
+        let session_id = created["id"].as_str().unwrap();
+        let parsed_session_id = crate::id::SessionID::parse(session_id).unwrap();
+
+        let store = state.get_store().await;
+        let message_id = crate::id::MessageID::new();
+        store
+            .save_message(
+                &parsed_session_id,
+                &crate::message::Message::User(crate::message::UserMessage {
+                    id: message_id.clone(),
+                    session_id: parsed_session_id.clone(),
+                    role: "user".to_string(),
+                    time: crate::message::UserTime {
+                        created: chrono::Utc::now().timestamp_millis(),
+                    },
+                    format: None,
+                    summary: None,
+                    agent: "build".to_string(),
+                    model: crate::message::ModelRef {
+                        provider_id: "anthropic".to_string(),
+                        model_id: "claude-sonnet-4-5".to_string(),
+                        variant: None,
+                    },
+                    system: None,
+                    tools: None,
+                }),
+            )
+            .await
+            .unwrap();
+        store
+            .save_text_part(&parsed_session_id, &message_id, "old context")
+            .await
+            .unwrap();
+        store
+            .revert_to_message(&parsed_session_id, &message_id, None)
+            .await
+            .unwrap();
+        assert!(state
+            .get_store()
+            .await
+            .get(&parsed_session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .revert
+            .is_some());
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/session/{session_id}/summarize"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "providerID": "summary-test",
+                        "modelID": "claude-sonnet-4-5",
+                        "auto": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await, serde_json::json!(true));
+        assert_eq!(
+            provider.seen_model.lock().unwrap().as_deref(),
+            Some("claude-sonnet-4-5")
+        );
+
+        let messages = state
+            .get_store()
+            .await
+            .get_messages_with_parts(&parsed_session_id)
+            .await
+            .unwrap();
+        assert!(messages.iter().any(|message| {
+            message.parts.iter().any(|part| match part {
+                crate::message::Part::Text(text) => {
+                    text.text
+                        .contains(crate::session::compaction::COMPACTION_PREFIX)
+                        && text.text.contains("route summary")
+                }
+                _ => false,
+            })
+        }));
+        assert!(messages.iter().any(|message| {
+            matches!(
+                &message.info,
+                crate::message::Message::User(user)
+                    if user.model.provider_id == "summary-test"
+                        && user.model.model_id == "claude-sonnet-4-5"
+            )
+        }));
+        assert!(messages.iter().any(|message| {
+            message.parts.iter().any(|part| {
+                matches!(
+                    part,
+                    crate::message::Part::Compaction(compaction) if !compaction.auto
+                )
+            })
+        }));
+        assert!(state
+            .get_store()
+            .await
+            .get(&parsed_session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .revert
+            .is_none());
     }
 
     #[tokio::test]
