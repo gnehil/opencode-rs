@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -25,6 +26,40 @@ pub async fn global_config(State(_state): State<Arc<AppState>>) -> Json<serde_js
 
 pub async fn global_dispose(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(json!({ "success": true }))
+}
+
+#[derive(Deserialize)]
+pub struct GlobalUpgradeBody {
+    target: Option<String>,
+}
+
+pub async fn global_upgrade(
+    State(_state): State<Arc<AppState>>,
+    body: Option<Json<GlobalUpgradeBody>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let target = body
+        .and_then(|Json(body)| body.target)
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+        .trim_start_matches('v')
+        .to_string();
+
+    if target == env!("CARGO_PKG_VERSION") || target == "latest" {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "version": env!("CARGO_PKG_VERSION"),
+            })),
+        );
+    }
+
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({
+            "success": false,
+            "error": "HTTP upgrade execution is not available in this local Rust build",
+        })),
+    )
 }
 
 pub async fn set_auth(

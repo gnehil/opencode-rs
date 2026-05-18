@@ -1,13 +1,16 @@
 pub mod agent_handlers;
 pub mod config_handlers;
 pub mod event_handlers;
+pub mod experimental_handlers;
 pub mod file_handlers;
 pub mod global_handlers;
 pub mod instance_handlers;
 pub mod mcp_handlers;
 pub mod message_handlers;
 pub mod permission_handlers;
+pub mod project_handlers;
 pub mod pty_handlers;
 pub mod session_handlers;
 pub mod tui_handlers;
+pub mod v2_handlers;
 pub mod workspace_handlers;

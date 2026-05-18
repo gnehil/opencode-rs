@@ -7,9 +7,10 @@ use axum::{
 
 use crate::server::handlers::session_handlers::AppState;
 use crate::server::handlers::{
-    agent_handlers, config_handlers, event_handlers, file_handlers, global_handlers,
-    instance_handlers, mcp_handlers, message_handlers, permission_handlers, pty_handlers,
-    session_handlers, tui_handlers, workspace_handlers,
+    agent_handlers, config_handlers, event_handlers, experimental_handlers, file_handlers,
+    global_handlers, instance_handlers, mcp_handlers, message_handlers, permission_handlers,
+    project_handlers, pty_handlers, session_handlers, tui_handlers, v2_handlers,
+    workspace_handlers,
 };
 use crate::server::middleware::cors_layer;
 
@@ -23,12 +24,14 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(|| async { "OK" }))
         .route("/global/health", get(global_handlers::health))
+        .route("/global/event", get(event_handlers::sse_events))
         .route("/global/config", get(global_handlers::global_config))
         .route("/global/dispose", post(global_handlers::global_dispose))
+        .route("/global/upgrade", post(global_handlers::global_upgrade))
         .route("/auth/:provider", put(global_handlers::set_auth))
         .route("/auth/:provider", delete(global_handlers::remove_auth))
         .route("/log", post(global_handlers::log_entry))
-        .route("/api/session", get(session_handlers::list_sessions))
+        .route("/api/session", get(v2_handlers::list_sessions_v2))
         .route("/api/session", post(session_handlers::create_session))
         .route("/api/session/status", get(session_handlers::session_status))
         .route("/api/session/:id", get(session_handlers::get_session))
@@ -72,7 +75,20 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
             "/api/session/:id/messages",
             get(message_handlers::list_messages),
         )
+        .route(
+            "/api/session/:id/message",
+            get(v2_handlers::session_messages_v2),
+        )
         .route("/api/session/:id/prompt", post(message_handlers::prompt))
+        .route(
+            "/api/session/:id/compact",
+            post(v2_handlers::session_compact_v2),
+        )
+        .route("/api/session/:id/wait", post(v2_handlers::session_wait_v2))
+        .route(
+            "/api/session/:id/context",
+            get(v2_handlers::session_context_v2),
+        )
         .route(
             "/api/session/:id/prompt_async",
             post(message_handlers::prompt_async),
@@ -140,8 +156,20 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/event", get(event_handlers::sse_events))
         .route("/config", get(config_handlers::get_config))
         .route("/config", patch(config_handlers::update_config))
-        .route("/config/providers", get(config_handlers::list_providers))
+        .route("/config/providers", get(config_handlers::config_providers))
         .route("/provider", get(config_handlers::list_providers))
+        .route(
+            "/provider/auth",
+            get(config_handlers::provider_auth_methods),
+        )
+        .route(
+            "/provider/:provider_id/oauth/authorize",
+            post(config_handlers::provider_oauth_authorize),
+        )
+        .route(
+            "/provider/:provider_id/oauth/callback",
+            post(config_handlers::provider_oauth_callback),
+        )
         .route("/file", get(file_handlers::list_files))
         .route("/file/content", get(file_handlers::read_file))
         .route("/file/status", get(file_handlers::git_status))
@@ -200,6 +228,18 @@ pub fn create_router_with_state(app_state: std::sync::Arc<AppState>) -> Router {
         .route("/skill", get(instance_handlers::skill_list))
         .route("/formatter", get(instance_handlers::formatter_status))
         .route("/path", get(instance_handlers::path_info))
+        .route("/project", get(project_handlers::project_list))
+        .route("/project/current", get(project_handlers::project_current))
+        .route(
+            "/project/git/init",
+            post(project_handlers::project_init_git),
+        )
+        .route("/project/:id", patch(project_handlers::project_update))
+        .route("/experimental/tool", get(experimental_handlers::tool_list))
+        .route(
+            "/experimental/tool/ids",
+            get(experimental_handlers::tool_ids),
+        )
         .route("/permission", get(permission_handlers::list_permissions))
         .route(
             "/permission/:request_id/reply",
@@ -944,6 +984,640 @@ new file mode 100644
                 && skill["location"].as_str().unwrap().ends_with("SKILL.md")
                 && skill["content"] == "Use local context."
         }));
+    }
+
+    #[tokio::test]
+    async fn v2_session_routes_match_opencode_httpapi_shapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let state = std::sync::Arc::new(
+            AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
+        );
+        let app = create_router_with_state(state.clone());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/session")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "title": "V2 parity", "project_id": "project-a" })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let created = response_json(response).await;
+        let session_id = created["id"].as_str().unwrap().to_string();
+        let parsed_session_id = crate::id::SessionID::parse(&session_id).unwrap();
+        let store = state.get_store().await;
+        let first_message_id = crate::id::MessageID::new();
+        store
+            .save_message(
+                &parsed_session_id,
+                &crate::message::Message::User(crate::message::UserMessage {
+                    id: first_message_id.clone(),
+                    session_id: parsed_session_id.clone(),
+                    role: "user".to_string(),
+                    time: crate::message::UserTime { created: 1 },
+                    format: None,
+                    summary: None,
+                    agent: "build".to_string(),
+                    model: crate::message::ModelRef {
+                        provider_id: "openai".to_string(),
+                        model_id: "gpt-4.1".to_string(),
+                        variant: None,
+                    },
+                    system: None,
+                    tools: None,
+                }),
+            )
+            .await
+            .unwrap();
+        store
+            .save_text_part(&parsed_session_id, &first_message_id, "before compaction")
+            .await
+            .unwrap();
+
+        let compaction_message_id = crate::id::MessageID::new();
+        store
+            .save_message(
+                &parsed_session_id,
+                &crate::message::Message::User(crate::message::UserMessage {
+                    id: compaction_message_id.clone(),
+                    session_id: parsed_session_id.clone(),
+                    role: "user".to_string(),
+                    time: crate::message::UserTime { created: 2 },
+                    format: None,
+                    summary: None,
+                    agent: "build".to_string(),
+                    model: crate::message::ModelRef {
+                        provider_id: "openai".to_string(),
+                        model_id: "gpt-4.1".to_string(),
+                        variant: None,
+                    },
+                    system: None,
+                    tools: None,
+                }),
+            )
+            .await
+            .unwrap();
+        store
+            .save_part(&crate::message::Part::Compaction(
+                crate::message::part::CompactionPart {
+                    id: crate::id::PartID::new(),
+                    session_id: parsed_session_id.clone(),
+                    message_id: compaction_message_id.clone(),
+                    auto: false,
+                    overflow: None,
+                    tail_start_id: None,
+                },
+            ))
+            .await
+            .unwrap();
+        store
+            .save_text_part(
+                &parsed_session_id,
+                &compaction_message_id,
+                "[Conversation summary — prior turns compacted]\n\nsummary text",
+            )
+            .await
+            .unwrap();
+        store
+            .set_time_compacting(&parsed_session_id, 2)
+            .await
+            .unwrap();
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/api/session?limit=10&order=asc")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let sessions = response_json(response).await;
+        assert!(sessions["items"].as_array().unwrap().iter().any(|item| {
+            item["id"] == session_id
+                && item["projectID"] == "project-a"
+                && item["title"] == "V2 parity"
+                && item["time"]["created"].as_i64().is_some()
+        }));
+        assert!(sessions["cursor"].is_object());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/api/session/{session_id}/message?order=asc&limit=10"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let messages = response_json(response).await;
+        assert!(messages["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| { item["type"] == "user" && item["text"] == "before compaction" }));
+        assert!(messages["items"].as_array().unwrap().iter().any(|item| {
+            item["type"] == "compaction"
+                && item["reason"] == "manual"
+                && item["summary"] == "summary text"
+        }));
+        assert!(messages["cursor"].is_object());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/session/{session_id}/context"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let context = response_json(response).await;
+        assert_eq!(context.as_array().unwrap()[0]["type"], "compaction");
+        assert!(!context
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| { item["type"] == "user" && item["text"] == "before compaction" }));
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/session/{session_id}/wait"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/session/{session_id}/compact"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn project_and_experimental_routes_match_opencode_httpapi_shapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let root_canonical = root.canonicalize().unwrap();
+        let state = std::sync::Arc::new(
+            AppState::new(root.join("data")).with_workspace_root(root.to_path_buf()),
+        );
+        let app = create_router_with_state(state);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/project/current")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let current = response_json(response).await;
+        assert_eq!(current["id"], "global");
+        assert_eq!(
+            current["worktree"],
+            root_canonical.to_string_lossy().as_ref()
+        );
+        assert_eq!(current["sandboxes"], serde_json::json!([]));
+        assert!(current["time"]["created"].as_i64().is_some());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/project")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response_json(response)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| { item["id"] == "global" }));
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri("/project/global")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "Local Project",
+                        "icon": { "color": "#abcdef" },
+                        "commands": { "start": "cargo test" }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let updated = response_json(response).await;
+        assert_eq!(updated["name"], "Local Project");
+        assert_eq!(updated["icon"]["color"], "#abcdef");
+        assert_eq!(updated["commands"]["start"], "cargo test");
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/project/git/init")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let initialized = response_json(response).await;
+        assert_eq!(initialized["vcs"], "git");
+        assert!(root.join(".git").exists());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/experimental/tool/ids")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let ids = response_json(response).await;
+        assert!(ids.as_array().unwrap().iter().any(|id| id == "bash"));
+        assert!(ids.as_array().unwrap().iter().any(|id| id == "read"));
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("GET")
+                .uri("/experimental/tool?provider=openai&model=gpt-4.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let tools = response_json(response).await;
+        let bash = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["id"] == "bash")
+            .unwrap();
+        assert!(bash["description"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()));
+        assert_eq!(bash["parameters"]["type"], "object");
+    }
+
+    #[tokio::test]
+    async fn provider_and_config_routes_match_opencode_httpapi_shapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let data_dir = root.join("data");
+        crate::auth::AuthStore::new(data_dir.clone())
+            .set("openai", crate::auth::AuthInfo::api("sk-test"))
+            .await
+            .unwrap();
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "model": "openai/gpt-4o",
+            "enabled_providers": ["openai", "local-openai"],
+            "provider": {
+                "local-openai": {
+                    "api": "openai",
+                    "name": "Local OpenAI",
+                    "options": {
+                        "baseURL": "http://127.0.0.1:11434/v1"
+                    },
+                    "models": {
+                        "local-small": {
+                            "id": "gpt-local",
+                            "name": "Local Small",
+                            "attachment": true
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let state = std::sync::Arc::new(
+            AppState::new(data_dir)
+                .with_workspace_root(root.to_path_buf())
+                .with_config_defaults(&config),
+        );
+        let app = create_router_with_state(state);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let config_json = response_json(response).await;
+        assert_eq!(config_json["model"], "openai/gpt-4o");
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri("/config")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "model": "local-openai/local-small" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let updated = response_json(response).await;
+        assert_eq!(updated["model"], "local-openai/local-small");
+        assert!(updated.get("success").is_none());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/provider")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let providers = response_json(response).await;
+        assert!(providers["all"].as_array().unwrap().iter().any(|item| {
+            item["id"] == "openai" && item["models"].as_object().unwrap().contains_key("gpt-4o")
+        }));
+        let local = providers["all"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == "local-openai")
+            .unwrap();
+        assert_eq!(local["source"], "config");
+        assert_eq!(local["models"]["local-small"]["name"], "Local Small");
+        assert_eq!(local["models"]["local-small"]["providerID"], "local-openai");
+        assert_eq!(providers["default"]["local-openai"], "local-small");
+        assert!(providers["connected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == "openai"));
+        assert!(providers["connected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == "local-openai"));
+        assert!(!providers["all"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "anthropic"));
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/config/providers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let configured = response_json(response).await;
+        assert!(configured["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| { item["id"] == "local-openai" }));
+        assert_eq!(configured["default"]["local-openai"], "local-small");
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/provider/auth")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let auth = response_json(response).await;
+        assert_eq!(auth["openai"][0]["type"], "api");
+        assert_eq!(auth["azure"][0]["type"], "api");
+        assert!(auth.get("github-copilot").is_none());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/provider/openai/oauth/authorize")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "method": 0, "inputs": {} }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response_json(response).await.is_null());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/provider/openai/oauth/authorize")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "method": 1, "inputs": {} }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri("/provider/openai/oauth/callback")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "method": 1 }).to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn global_event_and_upgrade_routes_match_opencode_httpapi_shapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = std::sync::Arc::new(
+            AppState::new(tmp.path().join("data")).with_workspace_root(tmp.path().to_path_buf()),
+        );
+        let app = create_router_with_state(state);
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/global/event")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap(),
+            "text/event-stream"
+        );
+        assert_eq!(
+            response.headers()["cache-control"],
+            "no-cache, no-transform"
+        );
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri("/global/upgrade")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({}).to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let upgraded = response_json(response).await;
+        assert_eq!(upgraded["success"], true);
+        assert_eq!(upgraded["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn v2_compact_route_uses_configured_provider_when_available() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let provider = std::sync::Arc::new(SummaryProvider {
+            seen_model: std::sync::Mutex::new(None),
+        });
+        let config = crate::config::Config {
+            model: Some("summary-test/compact-model".to_string()),
+            ..Default::default()
+        };
+        let state = std::sync::Arc::new(
+            AppState::new(root.join("data"))
+                .with_workspace_root(root.to_path_buf())
+                .with_provider(provider.clone())
+                .with_config_defaults(&config),
+        );
+        let app = create_router_with_state(state.clone());
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/session")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "directory": root }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let created = response_json(response).await;
+        let session_id = created["id"].as_str().unwrap().to_string();
+        let parsed_session_id = crate::id::SessionID::parse(&session_id).unwrap();
+
+        let store = state.get_store().await;
+        let message_id = crate::id::MessageID::new();
+        store
+            .save_message(
+                &parsed_session_id,
+                &crate::message::Message::User(crate::message::UserMessage {
+                    id: message_id.clone(),
+                    session_id: parsed_session_id.clone(),
+                    role: "user".to_string(),
+                    time: crate::message::UserTime { created: 1 },
+                    format: None,
+                    summary: None,
+                    agent: "build".to_string(),
+                    model: crate::message::ModelRef {
+                        provider_id: "summary-test".to_string(),
+                        model_id: "compact-model".to_string(),
+                        variant: None,
+                    },
+                    system: None,
+                    tools: None,
+                }),
+            )
+            .await
+            .unwrap();
+        store
+            .save_text_part(&parsed_session_id, &message_id, "compact this context")
+            .await
+            .unwrap();
+
+        let response = send(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/session/{session_id}/compact"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            provider.seen_model.lock().unwrap().as_deref(),
+            Some("compact-model")
+        );
+
+        let response = send(
+            app,
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/session/{session_id}/context"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let context = response_json(response).await;
+        assert_eq!(context.as_array().unwrap()[0]["type"], "compaction");
+        assert_eq!(context.as_array().unwrap()[0]["summary"], "route summary");
     }
 
     #[tokio::test]

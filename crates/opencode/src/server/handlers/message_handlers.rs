@@ -821,7 +821,10 @@ async fn run_prompt_turn(
         .with_bus(state.event_bus.clone())
         .with_permission_broker(state.permission_broker.clone())
         .with_plugin_manager(state.plugin_manager.clone())
-        .with_tools(crate::tool::registry_with(mcp_tools))
+        .with_tools(crate::tool::registry_with_options(
+            crate::tool::RegistryOptions::from_config_and_env(state.config.as_ref()),
+            mcp_tools,
+        ))
         .with_agent(agent_name);
     if let Some(config) = state.config.clone() {
         processor = processor.with_config(config);
